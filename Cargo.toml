@@ -1,0 +1,24 @@
+[package]
+name = "codecosmos"
+version = "0.1.0"
+edition = "2021"
+description = "A terminal mood dashboard for your codebase"
+license = "MIT"
+repository = "https://github.com/yourusername/codecosmos"
+keywords = ["tui", "git", "dashboard", "cli"]
+categories = ["command-line-utilities", "development-tools"]
+
+[dependencies]
+ratatui = "0.29"
+crossterm = "0.28"
+git2 = "0.19"
+walkdir = "2"
+regex = "1"
+chrono = "0.4"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+
+[[bin]]
+name = "codecosmos"
+path = "src/main.rs"
+
