@@ -1,11 +1,14 @@
 mod analysis;
 mod history;
+mod prompt;
 mod score;
+mod spinner;
 mod ui;
 
 use analysis::{
     AuthorAnalyzer, ComplexityAnalyzer, GitAnalyzer, StalenessAnalyzer, TestAnalyzer, TodoScanner,
 };
+use prompt::PromptBuilder;
 use anyhow::Result;
 use clap::Parser;
 use crossterm::{
@@ -149,11 +152,7 @@ fn run() -> Result<bool> {
     let args = Args::parse();
     let path = args.path.canonicalize()?;
 
-    // Analyze the repository
-    if !args.json {
-        eprintln!(":: Analyzing repository...");
-    }
-
+    // Analyze the repository with animated progress
     let git_analyzer = GitAnalyzer::new(&path)?;
     let staleness_analyzer = StalenessAnalyzer::new(&path)?;
     let todo_scanner = TodoScanner::new();
@@ -163,37 +162,65 @@ fn run() -> Result<bool> {
     let repo_name = git_analyzer.repo_name();
     let branch_name = git_analyzer.current_branch()?;
 
-    if !args.json {
-        eprintln!("   → churn");
-    }
+    // Use animated spinner for analysis phase
+    let use_spinner = !args.json && !args.check;
+    let mut spin = if use_spinner {
+        spinner::print_analysis_header(&repo_name);
+        let s = spinner::Spinner::new(spinner::SpinnerStyle::Circle)
+            .with_message("analyzing churn...");
+        s.start();
+        Some(s)
+    } else {
+        if !args.json {
+            eprintln!(":: Analyzing repository...");
+            eprintln!("   → churn");
+        }
+        None
+    };
+
     let churn_entries = git_analyzer.analyze_churn(args.days)?;
     let commits_recent = git_analyzer.commit_count(args.days)?;
 
-    if !args.json {
+    if let Some(ref mut s) = spin {
+        s.set_message("analyzing complexity...");
+        s.tick();
+    } else if !args.json {
         eprintln!("   → complexity");
     }
     let complexity_entries = complexity_analyzer.analyze(&path)?;
     let (total_loc, avg_complexity, max_complexity) =
         complexity_analyzer.aggregate_stats(&complexity_entries);
 
-    if !args.json {
+    if let Some(ref mut s) = spin {
+        s.set_message("finding danger zones...");
+        s.tick();
+    } else if !args.json {
         eprintln!("   → danger zones");
     }
     let danger_zones =
         complexity_analyzer.find_danger_zones(&churn_entries, &complexity_entries, 20);
 
-    if !args.json {
+    if let Some(ref mut s) = spin {
+        s.set_message("checking staleness...");
+        s.tick();
+    } else if !args.json {
         eprintln!("   → staleness");
     }
     let dusty_files = staleness_analyzer.find_dusty_files(args.stale_days)?;
     let total_files = staleness_analyzer.total_file_count()?;
 
-    if !args.json {
+    if let Some(ref mut s) = spin {
+        s.set_message("scanning debt markers...");
+        s.tick();
+    } else if !args.json {
         eprintln!("   → debt markers");
     }
     let todo_entries = todo_scanner.scan(&path)?;
 
-    if !args.json {
+    if let Some(ref mut s) = spin {
+        s.set_message("analyzing test coverage...");
+        s.tick();
+    } else if !args.json {
         eprintln!("   → test coverage");
     }
     let test_coverages = test_analyzer.analyze(&path)?;
@@ -202,7 +229,10 @@ fn run() -> Result<bool> {
 
     // Bus factor analysis (optional, can be slow on large repos)
     let (bus_factor_risks, author_stats) = if !args.skip_authors {
-        if !args.json {
+        if let Some(ref mut s) = spin {
+            s.set_message("analyzing bus factor...");
+            s.tick();
+        } else if !args.json {
             eprintln!("   → bus factor");
         }
         let author_analyzer = AuthorAnalyzer::new(&path)?;
@@ -213,6 +243,11 @@ fn run() -> Result<bool> {
     } else {
         (Vec::new(), None)
     };
+
+    // Finish spinner
+    if let Some(s) = spin {
+        s.finish_with_message("analysis complete");
+    }
 
     // Calculate metrics and score
     let metrics = RepoMetrics::from_analysis(
@@ -320,16 +355,15 @@ fn run() -> Result<bool> {
         return Ok(passes_threshold);
     }
 
-    if !args.json {
-        eprintln!("   → done\n");
-    }
-
     // Set up terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
+
+    // Create prompt builder for clipboard support
+    let prompt_builder = PromptBuilder::new();
 
     // Create app with all data
     let mut app = App::new(
@@ -343,7 +377,9 @@ fn run() -> Result<bool> {
         danger_zones,
     )
     .with_tests(test_coverages, test_summary)
-    .with_history(history_entries);
+    .with_history(history_entries)
+    .with_complexity(complexity_entries)
+    .with_prompt_builder(prompt_builder);
 
     // Add bus factor data if available
     if let Some(stats) = author_stats {
@@ -370,6 +406,9 @@ fn run() -> Result<bool> {
 
 fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()> {
     loop {
+        // Clear expired toasts
+        app.clear_expired_toast();
+        
         terminal.draw(|f| ui::render(f, app))?;
 
         if let Event::Key(key) = event::read()? {
@@ -391,10 +430,39 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()> 
 
             // Handle overlay mode
             if app.overlay != Overlay::None {
-                match key.code {
-                    KeyCode::Esc | KeyCode::Char('q') => app.close_overlay(),
-                    KeyCode::Char('?') => app.toggle_help(),
-                    _ => {}
+                match &app.overlay {
+                    Overlay::ActionMenu => {
+                        match key.code {
+                            KeyCode::Esc | KeyCode::Char('q') => app.close_overlay(),
+                            KeyCode::Char('p') => {
+                                app.close_overlay();
+                                app.generate_prompt_for_selected();
+                            }
+                            KeyCode::Char('P') => {
+                                app.close_overlay();
+                                app.generate_batch_prompt();
+                            }
+                            KeyCode::Char('c') => {
+                                app.close_overlay();
+                                app.copy_file_path();
+                            }
+                            _ => {}
+                        }
+                    }
+                    Overlay::PromptCopied(_) => {
+                        match key.code {
+                            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => app.close_overlay(),
+                            _ => {}
+                        }
+                    }
+                    Overlay::Help => {
+                        match key.code {
+                            KeyCode::Esc | KeyCode::Char('q') => app.close_overlay(),
+                            KeyCode::Char('?') => app.toggle_help(),
+                            _ => {}
+                        }
+                    }
+                    Overlay::None => {}
                 }
                 continue;
             }
@@ -427,7 +495,11 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()> 
                 }
                 KeyCode::Char('/') => app.start_search(),
                 KeyCode::Char('?') => app.toggle_help(),
-                KeyCode::Enter => app.toggle_file_detail(),
+                KeyCode::Enter => app.show_action_menu(),
+                // Prompt builder shortcuts
+                KeyCode::Char('p') => app.generate_prompt_for_selected(),
+                KeyCode::Char('P') => app.generate_batch_prompt(),
+                KeyCode::Char('c') => app.copy_file_path(),
                 _ => {}
             }
         }

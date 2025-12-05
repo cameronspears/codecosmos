@@ -5,7 +5,7 @@ pub mod scanner;
 pub mod staleness;
 pub mod tests;
 
-pub use authors::{AuthorAnalyzer, AuthorStats, BusFactorRisk, FileAuthorship};
+pub use authors::{AuthorAnalyzer, AuthorStats, BusFactorRisk};
 pub use complexity::{ComplexityAnalyzer, DangerZone, FileComplexity};
 pub use git::{ChurnEntry, GitAnalyzer};
 pub use scanner::{TodoEntry, TodoKind, TodoScanner};

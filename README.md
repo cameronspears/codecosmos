@@ -32,11 +32,13 @@ A sophisticated terminal health dashboard for your codebase. Get an instant heal
 
 - **Health Score (0-100)** with letter grades and trend tracking
 - **6 Analysis Panels**: Danger Zones, Hotspots, Dusty Files, TODOs, Bus Factor, Test Coverage
+- **🆕 AI Prompt Builder** - Generate contextual prompts for AI coding assistants (copy to clipboard)
+- **🆕 Action Menu** - Quick actions for each file with context-aware suggestions
+- **🆕 Animated Analysis** - Beautiful unicode spinners during repository scanning
 - **Greyscale TUI** with sophisticated typography
 - **Score Breakdown** visual bars for each component
 - **Trend Sparkline** showing score history over time
 - **Search/Filter** across all panels
-- **File Detail View** with comprehensive info
 - **Bus Factor Analysis** identifying single-author risks
 - **Test Coverage Detection** correlating source and test files
 - **CI/CD Ready** with JSON output and threshold checks
@@ -95,10 +97,48 @@ codecosmos --days 7 --stale-days 60
 | `u` / `PgUp` | Page up |
 | `g` / `G` | Go to top/bottom |
 | `/` | Search/filter |
-| `Enter` | View file details |
+| `Enter` | Open action menu |
+| `p` | **Generate AI prompt** (copy to clipboard) |
+| `P` | **Batch prompt** for top 10 items in panel |
+| `c` | Copy file path to clipboard |
 | `?` | Toggle help |
 | `Esc` | Close overlay/cancel |
 | `q` | Quit |
+
+## AI Prompt Builder
+
+The killer feature: press `p` on any file to generate a rich, contextual prompt for your AI coding assistant.
+
+**What gets included:**
+- File path and issue type (danger zone, missing tests, etc.)
+- All relevant metrics (complexity, churn, LOC, function count)
+- Bus factor / ownership information
+- Test coverage status
+- Specific, actionable task description
+- Guidelines tailored to the issue
+
+**Example generated prompt:**
+```markdown
+## 🔥 DANGER ZONE - src/api/user-preferences/route.ts
+
+### Issue Summary
+This file is a **danger zone** - it's both frequently changed and complex.
+- Danger Score: **85/100**
+- Changes in analysis window: **5×**
+- Complexity Score: **12.7**
+
+### File Metrics
+- Lines of code: 287
+- Functions: 4
+- Longest function: 89 lines
+- Primary author: cameron (94%)
+- Test coverage: ✗ **NO TESTS**
+
+### Task
+Please help me refactor this file to reduce its complexity...
+```
+
+Press `P` to generate a batch prompt for all items in the current panel—perfect for tackling multiple issues at once.
 
 ## Health Score
 
@@ -164,14 +204,34 @@ Correlates source files with their test files using naming conventions:
 
 Shows overall coverage percentage and warns about untested danger zones.
 
-## File Detail View
+## Action Menu
 
-Press `Enter` on any file to see comprehensive details:
-- Change count and last modified date
-- Complexity score and danger zone status
-- Primary author and ownership percentage
-- Test coverage status and associated test files
-- Actionable recommendations
+Press `Enter` on any file to open the action menu:
+
+```
+╭─ ACTIONS ──────────────────────────────────────────────────────╮
+│  p  Generate AI prompt (copy to clipboard)                     │
+│  c  Copy file path                                             │
+│  P  Generate batch prompt (top 10 in panel)                    │
+╰────────────────────────────────────────────────────────────────╯
+
+╭─ METRICS ──────────────────────────────────────────────────────╮
+│  Lines: 287  │  Functions: 4  │  Max fn: 89 lines              │
+│  Churn: 5× in 14 days                                          │
+│  Danger: 85/100  │  Complexity: 12.7                           │
+│  Primary: cameron (94%)                                        │
+│  Tests: ✗ No tests                                             │
+╰────────────────────────────────────────────────────────────────╯
+
+╭─ SUGGESTION ───────────────────────────────────────────────────╮
+│  High priority: Add tests, then refactor for lower complexity  │
+╰────────────────────────────────────────────────────────────────╯
+```
+
+The action menu provides:
+- Quick keyboard shortcuts for common actions
+- Aggregated metrics from all analyzers
+- Context-aware suggestions based on the file's issues
 
 ## CI Integration
 

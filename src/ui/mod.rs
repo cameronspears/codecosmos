@@ -2,11 +2,13 @@ pub mod panels;
 pub mod theme;
 
 use crate::analysis::{
-    AuthorStats, BusFactorRisk, ChurnEntry, DangerZone, DustyFile, TestCoverage, TestSummary,
-    TodoEntry,
+    AuthorStats, BusFactorRisk, ChurnEntry, DangerZone, DustyFile, FileComplexity, TestCoverage,
+    TestSummary, TodoEntry,
 };
 use crate::history::HistoryEntry;
+use crate::prompt::{FileContext, IssueType, PromptBuilder};
 use crate::score::{HealthScore, RepoMetrics, Trend};
+use std::time::Instant;
 use panels::Panel;
 use theme::{sparkline, Theme};
 use ratatui::{
@@ -59,12 +61,32 @@ impl ActivePanel {
 }
 
 /// UI overlay state
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Overlay {
     #[default]
     None,
     Help,
-    FileDetail,
+    ActionMenu,
+    PromptCopied(String), // Contains a preview of the copied prompt
+}
+
+/// Toast notification
+pub struct Toast {
+    pub message: String,
+    pub created_at: Instant,
+}
+
+impl Toast {
+    pub fn new(message: &str) -> Self {
+        Self {
+            message: message.to_string(),
+            created_at: Instant::now(),
+        }
+    }
+
+    pub fn is_expired(&self) -> bool {
+        self.created_at.elapsed().as_secs() >= 3
+    }
 }
 
 /// Main application state
@@ -81,6 +103,7 @@ pub struct App {
     pub author_stats: Option<AuthorStats>,
     pub test_coverages: Vec<TestCoverage>,
     pub test_summary: Option<TestSummary>,
+    pub complexity_entries: Vec<FileComplexity>,
     pub history_entries: Vec<HistoryEntry>,
     pub active_panel: ActivePanel,
     pub scroll_offset: usize,
@@ -89,6 +112,8 @@ pub struct App {
     pub search_active: bool,
     pub overlay: Overlay,
     pub selected_file_index: Option<usize>,
+    pub prompt_builder: Option<PromptBuilder>,
+    pub toast: Option<Toast>,
 }
 
 impl App {
@@ -116,6 +141,7 @@ impl App {
             author_stats: None,
             test_coverages: Vec::new(),
             test_summary: None,
+            complexity_entries: Vec::new(),
             history_entries: Vec::new(),
             active_panel: ActivePanel::default(),
             scroll_offset: 0,
@@ -124,6 +150,8 @@ impl App {
             search_active: false,
             overlay: Overlay::None,
             selected_file_index: Some(0),
+            prompt_builder: None,
+            toast: None,
         }
     }
 
@@ -141,6 +169,16 @@ impl App {
 
     pub fn with_history(mut self, entries: Vec<HistoryEntry>) -> Self {
         self.history_entries = entries;
+        self
+    }
+
+    pub fn with_complexity(mut self, entries: Vec<FileComplexity>) -> Self {
+        self.complexity_entries = entries;
+        self
+    }
+
+    pub fn with_prompt_builder(mut self, builder: PromptBuilder) -> Self {
+        self.prompt_builder = Some(builder);
         self
     }
 
@@ -214,15 +252,224 @@ impl App {
         };
     }
 
-    pub fn toggle_file_detail(&mut self) {
+    pub fn show_action_menu(&mut self) {
         self.overlay = match self.overlay {
-            Overlay::FileDetail => Overlay::None,
-            _ => Overlay::FileDetail,
+            Overlay::ActionMenu => Overlay::None,
+            _ => Overlay::ActionMenu,
         };
     }
 
     pub fn close_overlay(&mut self) {
         self.overlay = Overlay::None;
+    }
+
+    /// Build a FileContext for the currently selected file with FULL context
+    fn build_file_context(&self) -> Option<FileContext> {
+        let path = self.selected_file_path()?;
+        let mut ctx = FileContext::new(&path);
+
+        // Add data from each source
+        if let Some(dz) = self.danger_zones.iter().find(|d| d.path == path) {
+            ctx = ctx.with_danger_zone(dz);
+        }
+        if let Some(churn) = self.churn_entries.iter().find(|c| c.path == path) {
+            ctx = ctx.with_churn(churn);
+        }
+        if let Some(fc) = self.complexity_entries.iter().find(|c| c.path == path) {
+            ctx = ctx.with_complexity(fc);
+        }
+        if let Some(df) = self.dusty_files.iter().find(|d| d.path == path) {
+            ctx = ctx.with_dusty(df);
+        }
+        if let Some(bf) = self.bus_factor_risks.iter().find(|b| b.path == path) {
+            ctx = ctx.with_bus_factor(bf);
+        }
+        if let Some(tc) = self.test_coverages.iter().find(|t| t.path == path) {
+            ctx = ctx.with_test_coverage(tc);
+        }
+
+        // Add TODOs from this file
+        ctx = ctx.with_todos_from_list(&self.todo_entries);
+
+        // Set issue type based on active panel if not already set
+        if ctx.issue_type.is_none() {
+            ctx.issue_type = Some(match self.active_panel {
+                ActivePanel::DangerZones => IssueType::DangerZone,
+                ActivePanel::Hotspots => IssueType::HighChurn,
+                ActivePanel::DustyFiles => IssueType::DustyFile,
+                ActivePanel::Todos => IssueType::TodoItem,
+                ActivePanel::BusFactor => IssueType::BusFactorRisk,
+                ActivePanel::Tests => IssueType::MissingTests,
+            });
+        }
+
+        // Load the actual file content - THIS IS THE KEY!
+        ctx.load_file_content();
+
+        Some(ctx)
+    }
+
+    /// Generate AI prompt for the selected file and copy to clipboard
+    pub fn generate_prompt_for_selected(&mut self) {
+        if let Some(ctx) = self.build_file_context() {
+            if let Some(ref mut builder) = self.prompt_builder {
+                match builder.generate_and_copy(&ctx) {
+                    Ok(prompt) => {
+                        // Show first few lines as preview
+                        let preview: String = prompt.lines().take(5).collect::<Vec<_>>().join("\n");
+                        self.overlay = Overlay::PromptCopied(preview);
+                    }
+                    Err(e) => {
+                        self.toast = Some(Toast::new(&format!("Error: {}", e)));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Generate batch prompt for current panel - with FULL file content!
+    pub fn generate_batch_prompt(&mut self) {
+        let mut contexts: Vec<FileContext> = match self.active_panel {
+            ActivePanel::DangerZones => self
+                .danger_zones
+                .iter()
+                .take(5) // Limit to 5 for batch to keep prompt manageable
+                .map(|dz| {
+                    let mut ctx = FileContext::new(&dz.path).with_danger_zone(dz);
+                    // Enrich with other data
+                    if let Some(fc) = self.complexity_entries.iter().find(|c| c.path == dz.path) {
+                        ctx = ctx.with_complexity(fc);
+                    }
+                    if let Some(tc) = self.test_coverages.iter().find(|t| t.path == dz.path) {
+                        ctx = ctx.with_test_coverage(tc);
+                    }
+                    if let Some(bf) = self.bus_factor_risks.iter().find(|b| b.path == dz.path) {
+                        ctx = ctx.with_bus_factor(bf);
+                    }
+                    ctx = ctx.with_todos_from_list(&self.todo_entries);
+                    ctx
+                })
+                .collect(),
+            ActivePanel::Hotspots => self
+                .churn_entries
+                .iter()
+                .take(5)
+                .map(|c| {
+                    let mut ctx = FileContext::new(&c.path).with_churn(c);
+                    if let Some(fc) = self.complexity_entries.iter().find(|x| x.path == c.path) {
+                        ctx = ctx.with_complexity(fc);
+                    }
+                    ctx = ctx.with_todos_from_list(&self.todo_entries);
+                    ctx
+                })
+                .collect(),
+            ActivePanel::DustyFiles => self
+                .dusty_files
+                .iter()
+                .take(5)
+                .map(|d| {
+                    let mut ctx = FileContext::new(&d.path).with_dusty(d);
+                    ctx = ctx.with_todos_from_list(&self.todo_entries);
+                    ctx
+                })
+                .collect(),
+            ActivePanel::BusFactor => self
+                .bus_factor_risks
+                .iter()
+                .take(5)
+                .map(|b| {
+                    let mut ctx = FileContext::new(&b.path).with_bus_factor(b);
+                    if let Some(tc) = self.test_coverages.iter().find(|t| t.path == b.path) {
+                        ctx = ctx.with_test_coverage(tc);
+                    }
+                    ctx = ctx.with_todos_from_list(&self.todo_entries);
+                    ctx
+                })
+                .collect(),
+            ActivePanel::Tests => self
+                .test_coverages
+                .iter()
+                .filter(|t| !t.has_tests)
+                .take(5)
+                .map(|t| {
+                    let mut ctx = FileContext::new(&t.path).with_test_coverage(t);
+                    if let Some(fc) = self.complexity_entries.iter().find(|c| c.path == t.path) {
+                        ctx = ctx.with_complexity(fc);
+                    }
+                    ctx = ctx.with_todos_from_list(&self.todo_entries);
+                    ctx
+                })
+                .collect(),
+            ActivePanel::Todos => self
+                .todo_entries
+                .iter()
+                .take(5)
+                .map(|t| {
+                    let ctx = FileContext::new(&t.path)
+                        .with_todo(t)
+                        .with_todos_from_list(&self.todo_entries);
+                    ctx
+                })
+                .collect(),
+        };
+
+        if contexts.is_empty() {
+            self.toast = Some(Toast::new("No items to generate prompt for"));
+            return;
+        }
+
+        // Load file content for each context!
+        for ctx in &mut contexts {
+            ctx.load_file_content();
+        }
+
+        let panel_name = match self.active_panel {
+            ActivePanel::DangerZones => "Danger Zones",
+            ActivePanel::Hotspots => "Hotspots",
+            ActivePanel::DustyFiles => "Dusty Files",
+            ActivePanel::Todos => "TODOs",
+            ActivePanel::BusFactor => "Bus Factor",
+            ActivePanel::Tests => "Missing Tests",
+        };
+
+        let prompt = crate::prompt::generate_batch_prompt(&contexts, panel_name);
+
+        if let Some(ref mut builder) = self.prompt_builder {
+            match builder.copy_to_clipboard(&prompt) {
+                Ok(_) => {
+                    let preview: String = prompt.lines().take(8).collect::<Vec<_>>().join("\n");
+                    self.overlay = Overlay::PromptCopied(preview);
+                }
+                Err(e) => {
+                    self.toast = Some(Toast::new(&format!("Error: {}", e)));
+                }
+            }
+        }
+    }
+
+    /// Copy the selected file path to clipboard
+    pub fn copy_file_path(&mut self) {
+        if let Some(path) = self.selected_file_path() {
+            if let Some(ref mut builder) = self.prompt_builder {
+                match builder.copy_to_clipboard(&path) {
+                    Ok(_) => {
+                        self.toast = Some(Toast::new(&format!("Copied: {}", path)));
+                    }
+                    Err(e) => {
+                        self.toast = Some(Toast::new(&format!("Error: {}", e)));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Clear expired toast
+    pub fn clear_expired_toast(&mut self) {
+        if let Some(ref toast) = self.toast {
+            if toast.is_expired() {
+                self.toast = None;
+            }
+        }
     }
 
     pub fn start_search(&mut self) {
@@ -326,10 +573,16 @@ pub fn render(frame: &mut Frame, app: &App) {
     render_status_bar(frame, chunks[3], app);
 
     // Render overlay if active
-    match app.overlay {
+    match &app.overlay {
         Overlay::Help => render_help_overlay(frame, app),
-        Overlay::FileDetail => render_file_detail_overlay(frame, app),
+        Overlay::ActionMenu => render_action_menu_overlay(frame, app),
+        Overlay::PromptCopied(preview) => render_prompt_copied_overlay(frame, preview),
         Overlay::None => {}
+    }
+
+    // Render toast if present
+    if let Some(toast) = &app.toast {
+        render_toast(frame, toast);
     }
 }
 
@@ -598,11 +851,14 @@ fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
             Span::styled(" 1-6", Theme::key()),
             Span::styled(" panel ", Theme::text_dim()),
             Span::styled(Theme::DOT_SEPARATOR.to_string(), Theme::text_dim()),
-            Span::styled(" /", Theme::key()),
-            Span::styled(" search ", Theme::text_dim()),
+            Span::styled(" p", Theme::key()),
+            Span::styled(" prompt ", Theme::text_dim()),
+            Span::styled(Theme::DOT_SEPARATOR.to_string(), Theme::text_dim()),
+            Span::styled(" P", Theme::key()),
+            Span::styled(" batch ", Theme::text_dim()),
             Span::styled(Theme::DOT_SEPARATOR.to_string(), Theme::text_dim()),
             Span::styled(" ↵", Theme::key()),
-            Span::styled(" detail ", Theme::text_dim()),
+            Span::styled(" actions ", Theme::text_dim()),
             Span::styled(Theme::DOT_SEPARATOR.to_string(), Theme::text_dim()),
             Span::styled(" ?", Theme::key()),
             Span::styled(" help", Theme::text_dim()),
@@ -656,7 +912,19 @@ fn render_help_overlay(frame: &mut Frame, _app: &App) {
         Line::from(""),
         Line::from(vec![
             Span::styled("  Enter    ", Theme::key()),
-            Span::styled("View file details", Theme::text()),
+            Span::styled("Open action menu", Theme::text()),
+        ]),
+        Line::from(vec![
+            Span::styled("  p        ", Theme::key()),
+            Span::styled("Generate AI prompt (clipboard)", Theme::text()),
+        ]),
+        Line::from(vec![
+            Span::styled("  P        ", Theme::key()),
+            Span::styled("Batch prompt (top 10)", Theme::text()),
+        ]),
+        Line::from(vec![
+            Span::styled("  c        ", Theme::key()),
+            Span::styled("Copy file path", Theme::text()),
         ]),
         Line::from(vec![
             Span::styled("  /        ", Theme::key()),
@@ -717,8 +985,8 @@ fn render_help_overlay(frame: &mut Frame, _app: &App) {
     frame.render_widget(help, area);
 }
 
-fn render_file_detail_overlay(frame: &mut Frame, app: &App) {
-    let area = centered_rect(70, 60, frame.area());
+fn render_action_menu_overlay(frame: &mut Frame, app: &App) {
+    let area = centered_rect(70, 70, frame.area());
 
     // Clear the area first
     frame.render_widget(Clear, area);
@@ -731,6 +999,7 @@ fn render_file_detail_overlay(frame: &mut Frame, app: &App) {
     let dusty_info = app.dusty_files.iter().find(|d| d.path == path);
     let bus_info = app.bus_factor_risks.iter().find(|b| b.path == path);
     let test_info = app.test_coverages.iter().find(|t| t.path == path);
+    let complexity_info = app.complexity_entries.iter().find(|c| c.path == path);
 
     let mut lines = vec![
         Line::from(""),
@@ -741,98 +1010,199 @@ fn render_file_detail_overlay(frame: &mut Frame, app: &App) {
         Line::from(""),
     ];
 
-    // Churn info
+    // Status badges
+    let mut badges = Vec::new();
+    if danger_info.is_some() {
+        badges.push(Span::styled(" ▓▓ DANGER ", Style::default().fg(Theme::WHITE).add_modifier(Modifier::BOLD)));
+    }
+    if test_info.map_or(false, |t| !t.has_tests) {
+        badges.push(Span::styled(" ○ NO TESTS ", Theme::danger_high()));
+    }
+    if bus_info.is_some() {
+        badges.push(Span::styled(" ◐ BUS RISK ", Theme::text_muted()));
+    }
+    if !badges.is_empty() {
+        let mut badge_line = vec![Span::styled("  ", Style::default())];
+        badge_line.extend(badges);
+        lines.push(Line::from(badge_line));
+        lines.push(Line::from(""));
+    }
+
+    // Actions section - the star of the show
+    lines.push(Line::from(vec![
+        Span::styled("  ╭─ ", Style::default().fg(Theme::GREY_500)),
+        Span::styled("ACTIONS", Theme::bold()),
+        Span::styled(" ─────────────────────────────────────────────────────╮", Style::default().fg(Theme::GREY_500)),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("  │  ", Style::default().fg(Theme::GREY_500)),
+        Span::styled("p", Theme::key()),
+        Span::styled("  Generate AI prompt (copy to clipboard)                │", Theme::text()),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("  │  ", Style::default().fg(Theme::GREY_500)),
+        Span::styled("c", Theme::key()),
+        Span::styled("  Copy file path                                        │", Theme::text()),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("  │  ", Style::default().fg(Theme::GREY_500)),
+        Span::styled("P", Theme::key()),
+        Span::styled("  Generate batch prompt (top 10 in panel)               │", Theme::text()),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("  ╰───────────────────────────────────────────────────────────╯", Style::default().fg(Theme::GREY_500)),
+    ]));
+    lines.push(Line::from(""));
+
+    // Metrics section
+    lines.push(Line::from(vec![
+        Span::styled("  ╭─ ", Style::default().fg(Theme::GREY_500)),
+        Span::styled("METRICS", Theme::text_muted()),
+        Span::styled(" ─────────────────────────────────────────────────────╮", Style::default().fg(Theme::GREY_500)),
+    ]));
+
+    if let Some(c) = complexity_info {
+        lines.push(Line::from(vec![
+            Span::styled("  │  ", Style::default().fg(Theme::GREY_500)),
+            Span::styled(format!("Lines: {:4}  │  Functions: {:3}  │  Max fn: {:3} lines", c.loc, c.function_count, c.max_function_length), Theme::text_dim()),
+            Span::styled("    │", Style::default().fg(Theme::GREY_500)),
+        ]));
+    } else if let Some(dusty) = dusty_info {
+        lines.push(Line::from(vec![
+            Span::styled("  │  ", Style::default().fg(Theme::GREY_500)),
+            Span::styled(format!("Lines: {:4}  │  Untouched: {} days", dusty.line_count, dusty.days_since_change), Theme::text_dim()),
+            Span::styled("                    │", Style::default().fg(Theme::GREY_500)),
+        ]));
+    }
+
     if let Some(churn) = churn_info {
         lines.push(Line::from(vec![
-            Span::styled("  changes      ", Theme::text_dim()),
-            Span::styled(format!("{} in analysis window", churn.change_count), Theme::text()),
-        ]));
-        lines.push(Line::from(vec![
-            Span::styled("  last changed ", Theme::text_dim()),
-            Span::styled(format!("{} days ago", churn.days_active), Theme::text()),
+            Span::styled("  │  ", Style::default().fg(Theme::GREY_500)),
+            Span::styled(format!("Churn: {}× in {} days", churn.change_count, churn.days_active), Theme::text_dim()),
+            Span::styled("                                      │", Style::default().fg(Theme::GREY_500)),
         ]));
     }
 
-    // Danger zone info
     if let Some(danger) = danger_info {
-        lines.push(Line::from(""));
         lines.push(Line::from(vec![
-            Span::styled("  ▓▓ DANGER ZONE", Theme::danger_critical()),
-        ]));
-        lines.push(Line::from(vec![
-            Span::styled("  complexity   ", Theme::text_dim()),
-            Span::styled(format!("{:.1}", danger.complexity_score), Theme::text()),
-        ]));
-        lines.push(Line::from(vec![
-            Span::styled("  reason       ", Theme::text_dim()),
-            Span::styled(&danger.reason, Theme::text()),
+            Span::styled("  │  ", Style::default().fg(Theme::GREY_500)),
+            Span::styled(format!("Danger: {:.0}/100  │  Complexity: {:.1}", danger.danger_score, danger.complexity_score), Theme::text_dim()),
+            Span::styled("                    │", Style::default().fg(Theme::GREY_500)),
         ]));
     }
 
-    // Dusty info
-    if let Some(dusty) = dusty_info {
-        lines.push(Line::from(""));
-        lines.push(Line::from(vec![
-            Span::styled("  untouched    ", Theme::text_dim()),
-            Span::styled(format!("{} days", dusty.days_since_change), Theme::text()),
-        ]));
-        lines.push(Line::from(vec![
-            Span::styled("  lines        ", Theme::text_dim()),
-            Span::styled(format!("{}", dusty.line_count), Theme::text()),
-        ]));
-    }
-
-    // Bus factor info
     if let Some(bus) = bus_info {
-        lines.push(Line::from(""));
         lines.push(Line::from(vec![
-            Span::styled("  ░░ BUS FACTOR RISK", Theme::danger_high()),
-        ]));
-        lines.push(Line::from(vec![
-            Span::styled("  primary      ", Theme::text_dim()),
-            Span::styled(
-                format!("{} ({:.0}%)", bus.primary_author, bus.primary_author_pct),
-                Theme::text(),
-            ),
-        ]));
-        lines.push(Line::from(vec![
-            Span::styled("  risk         ", Theme::text_dim()),
-            Span::styled(&bus.risk_reason, Theme::text()),
+            Span::styled("  │  ", Style::default().fg(Theme::GREY_500)),
+            Span::styled(format!("Primary: {} ({:.0}%)", bus.primary_author, bus.primary_author_pct), Theme::text_dim()),
+            Span::styled("                                │", Style::default().fg(Theme::GREY_500)),
         ]));
     }
 
-    // Test info
     if let Some(test) = test_info {
+        let status = if test.has_tests { "✓ Tested" } else { "✗ No tests" };
+        lines.push(Line::from(vec![
+            Span::styled("  │  ", Style::default().fg(Theme::GREY_500)),
+            Span::styled(format!("Tests: {}", status), if test.has_tests { Theme::text_dim() } else { Theme::danger_high() }),
+            Span::styled("                                             │", Style::default().fg(Theme::GREY_500)),
+        ]));
+    }
+
+    lines.push(Line::from(vec![
+        Span::styled("  ╰───────────────────────────────────────────────────────────╯", Style::default().fg(Theme::GREY_500)),
+    ]));
+
+    // Suggestion based on context
+    if danger_info.is_some() || test_info.map_or(false, |t| !t.has_tests) {
         lines.push(Line::from(""));
-        let test_status = if test.has_tests {
-            if test.inline_tests {
-                "has inline tests"
-            } else {
-                "has test file(s)"
-            }
+        lines.push(Line::from(vec![
+            Span::styled("  ╭─ ", Style::default().fg(Theme::GREY_500)),
+            Span::styled("SUGGESTION", Theme::text_muted()),
+            Span::styled(" ──────────────────────────────────────────────────╮", Style::default().fg(Theme::GREY_500)),
+        ]));
+        
+        let suggestion = if danger_info.is_some() && test_info.map_or(false, |t| !t.has_tests) {
+            "High priority: Add tests, then refactor for lower complexity"
+        } else if danger_info.is_some() {
+            "Split long functions, extract helpers, reduce nesting"
+        } else if test_info.map_or(false, |t| !t.has_tests) {
+            "Add unit tests to enable safe refactoring"
         } else {
-            "NO TESTS"
+            "Review and update if needed"
+        };
+        
+        lines.push(Line::from(vec![
+            Span::styled("  │  ", Style::default().fg(Theme::GREY_500)),
+            Span::styled(suggestion, Theme::text()),
+            Span::styled(" │", Style::default().fg(Theme::GREY_500)),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("  ╰───────────────────────────────────────────────────────────╯", Style::default().fg(Theme::GREY_500)),
+        ]));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("  Press ", Theme::text_dim()),
+        Span::styled("p", Theme::key()),
+        Span::styled(" to generate prompt · ", Theme::text_dim()),
+        Span::styled("Esc", Theme::key()),
+        Span::styled(" to close", Theme::text_dim()),
+    ]));
+
+    let detail = Paragraph::new(lines).block(
+        Block::default()
+            .title(Span::styled(" ▸ actions ", Theme::title()))
+            .borders(Borders::ALL)
+            .border_style(Theme::border_active())
+            .style(Style::default().bg(Theme::GREY_800)),
+    );
+
+    frame.render_widget(detail, area);
+}
+
+fn render_prompt_copied_overlay(frame: &mut Frame, preview: &str) {
+    let area = centered_rect(60, 50, frame.area());
+
+    // Clear the area first
+    frame.render_widget(Clear, area);
+
+    let mut lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  ✓ ", Style::default().fg(Theme::WHITE)),
+            Span::styled("PROMPT COPIED TO CLIPBOARD", Theme::bold()),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  Paste into your AI assistant to get started.", Theme::text_muted()),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  ╭─ Preview ──────────────────────────────────────────╮", Style::default().fg(Theme::GREY_500)),
+        ]),
+    ];
+
+    // Show preview lines
+    for line in preview.lines().take(8) {
+        let truncated = if line.len() > 52 {
+            format!("{}...", &line[..49])
+        } else {
+            line.to_string()
         };
         lines.push(Line::from(vec![
-            Span::styled("  test status  ", Theme::text_dim()),
-            Span::styled(
-                test_status,
-                if test.has_tests {
-                    Theme::text()
-                } else {
-                    Theme::danger_critical()
-                },
-            ),
+            Span::styled("  │ ", Style::default().fg(Theme::GREY_500)),
+            Span::styled(truncated, Theme::text_dim()),
         ]));
-        if !test.test_files.is_empty() {
-            for tf in &test.test_files {
-                lines.push(Line::from(vec![
-                    Span::styled("               ", Theme::text_dim()),
-                    Span::styled(tf, Theme::text_muted()),
-                ]));
-            }
-        }
     }
+
+    lines.push(Line::from(vec![
+        Span::styled("  │ ", Style::default().fg(Theme::GREY_500)),
+        Span::styled("...", Theme::text_dim()),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("  ╰─────────────────────────────────────────────────────╯", Style::default().fg(Theme::GREY_500)),
+    ]));
 
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
@@ -841,15 +1211,37 @@ fn render_file_detail_overlay(frame: &mut Frame, app: &App) {
         Span::styled(" to close", Theme::text_dim()),
     ]));
 
-    let detail = Paragraph::new(lines).block(
+    let overlay = Paragraph::new(lines).block(
         Block::default()
-            .title(Span::styled(" file detail ", Theme::title()))
+            .title(Span::styled(" ✓ copied ", Theme::title()))
             .borders(Borders::ALL)
-            .border_style(Theme::border_active())
+            .border_style(Style::default().fg(Theme::WHITE))
             .style(Style::default().bg(Theme::GREY_800)),
     );
 
-    frame.render_widget(detail, area);
+    frame.render_widget(overlay, area);
+}
+
+fn render_toast(frame: &mut Frame, toast: &Toast) {
+    let area = frame.area();
+    
+    // Position toast at bottom center
+    let toast_width = toast.message.len() as u16 + 6;
+    let toast_area = Rect {
+        x: (area.width.saturating_sub(toast_width)) / 2,
+        y: area.height.saturating_sub(3),
+        width: toast_width.min(area.width),
+        height: 1,
+    };
+
+    let toast_widget = Paragraph::new(Line::from(vec![
+        Span::styled(" ✓ ", Style::default().fg(Theme::WHITE)),
+        Span::styled(&toast.message, Theme::text()),
+        Span::styled(" ", Style::default()),
+    ]))
+    .style(Style::default().bg(Theme::GREY_600));
+
+    frame.render_widget(toast_widget, toast_area);
 }
 
 /// Create a centered rectangle

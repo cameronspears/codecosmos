@@ -186,6 +186,55 @@ impl Theme {
     pub const RISK_HIGH: &'static str = "▓░";
     pub const RISK_MEDIUM: &'static str = "░░";
     pub const RISK_LOW: &'static str = "  ";
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Animation characters
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// Spinner frames - braille pattern (smooth)
+    pub const SPINNER_BRAILLE: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+    /// Spinner frames - circular (elegant)
+    pub const SPINNER_CIRCLE: [char; 4] = ['◐', '◓', '◑', '◒'];
+
+    /// Spinner frames - dots growing
+    pub const SPINNER_DOTS: [&'static str; 4] = ["·  ", "·· ", "···", "   "];
+
+    /// Pulsing indicator frames
+    pub const PULSE_FRAMES: [&'static str; 4] = ["◉ ", "◎ ", "○ ", "◎ "];
+
+    /// Progress fill characters (fine-grained)
+    pub const PROGRESS_FINE: [char; 9] = [' ', '▏', '▎', '▍', '▌', '▋', '▊', '▉', '█'];
+
+    /// Block elements for animations
+    pub const BLOCKS: [char; 4] = ['░', '▒', '▓', '█'];
+
+    /// Success/status indicators
+    pub const CHECK_MARK: char = '✓';
+    pub const CROSS_MARK: char = '✗';
+    pub const WARNING_MARK: char = '⚠';
+    pub const INFO_MARK: char = 'ℹ';
+
+    /// Action key hints
+    pub const KEY_PROMPT: char = '▸';
+    pub const KEY_HINT_OPEN: char = '⌜';
+    pub const KEY_HINT_CLOSE: char = '⌟';
+
+    /// Box drawing - rounded corners (softer look)
+    pub const BOX_ROUND_TL: char = '╭';
+    pub const BOX_ROUND_TR: char = '╮';
+    pub const BOX_ROUND_BL: char = '╰';
+    pub const BOX_ROUND_BR: char = '╯';
+
+    /// Decorative separators
+    pub const SEPARATOR_THIN: &'static str = "─";
+    pub const SEPARATOR_THICK: &'static str = "━";
+    pub const SEPARATOR_DOUBLE: &'static str = "═";
+    pub const SEPARATOR_DOTTED: &'static str = "┄";
+
+    /// Status badges
+    pub const BADGE_OPEN: &'static str = "⟨";
+    pub const BADGE_CLOSE: &'static str = "⟩";
 }
 
 /// Generate a sparkline string from a series of values
