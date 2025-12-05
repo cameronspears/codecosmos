@@ -28,6 +28,14 @@ impl GitStatus {
     }
 }
 
+/// Count modified files (for status bar display)
+pub fn count_modified_files(repo_path: &Path) -> usize {
+    match current_status(repo_path) {
+        Ok(status) => status.modified.len() + status.staged.len(),
+        Err(_) => 0,
+    }
+}
+
 /// Get the current git status
 pub fn current_status(repo_path: &Path) -> Result<GitStatus> {
     let repo = Repository::open(repo_path)?;

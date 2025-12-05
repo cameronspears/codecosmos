@@ -1,47 +1,49 @@
-//! Greyscale theme for codecosmos
-//! A sophisticated, high-contrast monochrome palette
+//! Cosmos Theme - Monochromatic with cosmic elegance
+//!
+//! A contemplative, high-contrast palette with celestial motifs.
+//! "Where code meets the cosmos"
 
 use ratatui::style::{Color, Modifier, Style};
 
-/// The greyscale color palette
+/// The Cosmos theme - monochromatic with meaning
 pub struct Theme;
 
 impl Theme {
-    // ─────────────────────────────────────────────────────────────────────
-    // Core greyscale palette - from brightest to darkest
-    // ─────────────────────────────────────────────────────────────────────
+    // ═══════════════════════════════════════════════════════════════════════
+    //  CORE PALETTE - Shades of cosmic grey
+    // ═══════════════════════════════════════════════════════════════════════
 
-    /// Pure white - maximum emphasis, critical alerts
+    /// Starlight white - maximum emphasis, celestial highlights
     pub const WHITE: Color = Color::Rgb(255, 255, 255);
 
-    /// Near white - headers, selected items, primary focus
+    /// Moonlight - headers, selected items, primary focus
     pub const GREY_50: Color = Color::Rgb(250, 250, 250);
 
-    /// Bright grey - primary text, important content
+    /// Dawn grey - primary text, important content
     pub const GREY_100: Color = Color::Rgb(220, 220, 220);
 
-    /// Light grey - secondary text, active elements
+    /// Twilight - secondary text, active elements
     pub const GREY_200: Color = Color::Rgb(180, 180, 180);
 
-    /// Medium grey - muted text, less important info
+    /// Dusk - muted text, less important info
     pub const GREY_300: Color = Color::Rgb(140, 140, 140);
 
-    /// Dark grey - subtle elements, inactive tabs
+    /// Evening - subtle elements, inactive tabs
     pub const GREY_400: Color = Color::Rgb(100, 100, 100);
 
-    /// Darker grey - borders, separators
+    /// Night - borders, separators
     pub const GREY_500: Color = Color::Rgb(70, 70, 70);
 
-    /// Very dark grey - panel backgrounds, subtle borders
+    /// Deep night - panel backgrounds
     pub const GREY_600: Color = Color::Rgb(45, 45, 45);
 
-    /// Near black - main background
-    pub const GREY_800: Color = Color::Rgb(28, 28, 28);
-
-    /// Dark grey - overlay backgrounds
+    /// Void - overlay backgrounds
     pub const GREY_700: Color = Color::Rgb(35, 35, 35);
 
-    /// True black - deepest background
+    /// Abyss - main background
+    pub const GREY_800: Color = Color::Rgb(28, 28, 28);
+
+    /// Deep space - deepest background
     pub const GREY_900: Color = Color::Rgb(18, 18, 18);
 
     /// Background color alias
@@ -251,6 +253,167 @@ impl Theme {
     /// Status badges
     pub const BADGE_OPEN: &'static str = "⟨";
     pub const BADGE_CLOSE: &'static str = "⟩";
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //  COSMIC MOTIFS - Celestial symbols for Cosmos branding
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Moon phases - for progress/state indication
+    pub const MOON_NEW: char = '●';        // New moon (filled circle)
+    pub const MOON_WAXING: char = '◐';     // Waxing moon
+    pub const MOON_FULL: char = '○';       // Full moon (empty circle)
+    pub const MOON_WANING: char = '◑';     // Waning moon
+    pub const MOON_CRESCENT: char = '☽';   // Crescent moon (decorative)
+
+    /// Stars - for highlights and ratings
+    pub const STAR_FILLED: char = '✦';     // Filled star
+    pub const STAR_EMPTY: char = '✧';      // Empty star
+    pub const STAR_SPARKLE: char = '✨';   // Sparkle/suggestion
+    pub const STAR_FOUR: char = '✦';       // Four-pointed star
+    pub const STAR_SIX: char = '✶';        // Six-pointed star
+
+    /// Cosmic decorations
+    pub const CONSTELLATION: &'static str = "· · ·";
+    pub const ORBIT: &'static str = "◌";
+    pub const GALAXY: char = '✴';
+    pub const COMET: &'static str = "━━━★";
+
+    /// Priority indicators (cosmic)
+    pub const PRIORITY_HIGH: char = '●';   // Full moon - attention
+    pub const PRIORITY_MED: char = '◐';    // Half moon - moderate
+    pub const PRIORITY_LOW: char = '○';    // New moon - low
+    pub const PRIORITY_INFO: char = '·';   // Dot - informational
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //  ELEGANT BOX DRAWING - Serif-inspired borders
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Double-line box (for headers)
+    pub const DOUBLE_HORIZONTAL: char = '═';
+    pub const DOUBLE_VERTICAL: char = '║';
+    pub const DOUBLE_TL: char = '╔';
+    pub const DOUBLE_TR: char = '╗';
+    pub const DOUBLE_BL: char = '╚';
+    pub const DOUBLE_BR: char = '╝';
+
+    /// Mixed corners (elegant transition)
+    pub const DOUBLE_SINGLE_TL: char = '╒';
+    pub const DOUBLE_SINGLE_TR: char = '╕';
+    pub const DOUBLE_SINGLE_BL: char = '╘';
+    pub const DOUBLE_SINGLE_BR: char = '╛';
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //  COSMOS UI STRINGS
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// The Cosmos header/branding
+    pub const COSMOS_HEADER: &'static str = "☽ C O S M O S ✦";
+    pub const COSMOS_TAGLINE: &'static str = "a contemplative companion for your codebase";
+
+    /// Section headers
+    pub const SECTION_PROJECT: &'static str = "PROJECT";
+    pub const SECTION_SUGGESTIONS: &'static str = "SUGGESTIONS";
+    pub const SECTION_CONTEXT: &'static str = "CONTEXT";
+
+    /// Tree drawing characters
+    pub const TREE_BRANCH: &'static str = "├── ";
+    pub const TREE_LAST: &'static str = "└── ";
+    pub const TREE_PIPE: &'static str = "│   ";
+    pub const TREE_SPACE: &'static str = "    ";
+    pub const TREE_FOLDER_OPEN: char = '▾';
+    pub const TREE_FOLDER_CLOSED: char = '▸';
+    pub const TREE_FILE: char = '·';
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //  STYLE BUILDERS
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Style for the cosmos header
+    pub fn cosmos_header() -> Style {
+        Style::default()
+            .fg(Self::WHITE)
+            .add_modifier(Modifier::BOLD)
+    }
+
+    /// Style for suggestions based on priority
+    pub fn suggestion_style(priority: char) -> Style {
+        match priority {
+            '●' => Style::default().fg(Self::WHITE).add_modifier(Modifier::BOLD),
+            '◐' => Style::default().fg(Self::GREY_200),
+            '○' => Style::default().fg(Self::GREY_400),
+            _ => Style::default().fg(Self::GREY_500),
+        }
+    }
+
+    /// Style for file tree items
+    pub fn tree_item(is_dir: bool, has_suggestions: bool) -> Style {
+        if has_suggestions {
+            Style::default().fg(Self::GREY_100)
+        } else if is_dir {
+            Style::default().fg(Self::GREY_300)
+        } else {
+            Style::default().fg(Self::GREY_400)
+        }
+    }
+
+    /// Style for selected tree item
+    pub fn tree_selected() -> Style {
+        Style::default()
+            .fg(Self::WHITE)
+            .add_modifier(Modifier::BOLD)
+    }
+
+    /// Style for the status bar
+    pub fn status_bar() -> Style {
+        Style::default()
+            .fg(Self::GREY_400)
+            .bg(Self::GREY_800)
+    }
+
+    /// Style for key hints
+    pub fn key_hint() -> Style {
+        Style::default().fg(Self::GREY_500)
+    }
+
+    /// Style for key highlight
+    pub fn key_highlight() -> Style {
+        Style::default().fg(Self::GREY_200)
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  COSMIC UTILITIES
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Generate a constellation line (decorative separator)
+pub fn constellation_line(width: usize) -> String {
+    let pattern = "· · · ";
+    let repeat = width / pattern.len() + 1;
+    pattern.repeat(repeat)[..width].to_string()
+}
+
+/// Generate stars rating (e.g., ✦✦✦✧✧)
+pub fn star_rating(filled: usize, total: usize) -> String {
+    let mut result = String::new();
+    for i in 0..total {
+        if i < filled {
+            result.push(Theme::STAR_FILLED);
+        } else {
+            result.push(Theme::STAR_EMPTY);
+        }
+    }
+    result
+}
+
+/// Moon phase based on progress (0.0 to 1.0)
+pub fn moon_phase(progress: f64) -> char {
+    match (progress * 4.0) as usize {
+        0 => Theme::MOON_NEW,
+        1 => Theme::MOON_WAXING,
+        2 => Theme::MOON_FULL,
+        3 => Theme::MOON_WANING,
+        _ => Theme::MOON_FULL,
+    }
 }
 
 /// Generate a sparkline string from a series of values

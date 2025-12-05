@@ -1,11 +1,11 @@
 [package]
-name = "codecosmos"
+name = "cosmos"
 version = "0.1.0"
 edition = "2021"
-description = "A terminal health dashboard for your codebase"
+description = "A contemplative vibe coding companion for your codebase"
 license = "MIT"
-repository = "https://github.com/yourusername/codecosmos"
-keywords = ["tui", "git", "dashboard", "cli", "ai"]
+repository = "https://github.com/yourusername/cosmos"
+keywords = ["tui", "git", "ide", "cli", "ai", "vibe-coding"]
 categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
@@ -24,9 +24,18 @@ reqwest = { version = "0.12", features = ["json", "stream"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 futures = "0.3"
 dirs = "5"
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# AST parsing for multi-language support
+tree-sitter = "0.24"
+tree-sitter-rust = "0.23"
+tree-sitter-javascript = "0.23"
+tree-sitter-typescript = "0.23"
+tree-sitter-python = "0.23"
+tree-sitter-go = "0.23"
 
 [[bin]]
-name = "codecosmos"
+name = "cosmos"
 path = "src/main.rs"
 
 
