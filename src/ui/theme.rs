@@ -76,6 +76,28 @@ impl Theme {
     pub const RED: Color = Color::Rgb(230, 120, 120);
 
     // ─────────────────────────────────────────────────────────────────────
+    // Badge colors for categorization
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// Refactor badge color
+    pub const BADGE_REFACTOR: Color = Color::Rgb(180, 140, 255);  // Soft purple
+    
+    /// Quality badge color
+    pub const BADGE_QUALITY: Color = Color::Rgb(100, 180, 255);   // Soft blue
+    
+    /// Security badge color
+    pub const BADGE_SECURITY: Color = Color::Rgb(255, 160, 100);  // Soft orange
+    
+    /// Performance badge color
+    pub const BADGE_PERF: Color = Color::Rgb(130, 220, 180);      // Soft teal
+    
+    /// Documentation badge color
+    pub const BADGE_DOCS: Color = Color::Rgb(255, 200, 100);      // Soft yellow
+    
+    /// Bug badge color
+    pub const BADGE_BUG: Color = Color::Rgb(255, 130, 130);       // Soft red
+
+    // ─────────────────────────────────────────────────────────────────────
     // Pre-built styles for common UI elements
     // ─────────────────────────────────────────────────────────────────────
 
