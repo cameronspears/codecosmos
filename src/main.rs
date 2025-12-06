@@ -8,6 +8,7 @@
 mod cache;
 mod config;
 mod context;
+mod grouping;
 mod index;
 mod suggest;
 mod ui;
@@ -113,6 +114,12 @@ pub enum BackgroundMessage {
         usage: Option<suggest::llm::Usage>,
     },
     RefinedFixError(String),
+    /// AI code review completed
+    ReviewReady(Vec<ui::PRReviewComment>),
+    /// PR created successfully
+    PRCreated(String), // PR URL
+    /// Generic error (used for push/etc)
+    Error(String),
 }
 
 #[tokio::main]
@@ -564,13 +571,23 @@ fn run_loop<B: Backend>(
                     app.loading = LoadingState::None;
                     app.suggestions.mark_applied(suggestion_id);
                     
-                    // Show success with undo hint
+                    // Track as pending change for batch commit
+                    // Generate a simple diff description
+                    let diff = format!("Modified areas: {}", modified_areas.join(", "));
+                    app.add_pending_change(suggestion_id, file_path.clone(), description.clone(), diff);
+                    
+                    // Show success with hint about pending changes
+                    let pending = app.pending_change_count();
                     let areas_str = if modified_areas.is_empty() {
                         String::new()
                     } else {
                         format!(" ({})", modified_areas.join(", "))
                     };
-                    app.show_toast(&format!("✓ {}{}", truncate(&description, 40), areas_str));
+                    if pending > 1 {
+                        app.show_toast(&format!("✓ {}{} · {} pending", truncate(&description, 30), areas_str, pending));
+                    } else {
+                        app.show_toast(&format!("✓ {}{}", truncate(&description, 40), areas_str));
+                    }
                     
                     // Store backup info for potential undo (TODO: implement undo)
                     let _ = backup_path; // Silence unused warning for now
@@ -578,6 +595,16 @@ fn run_loop<B: Backend>(
                 BackgroundMessage::DirectFixError(e) => {
                     app.loading = LoadingState::None;
                     app.show_toast(&format!("Apply failed: {}", truncate(&e, 40)));
+                }
+                BackgroundMessage::ReviewReady(comments) => {
+                    app.set_review_comments(comments);
+                }
+                BackgroundMessage::PRCreated(url) => {
+                    app.set_pr_url(url.clone());
+                    app.show_toast(&format!("PR created: {}", truncate(&url, 35)));
+                }
+                BackgroundMessage::Error(e) => {
+                    app.show_toast(&truncate(&e, 50));
                 }
             }
         }
@@ -901,6 +928,130 @@ fn run_loop<B: Backend>(
                         continue;
                     }
                     
+                    // Handle BranchCreate overlay
+                    if let Overlay::BranchCreate { branch_name, commit_message, pending_files } = &app.overlay {
+                        match key.code {
+                            KeyCode::Esc | KeyCode::Char('q') => app.close_overlay(),
+                            KeyCode::Char('y') => {
+                                // Execute branch creation and commit
+                                let repo_path = app.repo_path.clone();
+                                let branch = branch_name.clone();
+                                let message = commit_message.clone();
+                                let files = pending_files.clone();
+                                
+                                app.close_overlay();
+                                app.show_toast("Creating branch...");
+                                
+                                // Create branch, stage files, commit, and push
+                                match git_ops::create_and_checkout_branch(&repo_path, &branch) {
+                                    Ok(()) => {
+                                        // Stage all pending files
+                                        for file in &files {
+                                            if let Some(rel_path) = file.strip_prefix(&repo_path).ok().and_then(|p| p.to_str()) {
+                                                let _ = git_ops::stage_file(&repo_path, rel_path);
+                                            }
+                                        }
+                                        
+                                        // Commit
+                                        match git_ops::commit(&repo_path, &message) {
+                                            Ok(_) => {
+                                                app.cosmos_branch = Some(branch.clone());
+                                                
+                                                // Try to push (non-blocking)
+                                                let repo_for_push = repo_path.clone();
+                                                let branch_for_push = branch.clone();
+                                                let tx_push = tx.clone();
+                                                tokio::spawn(async move {
+                                                    match git_ops::push_branch(&repo_for_push, &branch_for_push) {
+                                                        Ok(_) => {
+                                                            let _ = tx_push.send(BackgroundMessage::Error("Pushed! Press 'p' for PR".to_string()));
+                                                        }
+                                                        Err(e) => {
+                                                            let _ = tx_push.send(BackgroundMessage::Error(format!("Push failed: {}", e)));
+                                                        }
+                                                    }
+                                                });
+                                                
+                                                app.show_toast("Branch created and committed");
+                                            }
+                                            Err(e) => {
+                                                app.show_toast(&format!("Commit failed: {}", e));
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        app.show_toast(&format!("Branch failed: {}", e));
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
+                    
+                    // Handle PRReview overlay
+                    if let Overlay::PRReview { branch_name, files_changed, reviewing, pr_url, .. } = &app.overlay {
+                        match key.code {
+                            KeyCode::Esc | KeyCode::Char('q') => app.close_overlay(),
+                            KeyCode::Down | KeyCode::Char('j') => app.overlay_scroll_down(),
+                            KeyCode::Up | KeyCode::Char('k') => app.overlay_scroll_up(),
+                            KeyCode::Char('r') => {
+                                if !*reviewing {
+                                    // Start AI review
+                                    let files = files_changed.clone();
+                                    let tx_review = tx.clone();
+                                    
+                                    // Set reviewing state
+                                    if let Overlay::PRReview { reviewing, .. } = &mut app.overlay {
+                                        *reviewing = true;
+                                    }
+                                    
+                                    tokio::spawn(async move {
+                                        match suggest::llm::review_changes(&files).await {
+                                            Ok((comments, _usage)) => {
+                                                let _ = tx_review.send(BackgroundMessage::ReviewReady(comments));
+                                            }
+                                            Err(e) => {
+                                                let _ = tx_review.send(BackgroundMessage::Error(e.to_string()));
+                                            }
+                                        }
+                                    });
+                                }
+                            }
+                            KeyCode::Char('c') => {
+                                // Create PR
+                                if pr_url.is_none() {
+                                    let repo_path = app.repo_path.clone();
+                                    let branch = branch_name.clone();
+                                    let tx_pr = tx.clone();
+                                    
+                                    app.show_toast("Creating PR...");
+                                    
+                                    tokio::spawn(async move {
+                                        let title = format!("Cosmos: {}", branch);
+                                        let body = "Changes applied via Cosmos code companion.";
+                                        match git_ops::create_pr(&repo_path, &title, body) {
+                                            Ok(url) => {
+                                                let _ = tx_pr.send(BackgroundMessage::PRCreated(url));
+                                            }
+                                            Err(e) => {
+                                                let _ = tx_pr.send(BackgroundMessage::Error(e.to_string()));
+                                            }
+                                        }
+                                    });
+                                }
+                            }
+                            KeyCode::Char('o') => {
+                                // Open PR in browser
+                                if let Some(url) = pr_url {
+                                    let _ = git_ops::open_url(url);
+                                }
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
+                    
                     // Handle other overlays
                     match key.code {
                         KeyCode::Esc | KeyCode::Char('q') => app.close_overlay(),
@@ -975,6 +1126,21 @@ fn run_loop<B: Backend>(
                     }
                     KeyCode::Char('/') => app.start_search(),
                     KeyCode::Char('s') => app.cycle_sort(),
+                    KeyCode::Char('g') => app.toggle_view_mode(),
+                    KeyCode::Char(' ') => app.toggle_group_expand(),  // Space to expand/collapse
+                    KeyCode::Char('C') => app.collapse_all(),  // Shift+C to collapse all
+                    KeyCode::Char('E') => app.expand_all(),    // Shift+E to expand all
+                    // Number keys 1-8 jump to layers
+                    KeyCode::Char('1') => app.jump_to_layer(1),
+                    KeyCode::Char('2') => app.jump_to_layer(2),
+                    KeyCode::Char('3') => app.jump_to_layer(3),
+                    KeyCode::Char('4') => app.jump_to_layer(4),
+                    KeyCode::Char('5') => app.jump_to_layer(5),
+                    KeyCode::Char('6') => app.jump_to_layer(6),
+                    KeyCode::Char('7') => app.jump_to_layer(7),
+                    KeyCode::Char('8') => app.jump_to_layer(8),
+                    KeyCode::PageDown => app.page_down(),
+                    KeyCode::PageUp => app.page_up(),
                     KeyCode::Char('?') => app.toggle_help(),
                     KeyCode::Char('d') => app.dismiss_selected(),
                     KeyCode::Char('a') => {
@@ -1015,6 +1181,14 @@ fn run_loop<B: Backend>(
                         } else {
                             app.show_toast("Inquiry coming soon...");
                         }
+                    }
+                    KeyCode::Char('b') => {
+                        // Branch workflow - create branch and commit pending changes
+                        app.show_branch_dialog();
+                    }
+                    KeyCode::Char('p') => {
+                        // PR workflow - show PR review panel
+                        app.show_pr_review();
                     }
                     KeyCode::Char('r') => {
                         if let Err(e) = app.context.refresh() {

@@ -410,6 +410,12 @@ pub struct FileIndex {
     /// File summary for quick reference
     #[serde(default)]
     pub summary: FileSummary,
+    /// Architectural layer (populated by grouping module)
+    #[serde(default)]
+    pub layer: Option<crate::grouping::Layer>,
+    /// Feature name within the layer (populated by grouping module)
+    #[serde(default)]
+    pub feature: Option<String>,
 }
 
 impl FileIndex {
@@ -581,6 +587,8 @@ impl CodebaseIndex {
             complexity,
             last_modified: modified,
             summary: FileSummary::default(),
+            layer: None,
+            feature: None,
         };
         
         // Generate summary (rel_path will be set properly after insertion)
@@ -652,6 +660,23 @@ impl CodebaseIndex {
             tree.insert(path, &self.files[path]);
         }
         tree
+    }
+
+    /// Apply grouping information to file indexes
+    pub fn apply_grouping(&mut self, grouping: &crate::grouping::CodebaseGrouping) {
+        for (path, (layer, feature)) in &grouping.file_assignments {
+            if let Some(file_index) = self.files.get_mut(path) {
+                file_index.layer = Some(*layer);
+                file_index.feature = feature.clone();
+            }
+        }
+    }
+
+    /// Generate grouping for this codebase using heuristics
+    pub fn generate_grouping(&self) -> crate::grouping::CodebaseGrouping {
+        let mut grouping = crate::grouping::heuristics::categorize_codebase(self);
+        crate::grouping::features::detect_features(&mut grouping, self);
+        grouping
     }
 }
 

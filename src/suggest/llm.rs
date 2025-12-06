@@ -1498,6 +1498,229 @@ fn parse_summaries_response(response: &str) -> anyhow::Result<HashMap<PathBuf, S
     Ok(summaries)
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+//  FEATURE ENHANCEMENT
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Response from feature enhancement LLM call
+#[derive(Debug, Clone, Deserialize)]
+pub struct FeatureEnhancement {
+    pub name: String,
+    pub description: String,
+}
+
+/// Enhance feature names and generate descriptions using LLM
+/// 
+/// Takes a list of auto-detected features with their file lists and asks
+/// the LLM to provide better names and descriptions.
+pub async fn enhance_features(
+    grouping: &crate::grouping::CodebaseGrouping,
+    index: &CodebaseIndex,
+) -> anyhow::Result<(HashMap<String, FeatureEnhancement>, Option<Usage>)> {
+    // Build context about features to enhance
+    let mut features_to_enhance = Vec::new();
+    
+    for group in grouping.groups.values() {
+        for feature in &group.features {
+            // Build file context for this feature
+            let files_info: Vec<String> = feature.files.iter()
+                .take(10)  // Limit to 10 files per feature
+                .filter_map(|path| {
+                    let file_index = index.files.get(path)?;
+                    let exports: Vec<_> = file_index.symbols.iter()
+                        .filter(|s| s.visibility == crate::index::Visibility::Public)
+                        .take(5)
+                        .map(|s| s.name.as_str())
+                        .collect();
+                    
+                    Some(format!(
+                        "  - {} ({} LOC, exports: {})",
+                        path.display(),
+                        file_index.loc,
+                        if exports.is_empty() { "none".to_string() } else { exports.join(", ") }
+                    ))
+                })
+                .collect();
+            
+            if !files_info.is_empty() {
+                features_to_enhance.push(format!(
+                    "Feature '{}' (Layer: {}):\n{}",
+                    feature.name,
+                    group.layer.label(),
+                    files_info.join("\n")
+                ));
+            }
+        }
+    }
+    
+    if features_to_enhance.is_empty() {
+        return Ok((HashMap::new(), None));
+    }
+    
+    // Build prompt
+    let user_prompt = format!(r#"Analyze these auto-detected feature groupings from a codebase and provide better names and descriptions.
+
+For each feature:
+1. Suggest a clear, concise name (kebab-case, 2-4 words max)
+2. Provide a brief description (1 sentence)
+
+Current features:
+{}
+
+Respond in JSON format:
+{{
+  "original-name": {{
+    "name": "better-name",
+    "description": "Brief description"
+  }},
+  ...
+}}
+
+Only include features that need improvement. Skip generic names like "misc-*" or "cluster-*"."#,
+        features_to_enhance.join("\n\n")
+    );
+    
+    let system_prompt = "You are a code organization expert. Analyze feature groupings and suggest clearer names and descriptions. Respond only with valid JSON.";
+    
+    // Use Grok for fast categorization
+    let response = call_llm_with_usage(system_prompt, &user_prompt, Model::GrokFast, true).await?;
+    
+    // Parse response
+    let enhancements = parse_feature_enhancements(&response.content)?;
+    
+    Ok((enhancements, response.usage))
+}
+
+/// Parse feature enhancement response
+fn parse_feature_enhancements(response: &str) -> anyhow::Result<HashMap<String, FeatureEnhancement>> {
+    let json_str = extract_json_object(response)
+        .ok_or_else(|| anyhow::anyhow!("No JSON object found in response"))?;
+    
+    let parsed: HashMap<String, FeatureEnhancement> = serde_json::from_str(json_str)
+        .map_err(|e| anyhow::anyhow!("JSON parse error: {}", e))?;
+    
+    Ok(parsed)
+}
+
+/// Apply LLM enhancements to a grouping
+pub fn apply_feature_enhancements(
+    grouping: &mut crate::grouping::CodebaseGrouping,
+    enhancements: &HashMap<String, FeatureEnhancement>,
+) {
+    for group in grouping.groups.values_mut() {
+        for feature in &mut group.features {
+            if let Some(enhancement) = enhancements.get(&feature.name) {
+                feature.name = enhancement.name.clone();
+                feature.description = Some(enhancement.description.clone());
+            }
+        }
+    }
+    grouping.llm_enhanced = true;
+}
+
+// ============================================================================
+// PR Review with AI
+// ============================================================================
+
+/// A single file review comment from the AI
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PRFileReview {
+    pub file: String,
+    pub severity: String, // "praise", "info", "suggest", "warning"
+    pub comment: String,
+}
+
+/// Review changes using Sonnet 4 for thorough code review
+pub async fn review_changes(
+    files_changed: &[(PathBuf, String)], // (file_path, diff)
+) -> anyhow::Result<(Vec<crate::ui::PRReviewComment>, Usage)> {
+    let config = crate::config::Config::load();
+    let _api_key = config.get_api_key()
+        .ok_or_else(|| anyhow::anyhow!("API key not configured"))?;
+    
+    // Build the review prompt
+    let mut changes_text = String::new();
+    for (path, diff) in files_changed {
+        let file_name = path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown");
+        changes_text.push_str(&format!("\n--- {} ---\n{}\n", file_name, diff));
+    }
+    
+    let system_prompt = r#"You are a senior code reviewer. Review the following changes and provide concise, actionable feedback.
+
+For each file, provide ONE comment with:
+- severity: "praise" (good code), "info" (FYI), "suggest" (could improve), or "warning" (should fix)
+- A brief comment (1-2 sentences max)
+
+Respond with a JSON array of objects:
+[
+  {"file": "filename.ts", "severity": "suggest", "comment": "Consider adding error handling for the async call."},
+  {"file": "another.ts", "severity": "praise", "comment": "Clean refactor, good separation of concerns."}
+]
+
+Be constructive and focused. Skip trivial issues. Highlight the most important points."#;
+
+    let user_prompt = format!("Review these changes:\n{}", changes_text);
+    
+    // Use Opus for thorough review
+    let response = call_llm_with_usage(system_prompt, &user_prompt, Model::Opus, true).await?;
+    
+    let usage = response.usage.unwrap_or_default();
+    
+    // Parse the response
+    let reviews = parse_review_response(&response.content, files_changed)?;
+    
+    Ok((reviews, usage))
+}
+
+/// Parse the JSON review response into PRReviewComments
+fn parse_review_response(
+    content: &str, 
+    files_changed: &[(PathBuf, String)]
+) -> anyhow::Result<Vec<crate::ui::PRReviewComment>> {
+    use crate::ui::{PRReviewComment, ReviewSeverity};
+    
+    // Extract JSON from response
+    let json_start = content.find('[').unwrap_or(0);
+    let json_end = content.rfind(']').map(|i| i + 1).unwrap_or(content.len());
+    let json_str = &content[json_start..json_end];
+    
+    let reviews: Vec<PRFileReview> = serde_json::from_str(json_str)
+        .map_err(|e| anyhow::anyhow!("Failed to parse review JSON: {}", e))?;
+    
+    // Convert to PRReviewComment
+    let mut comments = Vec::new();
+    for review in reviews {
+        // Find the matching file path
+        let file_path = files_changed.iter()
+            .find(|(p, _)| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n == review.file || review.file.ends_with(n))
+                    .unwrap_or(false)
+            })
+            .map(|(p, _)| p.clone())
+            .unwrap_or_else(|| PathBuf::from(&review.file));
+        
+        let severity = match review.severity.to_lowercase().as_str() {
+            "praise" => ReviewSeverity::Praise,
+            "info" => ReviewSeverity::Info,
+            "suggest" => ReviewSeverity::Suggest,
+            "warning" => ReviewSeverity::Warning,
+            _ => ReviewSeverity::Info,
+        };
+        
+        comments.push(PRReviewComment {
+            file: file_path,
+            comment: review.comment,
+            severity,
+        });
+    }
+    
+    Ok(comments)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

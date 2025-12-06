@@ -40,6 +40,30 @@ pub enum ActivePanel {
     Suggestions,
 }
 
+/// View mode for file explorer
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ViewMode {
+    #[default]
+    Flat,     // Traditional flat file list
+    Grouped,  // Grouped by layer and feature
+}
+
+impl ViewMode {
+    pub fn label(&self) -> &'static str {
+        match self {
+            ViewMode::Flat => "flat",
+            ViewMode::Grouped => "grouped",
+        }
+    }
+
+    pub fn toggle(&self) -> Self {
+        match self {
+            ViewMode::Flat => ViewMode::Grouped,
+            ViewMode::Grouped => ViewMode::Flat,
+        }
+    }
+}
+
 /// Sort mode for file explorer
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SortMode {
@@ -156,6 +180,48 @@ pub enum Overlay {
         path: PathBuf,
         scroll: usize,
     },
+    /// Branch creation dialog
+    BranchCreate {
+        branch_name: String,
+        commit_message: String,
+        pending_files: Vec<PathBuf>,
+    },
+    /// PR Review panel with AI code review
+    PRReview {
+        branch_name: String,
+        files_changed: Vec<(PathBuf, String)>, // (path, diff)
+        review_comments: Vec<PRReviewComment>,
+        scroll: usize,
+        reviewing: bool,
+        pr_url: Option<String>,
+    },
+}
+
+/// A comment from AI code review
+#[derive(Debug, Clone, PartialEq)]
+pub struct PRReviewComment {
+    pub file: PathBuf,
+    pub comment: String,
+    pub severity: ReviewSeverity,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewSeverity {
+    Praise,    // Good stuff
+    Info,      // FYI
+    Suggest,   // Could improve
+    Warning,   // Should fix
+}
+
+impl ReviewSeverity {
+    pub fn icon(&self) -> &'static str {
+        match self {
+            ReviewSeverity::Praise => "✓",
+            ReviewSeverity::Info => "○",
+            ReviewSeverity::Suggest => "◐",
+            ReviewSeverity::Warning => "●",
+        }
+    }
 }
 
 /// Toast notification
@@ -174,6 +240,28 @@ impl Toast {
 
     pub fn is_expired(&self) -> bool {
         self.created_at.elapsed().as_secs() >= 3
+    }
+}
+
+/// A pending change that has been applied but not yet committed
+#[derive(Debug, Clone)]
+pub struct PendingChange {
+    pub suggestion_id: uuid::Uuid,
+    pub file_path: PathBuf,
+    pub description: String,
+    pub diff: String,
+    pub applied_at: Instant,
+}
+
+impl PendingChange {
+    pub fn new(suggestion_id: uuid::Uuid, file_path: PathBuf, description: String, diff: String) -> Self {
+        Self {
+            suggestion_id,
+            file_path,
+            description,
+            diff,
+            applied_at: Instant::now(),
+        }
     }
 }
 
@@ -198,6 +286,7 @@ pub struct App {
     pub input_mode: InputMode,
     pub search_query: String,
     pub sort_mode: SortMode,
+    pub view_mode: ViewMode,
     
     // Loading state for background tasks
     pub loading: LoadingState,
@@ -218,6 +307,15 @@ pub struct App {
     pub file_tree: Vec<FlatTreeEntry>,
     pub filtered_tree: Vec<FlatTreeEntry>,
     pub repo_path: PathBuf,
+    
+    // Grouped view data
+    pub grouping: crate::grouping::CodebaseGrouping,
+    pub grouped_tree: Vec<crate::grouping::GroupedTreeEntry>,
+    pub filtered_grouped_tree: Vec<crate::grouping::GroupedTreeEntry>,
+    
+    // Pending changes for batch commit workflow
+    pub pending_changes: Vec<PendingChange>,
+    pub cosmos_branch: Option<String>,
 }
 
 impl App {
@@ -230,6 +328,11 @@ impl App {
         let file_tree = build_file_tree(&index, SortMode::Name);
         let filtered_tree = file_tree.clone();
         let repo_path = index.root.clone();
+        
+        // Generate grouping for the codebase
+        let grouping = index.generate_grouping();
+        let grouped_tree = build_grouped_tree(&grouping, &index);
+        let filtered_grouped_tree = grouped_tree.clone();
         
         Self {
             index,
@@ -246,6 +349,7 @@ impl App {
             input_mode: InputMode::Normal,
             search_query: String::new(),
             sort_mode: SortMode::Name,
+            view_mode: ViewMode::Grouped,  // Default to grouped view
             loading: LoadingState::None,
             loading_frame: 0,
             llm_summaries: std::collections::HashMap::new(),
@@ -256,7 +360,28 @@ impl App {
             file_tree,
             filtered_tree,
             repo_path,
+            grouping,
+            grouped_tree,
+            filtered_grouped_tree,
+            pending_changes: Vec::new(),
+            cosmos_branch: None,
         }
+    }
+    
+    /// Add a pending change from an applied fix
+    pub fn add_pending_change(&mut self, suggestion_id: uuid::Uuid, file_path: PathBuf, description: String, diff: String) {
+        self.pending_changes.push(PendingChange::new(suggestion_id, file_path, description, diff));
+    }
+    
+    /// Get count of pending changes
+    pub fn pending_change_count(&self) -> usize {
+        self.pending_changes.len()
+    }
+    
+    /// Clear all pending changes (after commit)
+    pub fn clear_pending_changes(&mut self) {
+        self.pending_changes.clear();
+        self.cosmos_branch = None;
     }
     
     /// Tick the loading animation
@@ -304,22 +429,47 @@ impl App {
     
     /// Apply search filter to file tree
     fn apply_filter(&mut self) {
-        if self.search_query.is_empty() {
-            self.filtered_tree = self.file_tree.clone();
-        } else {
-            let query = self.search_query.to_lowercase();
-            self.filtered_tree = self.file_tree.iter()
-                .filter(|entry| {
-                    entry.name.to_lowercase().contains(&query) ||
-                    entry.path.to_string_lossy().to_lowercase().contains(&query)
-                })
-                .cloned()
-                .collect();
-        }
-        
-        // Reset selection if it's out of bounds
-        if self.project_selected >= self.filtered_tree.len() {
-            self.project_selected = self.filtered_tree.len().saturating_sub(1);
+        match self.view_mode {
+            ViewMode::Flat => {
+                if self.search_query.is_empty() {
+                    self.filtered_tree = self.file_tree.clone();
+                } else {
+                    let query = self.search_query.to_lowercase();
+                    self.filtered_tree = self.file_tree.iter()
+                        .filter(|entry| {
+                            entry.name.to_lowercase().contains(&query) ||
+                            entry.path.to_string_lossy().to_lowercase().contains(&query)
+                        })
+                        .cloned()
+                        .collect();
+                }
+                
+                // Reset selection if it's out of bounds
+                if self.project_selected >= self.filtered_tree.len() {
+                    self.project_selected = self.filtered_tree.len().saturating_sub(1);
+                }
+            }
+            ViewMode::Grouped => {
+                if self.search_query.is_empty() {
+                    self.filtered_grouped_tree = self.grouped_tree.clone();
+                } else {
+                    let query = self.search_query.to_lowercase();
+                    self.filtered_grouped_tree = self.grouped_tree.iter()
+                        .filter(|entry| {
+                            entry.name.to_lowercase().contains(&query) ||
+                            entry.path.as_ref().map(|p| 
+                                p.to_string_lossy().to_lowercase().contains(&query)
+                            ).unwrap_or(false)
+                        })
+                        .cloned()
+                        .collect();
+                }
+                
+                // Reset selection if it's out of bounds
+                if self.project_selected >= self.filtered_grouped_tree.len() {
+                    self.project_selected = self.filtered_grouped_tree.len().saturating_sub(1);
+                }
+            }
         }
         self.project_scroll = 0;
     }
@@ -332,13 +482,132 @@ impl App {
         self.show_toast(&format!("Sort: {}", self.sort_mode.label()));
     }
     
+    /// Toggle between flat and grouped view modes
+    pub fn toggle_view_mode(&mut self) {
+        self.view_mode = self.view_mode.toggle();
+        self.project_selected = 0;
+        self.project_scroll = 0;
+        self.apply_filter();
+        self.show_toast(&format!("View: {}", self.view_mode.label()));
+    }
+    
+    /// Toggle expand/collapse of the selected group in grouped view
+    pub fn toggle_group_expand(&mut self) {
+        if self.view_mode != ViewMode::Grouped {
+            return;
+        }
+        
+        if let Some(entry) = self.filtered_grouped_tree.get(self.project_selected) {
+            use crate::grouping::GroupedEntryKind;
+            match &entry.kind {
+                GroupedEntryKind::Layer(layer) => {
+                    if let Some(group) = self.grouping.groups.get_mut(layer) {
+                        group.expanded = !group.expanded;
+                        self.rebuild_grouped_tree();
+                    }
+                }
+                GroupedEntryKind::Feature => {
+                    // For now, features are always expanded - could add feature collapse later
+                }
+                GroupedEntryKind::File => {
+                    // Files can't be expanded - show details instead
+                    self.show_file_detail();
+                }
+            }
+        }
+    }
+    
+    /// Rebuild the grouped tree after a toggle
+    fn rebuild_grouped_tree(&mut self) {
+        self.grouped_tree = build_grouped_tree(&self.grouping, &self.index);
+        self.apply_filter();
+    }
+    
+    /// Collapse all layer groups
+    pub fn collapse_all(&mut self) {
+        if self.view_mode != ViewMode::Grouped {
+            return;
+        }
+        
+        for group in self.grouping.groups.values_mut() {
+            group.expanded = false;
+        }
+        self.rebuild_grouped_tree();
+        self.project_selected = 0;
+        self.project_scroll = 0;
+        self.show_toast("Collapsed all");
+    }
+    
+    /// Expand all layer groups
+    pub fn expand_all(&mut self) {
+        if self.view_mode != ViewMode::Grouped {
+            return;
+        }
+        
+        for group in self.grouping.groups.values_mut() {
+            group.expanded = true;
+        }
+        self.rebuild_grouped_tree();
+        self.show_toast("Expanded all");
+    }
+    
+    /// Jump to a specific layer by index (1-8 keys)
+    pub fn jump_to_layer(&mut self, layer_index: usize) {
+        if self.view_mode != ViewMode::Grouped {
+            self.show_toast("Use 'g' for grouped view first");
+            return;
+        }
+        
+        if let Some(target_layer) = crate::grouping::Layer::from_index(layer_index) {
+            // Find the position of this layer in the tree
+            for (i, entry) in self.filtered_grouped_tree.iter().enumerate() {
+                if let crate::grouping::GroupedEntryKind::Layer(layer) = &entry.kind {
+                    if *layer == target_layer {
+                        self.project_selected = i;
+                        self.ensure_project_visible();
+                        self.show_toast(&format!("Jumped to {}", target_layer.label()));
+                        return;
+                    }
+                }
+            }
+            self.show_toast(&format!("No {} files", target_layer.label()));
+        }
+    }
+    
+    /// Page down (jump 10 items)
+    pub fn page_down(&mut self) {
+        let max = self.project_tree_len().saturating_sub(1);
+        self.project_selected = (self.project_selected + 10).min(max);
+        self.ensure_project_visible();
+    }
+    
+    /// Page up (jump 10 items)
+    pub fn page_up(&mut self) {
+        self.project_selected = self.project_selected.saturating_sub(10);
+        self.ensure_project_visible();
+    }
+    
     /// Show file detail overlay for currently selected file
     pub fn show_file_detail(&mut self) {
-        if let Some(entry) = self.filtered_tree.get(self.project_selected) {
-            self.overlay = Overlay::FileDetail {
-                path: entry.path.clone(),
-                scroll: 0,
-            };
+        match self.view_mode {
+            ViewMode::Flat => {
+                if let Some(entry) = self.filtered_tree.get(self.project_selected) {
+                    self.overlay = Overlay::FileDetail {
+                        path: entry.path.clone(),
+                        scroll: 0,
+                    };
+                }
+            }
+            ViewMode::Grouped => {
+                if let Some(entry) = self.filtered_grouped_tree.get(self.project_selected) {
+                    if let Some(path) = &entry.path {
+                        self.overlay = Overlay::FileDetail {
+                            path: path.clone(),
+                            scroll: 0,
+                        };
+                    }
+                }
+            }
         }
     }
 
@@ -354,7 +623,7 @@ impl App {
     pub fn navigate_down(&mut self) {
         match self.active_panel {
             ActivePanel::Project => {
-                let max = self.filtered_tree.len().saturating_sub(1);
+                let max = self.project_tree_len().saturating_sub(1);
                 self.project_selected = (self.project_selected + 1).min(max);
                 self.ensure_project_visible();
             }
@@ -379,6 +648,14 @@ impl App {
             }
         }
     }
+    
+    /// Get the length of the current project tree based on view mode
+    fn project_tree_len(&self) -> usize {
+        match self.view_mode {
+            ViewMode::Flat => self.filtered_tree.len(),
+            ViewMode::Grouped => self.filtered_grouped_tree.len(),
+        }
+    }
 
     fn ensure_project_visible(&mut self) {
         if self.project_selected < self.project_scroll {
@@ -398,7 +675,12 @@ impl App {
 
     /// Get currently selected file
     pub fn selected_file(&self) -> Option<&PathBuf> {
-        self.filtered_tree.get(self.project_selected).map(|e| &e.path)
+        match self.view_mode {
+            ViewMode::Flat => self.filtered_tree.get(self.project_selected).map(|e| &e.path),
+            ViewMode::Grouped => self.filtered_grouped_tree
+                .get(self.project_selected)
+                .and_then(|e| e.path.as_ref()),
+        }
     }
     
     /// Get the FileIndex for the currently selected file
@@ -622,6 +904,113 @@ impl App {
             self.show_toast("Suggestion dismissed");
         }
     }
+    
+    /// Show the branch creation dialog
+    pub fn show_branch_dialog(&mut self) {
+        if self.pending_changes.is_empty() {
+            self.show_toast("No pending changes to commit");
+            return;
+        }
+        
+        // Generate a branch name from pending changes
+        let branch_name = self.generate_branch_name();
+        let commit_message = self.generate_commit_message();
+        let pending_files: Vec<PathBuf> = self.pending_changes.iter()
+            .map(|c| c.file_path.clone())
+            .collect();
+        
+        self.overlay = Overlay::BranchCreate {
+            branch_name,
+            commit_message,
+            pending_files,
+        };
+    }
+    
+    /// Generate a descriptive branch name from pending changes
+    fn generate_branch_name(&self) -> String {
+        if self.pending_changes.is_empty() {
+            return "cosmos/changes".to_string();
+        }
+        
+        // Get the first change's description for the branch name
+        let first_desc = &self.pending_changes[0].description;
+        let words: Vec<&str> = first_desc.split_whitespace()
+            .take(4)
+            .collect();
+        
+        let slug = words.join("-")
+            .to_lowercase()
+            .chars()
+            .filter(|c| c.is_alphanumeric() || *c == '-')
+            .collect::<String>();
+        
+        format!("cosmos/{}", if slug.is_empty() { "fix" } else { &slug })
+    }
+    
+    /// Generate a commit message from pending changes
+    fn generate_commit_message(&self) -> String {
+        if self.pending_changes.len() == 1 {
+            self.pending_changes[0].description.clone()
+        } else {
+            let summaries: Vec<String> = self.pending_changes.iter()
+                .map(|c| format!("- {}", c.description))
+                .collect();
+            format!("Cosmos fixes:\n\n{}", summaries.join("\n"))
+        }
+    }
+    
+    /// Show the PR review panel
+    pub fn show_pr_review(&mut self) {
+        if self.pending_changes.is_empty() {
+            self.show_toast("No changes to review");
+            return;
+        }
+        
+        let branch_name = self.cosmos_branch.clone()
+            .unwrap_or_else(|| self.generate_branch_name());
+        
+        let files_changed: Vec<(PathBuf, String)> = self.pending_changes.iter()
+            .map(|c| (c.file_path.clone(), c.diff.clone()))
+            .collect();
+        
+        self.overlay = Overlay::PRReview {
+            branch_name,
+            files_changed,
+            review_comments: Vec::new(),
+            scroll: 0,
+            reviewing: false,
+            pr_url: None,
+        };
+    }
+    
+    /// Update branch name in branch dialog
+    pub fn update_branch_name(&mut self, name: String) {
+        if let Overlay::BranchCreate { branch_name, .. } = &mut self.overlay {
+            *branch_name = name;
+        }
+    }
+    
+    /// Update commit message in branch dialog
+    pub fn update_commit_message(&mut self, msg: String) {
+        if let Overlay::BranchCreate { commit_message, .. } = &mut self.overlay {
+            *commit_message = msg;
+        }
+    }
+    
+    /// Set PR review comments from AI analysis
+    pub fn set_review_comments(&mut self, comments: Vec<PRReviewComment>) {
+        if let Overlay::PRReview { review_comments, reviewing, .. } = &mut self.overlay {
+            *review_comments = comments;
+            *reviewing = false;
+        }
+    }
+    
+    /// Set the PR URL after creation
+    pub fn set_pr_url(&mut self, url: String) {
+        if let Overlay::PRReview { pr_url, .. } = &mut self.overlay {
+            *pr_url = Some(url);
+        }
+    }
 }
 
 /// Build a flat file tree for display with sorting
@@ -671,6 +1060,93 @@ fn build_file_tree(index: &CodebaseIndex, sort_mode: SortMode) -> Vec<FlatTreeEn
             priority,
         }
     }).collect()
+}
+
+/// Build a grouped tree for display
+fn build_grouped_tree(
+    grouping: &crate::grouping::CodebaseGrouping,
+    index: &CodebaseIndex,
+) -> Vec<crate::grouping::GroupedTreeEntry> {
+    use crate::grouping::{GroupedTreeEntry, Layer};
+    
+    let mut entries = Vec::new();
+    
+    // Add layers in order
+    for layer in Layer::all() {
+        if let Some(group) = grouping.groups.get(layer) {
+            if group.file_count() == 0 {
+                continue;
+            }
+            
+            // Add layer header
+            entries.push(GroupedTreeEntry::layer(*layer, group.file_count(), group.expanded));
+            
+            if group.expanded {
+                // Add features first, sorted by file count (largest first)
+                let mut sorted_features: Vec<_> = group.features.iter().collect();
+                sorted_features.sort_by(|a, b| b.files.len().cmp(&a.files.len()));
+                
+                for feature in sorted_features {
+                    if feature.files.is_empty() {
+                        continue;
+                    }
+
+                    // Add feature header
+                    entries.push(GroupedTreeEntry::feature(&feature.name, feature.files.len(), true));
+
+                    // Sort files: priority files first, then alphabetically
+                    let mut sorted_files: Vec<_> = feature.files.iter().collect();
+                    sorted_files.sort_by(|a, b| {
+                        let pri_a = index.files.get(*a).map(|f| f.priority_indicator()).unwrap_or(' ');
+                        let pri_b = index.files.get(*b).map(|f| f.priority_indicator()).unwrap_or(' ');
+                        // Priority files (●) come first
+                        match (pri_a == '●' || pri_a == '\u{25CF}', pri_b == '●' || pri_b == '\u{25CF}') {
+                            (true, false) => std::cmp::Ordering::Less,
+                            (false, true) => std::cmp::Ordering::Greater,
+                            _ => a.cmp(b),
+                        }
+                    });
+
+                    // Add files in this feature with contextual names
+                    for file_path in sorted_files {
+                        let priority = index.files.get(file_path)
+                            .map(|f| f.priority_indicator())
+                            .unwrap_or(' ');
+
+                        // Use contextual display name for generic files
+                        let name = crate::grouping::display_name_with_context(file_path);
+
+                        entries.push(GroupedTreeEntry::file(&name, file_path.clone(), priority, 2));
+                    }
+                }
+
+                // Add ungrouped files with priority sorting
+                let mut sorted_ungrouped: Vec<_> = group.ungrouped_files.iter().collect();
+                sorted_ungrouped.sort_by(|a, b| {
+                    let pri_a = index.files.get(*a).map(|f| f.priority_indicator()).unwrap_or(' ');
+                    let pri_b = index.files.get(*b).map(|f| f.priority_indicator()).unwrap_or(' ');
+                    match (pri_a == '●' || pri_a == '\u{25CF}', pri_b == '●' || pri_b == '\u{25CF}') {
+                        (true, false) => std::cmp::Ordering::Less,
+                        (false, true) => std::cmp::Ordering::Greater,
+                        _ => a.cmp(b),
+                    }
+                });
+
+                for file_path in sorted_ungrouped {
+                    let priority = index.files.get(file_path)
+                        .map(|f| f.priority_indicator())
+                        .unwrap_or(' ');
+
+                    // Use contextual display name
+                    let name = crate::grouping::display_name_with_context(file_path);
+                    
+                    entries.push(GroupedTreeEntry::file(&name, file_path.clone(), priority, 1));
+                }
+            }
+        }
+    }
+    
+    entries
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -724,6 +1200,12 @@ pub fn render(frame: &mut Frame, app: &App) {
             if let Some(file_index) = app.index.files.get(path) {
                 render_file_detail(frame, path, file_index, app.get_llm_summary(path), *scroll);
             }
+        }
+        Overlay::BranchCreate { branch_name, commit_message, pending_files } => {
+            render_branch_dialog(frame, branch_name, commit_message, pending_files);
+        }
+        Overlay::PRReview { branch_name, files_changed, review_comments, scroll, reviewing, pr_url } => {
+            render_pr_review(frame, branch_name, files_changed, review_comments, *scroll, *reviewing, pr_url);
         }
         Overlay::None => {}
     }
@@ -816,14 +1298,41 @@ fn render_project_panel(frame: &mut Frame, area: Rect, app: &App) {
         lines.push(Line::from(""));
     }
     
-    let total_files = app.filtered_tree.len();
-    let scroll_indicator = if total_files > visible_height {
+    // Render based on view mode
+    match app.view_mode {
+        ViewMode::Flat => {
+            render_flat_tree(&mut lines, app, is_active, visible_height);
+        }
+        ViewMode::Grouped => {
+            render_grouped_tree(&mut lines, app, is_active, visible_height);
+        }
+    }
+
+    // Build title with view/sort indicator
+    let total_items = app.project_tree_len();
+    let scroll_indicator = if total_items > visible_height {
         let current = app.project_scroll + 1;
-        format!(" ↕ {}/{} ", current, total_files)
+        format!(" ↕ {}/{} ", current, total_items)
     } else {
         String::new()
     };
     
+    let mode_indicator = format!(" [{}]", app.view_mode.label());
+    let title = format!(" {}{}{}", Theme::SECTION_PROJECT, mode_indicator, scroll_indicator);
+
+    let block = Block::default()
+        .title(title)
+        .title_style(Style::default().fg(Theme::GREY_200))  // Legible title
+        .borders(Borders::ALL)
+        .border_style(border_style)
+        .style(Style::default().bg(Theme::GREY_800));
+
+    let paragraph = Paragraph::new(lines).block(block);
+    frame.render_widget(paragraph, area);
+}
+
+/// Render the flat file tree
+fn render_flat_tree<'a>(lines: &mut Vec<Line<'a>>, app: &'a App, is_active: bool, visible_height: usize) {
     for (i, entry) in app.filtered_tree.iter()
         .enumerate()
         .skip(app.project_scroll)
@@ -848,26 +1357,90 @@ fn render_project_panel(frame: &mut Frame, area: Rect, app: &App) {
         };
         
         lines.push(Line::from(vec![
-            Span::styled(cursor, Style::default().fg(Theme::GREY_100)),  // Bright cursor
+            Span::styled(cursor.to_string(), Style::default().fg(Theme::GREY_100)),
             Span::styled(format!(" {}", indent), Style::default().fg(Theme::GREY_600)),
-            Span::styled(&entry.name, name_style),
-            Span::styled(priority_indicator, Style::default().fg(Theme::GREY_200)),  // Visible indicator
+            Span::styled(entry.name.clone(), name_style),
+            Span::styled(priority_indicator.to_string(), Style::default().fg(Theme::GREY_200)),
         ]));
     }
+}
 
-    // Build title with sort indicator
-    let sort_indicator = format!(" [{}]", app.sort_mode.label());
-    let title = format!(" {}{}{}", Theme::SECTION_PROJECT, sort_indicator, scroll_indicator);
-
-    let block = Block::default()
-        .title(title)
-        .title_style(Style::default().fg(Theme::GREY_200))  // Legible title
-        .borders(Borders::ALL)
-        .border_style(border_style)
-        .style(Style::default().bg(Theme::GREY_800));
-
-    let paragraph = Paragraph::new(lines).block(block);
-    frame.render_widget(paragraph, area);
+/// Render the grouped file tree
+fn render_grouped_tree<'a>(lines: &mut Vec<Line<'a>>, app: &'a App, is_active: bool, visible_height: usize) {
+    use crate::grouping::GroupedEntryKind;
+    
+    for (i, entry) in app.filtered_grouped_tree.iter()
+        .enumerate()
+        .skip(app.project_scroll)
+        .take(visible_height)
+    {
+        let is_selected = i == app.project_selected && is_active;
+        let cursor = if is_selected { " ›" } else { "  " };
+        
+        match &entry.kind {
+            GroupedEntryKind::Layer(layer) => {
+                // Layer header - bold with icon
+                let expand_icon = if entry.expanded { "▼" } else { "▶" };
+                let count_str = format!(" ({})", entry.file_count);
+                
+                let style = if is_selected {
+                    Style::default().fg(Theme::WHITE).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Theme::GREY_100).add_modifier(Modifier::BOLD)
+                };
+                
+                lines.push(Line::from(vec![
+                    Span::styled(cursor.to_string(), Style::default().fg(Theme::GREY_100)),
+                    Span::styled(format!(" {} ", layer.icon()), Style::default().fg(Theme::GREY_300)),
+                    Span::styled(expand_icon.to_string(), Style::default().fg(Theme::GREY_400)),
+                    Span::styled(format!(" {}", layer.label()), style),
+                    Span::styled(count_str, Style::default().fg(Theme::GREY_500)),
+                ]));
+            }
+            GroupedEntryKind::Feature => {
+                // Feature header - indented, italic
+                let style = if is_selected {
+                    Style::default().fg(Theme::WHITE).add_modifier(Modifier::ITALIC)
+                } else {
+                    Style::default().fg(Theme::GREY_200).add_modifier(Modifier::ITALIC)
+                };
+                
+                let count_str = format!(" ({})", entry.file_count);
+                
+                lines.push(Line::from(vec![
+                    Span::styled(cursor.to_string(), Style::default().fg(Theme::GREY_100)),
+                    Span::styled("    ".to_string(), Style::default()),
+                    Span::styled(entry.name.clone(), style),
+                    Span::styled(count_str, Style::default().fg(Theme::GREY_500)),
+                ]));
+            }
+            GroupedEntryKind::File => {
+                // File entry - indented based on depth
+                let indent = "  ".repeat(entry.depth + 1);
+                
+                let name_style = if is_selected {
+                    Style::default().fg(Theme::WHITE).add_modifier(Modifier::BOLD)
+                } else if entry.priority == Theme::PRIORITY_HIGH {
+                    Style::default().fg(Theme::GREY_50)
+                } else {
+                    Style::default().fg(Theme::GREY_300)
+                };
+                
+                let priority_indicator = if entry.priority == Theme::PRIORITY_HIGH {
+                    "  ●"
+                } else {
+                    ""
+                };
+                
+                lines.push(Line::from(vec![
+                    Span::styled(cursor.to_string(), Style::default().fg(Theme::GREY_100)),
+                    Span::styled(indent, Style::default().fg(Theme::GREY_600)),
+                    Span::styled(entry.name.clone(), name_style),
+                    Span::styled(priority_indicator.to_string(), Style::default().fg(Theme::GREY_200)),
+                ]));
+            }
+        }
+    }
 }
 
 fn render_suggestions_panel(frame: &mut Frame, area: Rect, app: &App) {
@@ -953,6 +1526,18 @@ fn render_suggestions_panel(frame: &mut Frame, area: Rect, app: &App) {
                 line_count += 1;
             }
             
+            // Add action hint for selected item
+            if is_selected && line_count < visible_height {
+                lines.push(Line::from(vec![
+                    Span::styled("     ", Style::default()),
+                    Span::styled(" a ", Style::default().fg(Theme::GREY_900).bg(Theme::WHITE).add_modifier(Modifier::BOLD)),
+                    Span::styled(" fix it", Style::default().fg(Theme::WHITE)),
+                    Span::styled("  Enter ", Style::default().fg(Theme::GREY_400)),
+                    Span::styled("details", Style::default().fg(Theme::GREY_400)),
+                ]));
+                line_count += 1;
+            }
+            
             // Add spacing between suggestions
             if line_count < visible_height {
                 lines.push(Line::from(""));
@@ -997,14 +1582,27 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(Theme::GREY_500)  // Visible separator
         ),
     ]);
-    
+
     // Bottom line - status and hints
     let mut spans = vec![
         Span::styled("  ", Style::default()),
         Span::styled(&app.context.branch, Style::default().fg(Theme::GREY_100)),  // Bright branch
     ];
 
-    if app.context.has_changes() {
+    // Show pending changes count with action hints
+    let pending_count = app.pending_change_count();
+    if pending_count > 0 {
+        spans.push(Span::styled("  ·  ", Style::default().fg(Theme::GREY_500)));
+        spans.push(Span::styled(
+            format!("{} pending", pending_count),
+            Style::default().fg(Theme::WHITE).add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled(" ", Style::default()));
+        spans.push(Span::styled("𝘣", Style::default().fg(Theme::WHITE)));
+        spans.push(Span::styled(" branch ", Style::default().fg(Theme::GREY_400)));
+        spans.push(Span::styled("𝘱", Style::default().fg(Theme::WHITE)));
+        spans.push(Span::styled(" PR", Style::default().fg(Theme::GREY_400)));
+    } else if app.context.has_changes() {
         spans.push(Span::styled("  ·  ", Style::default().fg(Theme::GREY_500)));
         spans.push(Span::styled(
             format!("{} 𝘤𝘩𝘢𝘯𝘨𝘦𝘥", app.context.modified_count),
@@ -1020,7 +1618,7 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(Theme::GREY_300),
         ));
     }
-    
+
     // Cost meter (show if any cost has been incurred)
     if app.session_cost > 0.0 {
         spans.push(Span::styled("  ·  ", Style::default().fg(Theme::GREY_500)));
@@ -1031,23 +1629,22 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
     }
 
     spans.push(Span::styled("  ·  ", Style::default().fg(Theme::GREY_500)));
-    
+
     // Key hints with elegant styling - high contrast
     let hints = [
+        ("𝘨", "𝘨𝘳𝘰𝘶𝘱"),
         ("/", "𝘴𝘦𝘢𝘳𝘤𝘩"),
-        ("𝘴", "𝘴𝘰𝘳𝘵"),
         ("?", "𝘩𝘦𝘭𝘱"),
-        ("↵", "𝘷𝘪𝘦𝘸"),
         ("𝘲", "𝘲𝘶𝘪𝘵"),
     ];
-    
+
     for (key, action) in hints {
         spans.push(Span::styled(key, Style::default().fg(Theme::WHITE)));  // White keys
         spans.push(Span::styled(format!(" {} ", action), Style::default().fg(Theme::GREY_400)));  // Legible action
     }
 
     let footer_line = Line::from(spans);
-    
+
     let footer = Paragraph::new(vec![separator, footer_line])
         .style(Style::default().bg(Theme::BG));
     frame.render_widget(footer, area);
@@ -1094,8 +1691,24 @@ fn render_help(frame: &mut Frame) {
             Span::styled("                 search files", Style::default().fg(Theme::GREY_300)),
         ]),
         Line::from(vec![
-            Span::styled("     𝘴", Style::default().fg(Theme::WHITE)),
-            Span::styled("                 cycle sort mode", Style::default().fg(Theme::GREY_300)),
+            Span::styled("     𝘨", Style::default().fg(Theme::WHITE)),
+            Span::styled("                 toggle grouped view", Style::default().fg(Theme::GREY_300)),
+        ]),
+        Line::from(vec![
+            Span::styled("     Space", Style::default().fg(Theme::WHITE)),
+            Span::styled("             expand/collapse", Style::default().fg(Theme::GREY_300)),
+        ]),
+        Line::from(vec![
+            Span::styled("     C / E", Style::default().fg(Theme::WHITE)),
+            Span::styled("             collapse/expand all", Style::default().fg(Theme::GREY_300)),
+        ]),
+        Line::from(vec![
+            Span::styled("     1-8", Style::default().fg(Theme::WHITE)),
+            Span::styled("               jump to layer", Style::default().fg(Theme::GREY_300)),
+        ]),
+        Line::from(vec![
+            Span::styled("     PgUp/Dn", Style::default().fg(Theme::WHITE)),
+            Span::styled("           page scroll", Style::default().fg(Theme::GREY_300)),
         ]),
         Line::from(vec![
             Span::styled("     Esc", Style::default().fg(Theme::WHITE)),
@@ -1414,26 +2027,38 @@ fn render_fix_preview(
     lines.push(Line::from(vec![
         Span::styled("     ─────────────────────────────────────────", Style::default().fg(Theme::GREY_600))
     ]));
-    lines.push(Line::from(""));
     
-    // Key hints
+    // Key hints - make them IMPOSSIBLE TO MISS
     if modifier_input.is_empty() {
+        lines.push(Line::from(""));
         lines.push(Line::from(vec![
-            Span::styled("     𝘺", Style::default().fg(Theme::WHITE)),
-            Span::styled(" apply   ", Style::default().fg(Theme::GREY_400)),
-            Span::styled("𝘥", Style::default().fg(Theme::WHITE)),
-            Span::styled(" diff   ", Style::default().fg(Theme::GREY_400)),
-            Span::styled("𝘮", Style::default().fg(Theme::WHITE)),
-            Span::styled(" tweak   ", Style::default().fg(Theme::GREY_400)),
-            Span::styled("Esc", Style::default().fg(Theme::WHITE)),
-            Span::styled(" cancel", Style::default().fg(Theme::GREY_400)),
+            Span::styled("     ▶ ", Style::default().fg(Theme::WHITE).add_modifier(Modifier::BOLD)),
+            Span::styled("Press ", Style::default().fg(Theme::WHITE)),
+            Span::styled(" Y ", Style::default().fg(Theme::GREY_900).bg(Theme::GREEN).add_modifier(Modifier::BOLD)),
+            Span::styled(" to apply this fix now", Style::default().fg(Theme::WHITE).add_modifier(Modifier::BOLD)),
+        ]));
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled("       ", Style::default()),
+            Span::styled("d", Style::default().fg(Theme::GREY_300)),
+            Span::styled(" diff    ", Style::default().fg(Theme::GREY_500)),
+            Span::styled("m", Style::default().fg(Theme::GREY_300)),
+            Span::styled(" tweak    ", Style::default().fg(Theme::GREY_500)),
+            Span::styled("Esc", Style::default().fg(Theme::GREY_300)),
+            Span::styled(" cancel", Style::default().fg(Theme::GREY_500)),
         ]));
     } else {
+        lines.push(Line::from(""));
         lines.push(Line::from(vec![
-            Span::styled("     Enter", Style::default().fg(Theme::WHITE)),
-            Span::styled(" regenerate with changes   ", Style::default().fg(Theme::GREY_400)),
-            Span::styled("Esc", Style::default().fg(Theme::WHITE)),
-            Span::styled(" cancel", Style::default().fg(Theme::GREY_400)),
+            Span::styled("     ▶ ", Style::default().fg(Theme::WHITE).add_modifier(Modifier::BOLD)),
+            Span::styled("Press ", Style::default().fg(Theme::WHITE)),
+            Span::styled(" Enter ", Style::default().fg(Theme::GREY_900).bg(Theme::GREEN).add_modifier(Modifier::BOLD)),
+            Span::styled(" to regenerate", Style::default().fg(Theme::WHITE).add_modifier(Modifier::BOLD)),
+        ]));
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled("       Esc", Style::default().fg(Theme::GREY_300)),
+            Span::styled(" cancel", Style::default().fg(Theme::GREY_500)),
         ]));
     }
     lines.push(Line::from(""));
@@ -1753,6 +2378,216 @@ fn render_file_detail(frame: &mut Frame, path: &PathBuf, file_index: &crate::ind
     frame.render_widget(block, area);
 }
 
+fn render_branch_dialog(
+    frame: &mut Frame,
+    branch_name: &str,
+    commit_message: &str,
+    pending_files: &[PathBuf],
+) {
+    let area = centered_rect(60, 60, frame.area());
+    frame.render_widget(Clear, area);
+
+    let inner_width = area.width.saturating_sub(10) as usize;
+    
+    let mut lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("     ✧ ", Style::default().fg(Theme::WHITE)),
+            Span::styled("Create Branch & Commit", Style::default().fg(Theme::WHITE).add_modifier(Modifier::BOLD)),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("     ─────────────────────────────────────────", Style::default().fg(Theme::GREY_600))
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("     Branch: ", Style::default().fg(Theme::GREY_400)),
+            Span::styled(branch_name, Style::default().fg(Theme::WHITE)),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("     Message:", Style::default().fg(Theme::GREY_400)),
+        ]),
+    ];
+    
+    // Show commit message (wrapped)
+    let msg_wrapped = wrap_text(commit_message, inner_width.saturating_sub(10));
+    for line in msg_wrapped {
+        lines.push(Line::from(vec![
+            Span::styled(format!("       {}", line), Style::default().fg(Theme::GREY_100)),
+        ]));
+    }
+    
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("     ─────────────────────────────────────────", Style::default().fg(Theme::GREY_600))
+    ]));
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled(format!("     {} files to commit:", pending_files.len()), Style::default().fg(Theme::GREY_300)),
+    ]));
+    
+    // Show files (limited)
+    for file in pending_files.iter().take(5) {
+        let name = file.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("?");
+        lines.push(Line::from(vec![
+            Span::styled(format!("       • {}", name), Style::default().fg(Theme::GREY_200)),
+        ]));
+    }
+    if pending_files.len() > 5 {
+        lines.push(Line::from(vec![
+            Span::styled(format!("       ...and {} more", pending_files.len() - 5), Style::default().fg(Theme::GREY_400)),
+        ]));
+    }
+    
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("     ─────────────────────────────────────────", Style::default().fg(Theme::GREY_600))
+    ]));
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("     𝘺", Style::default().fg(Theme::WHITE)),
+        Span::styled(" create & push   ", Style::default().fg(Theme::GREY_400)),
+        Span::styled("Esc", Style::default().fg(Theme::WHITE)),
+        Span::styled(" cancel", Style::default().fg(Theme::GREY_400)),
+    ]));
+    lines.push(Line::from(""));
+
+    let block = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .block(Block::default()
+            .title(" ✧ 𝘣𝘳𝘢𝘯𝘤𝘩 ")
+            .title_style(Style::default().fg(Theme::GREY_100))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Theme::GREY_400))
+            .style(Style::default().bg(Theme::GREY_900)));
+
+    frame.render_widget(block, area);
+}
+
+fn render_pr_review(
+    frame: &mut Frame,
+    branch_name: &str,
+    files_changed: &[(PathBuf, String)],
+    review_comments: &[PRReviewComment],
+    scroll: usize,
+    reviewing: bool,
+    pr_url: &Option<String>,
+) {
+    let area = centered_rect(80, 85, frame.area());
+    frame.render_widget(Clear, area);
+
+    let visible_height = area.height.saturating_sub(14) as usize;
+    
+    let mut lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("     ✧ ", Style::default().fg(Theme::WHITE)),
+            Span::styled("PR Review", Style::default().fg(Theme::WHITE).add_modifier(Modifier::BOLD)),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(format!("     Branch: {}", branch_name), Style::default().fg(Theme::GREY_200)),
+        ]),
+        Line::from(vec![
+            Span::styled(format!("     {} files changed", files_changed.len()), Style::default().fg(Theme::GREY_300)),
+        ]),
+    ];
+    
+    if let Some(url) = pr_url {
+        lines.push(Line::from(vec![
+            Span::styled(format!("     PR: {}", url), Style::default().fg(Theme::GREY_200)),
+        ]));
+    }
+    
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("     ─────────────────────────────────────────────────────", Style::default().fg(Theme::GREY_600))
+    ]));
+    lines.push(Line::from(""));
+    
+    if reviewing {
+        lines.push(Line::from(vec![
+            Span::styled("     Reviewing with Sonnet 4...", Style::default().fg(Theme::WHITE).add_modifier(Modifier::ITALIC)),
+        ]));
+    } else if review_comments.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled("     Press 'r' to get AI code review", Style::default().fg(Theme::GREY_300)),
+        ]));
+    } else {
+        // Show review comments
+        for (i, comment) in review_comments.iter().skip(scroll).take(visible_height).enumerate() {
+            let file_name = comment.file.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("?");
+            
+            lines.push(Line::from(vec![
+                Span::styled(format!("     {} ", comment.severity.icon()), 
+                    Style::default().fg(match comment.severity {
+                        ReviewSeverity::Praise => Theme::GREEN,
+                        ReviewSeverity::Info => Theme::GREY_300,
+                        ReviewSeverity::Suggest => Theme::WHITE,
+                        ReviewSeverity::Warning => Theme::RED,
+                    })),
+                Span::styled(file_name, Style::default().fg(Theme::GREY_100).add_modifier(Modifier::BOLD)),
+            ]));
+            
+            // Wrap comment
+            let wrapped = wrap_text(&comment.comment, 55);
+            for line in wrapped {
+                lines.push(Line::from(vec![
+                    Span::styled(format!("       {}", line), Style::default().fg(Theme::GREY_200)),
+                ]));
+            }
+            
+            if i < review_comments.len().saturating_sub(scroll).min(visible_height) - 1 {
+                lines.push(Line::from(""));
+            }
+        }
+    }
+    
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("     ─────────────────────────────────────────────────────", Style::default().fg(Theme::GREY_600))
+    ]));
+    lines.push(Line::from(""));
+    
+    // Action hints
+    if pr_url.is_some() {
+        lines.push(Line::from(vec![
+            Span::styled("     𝘰", Style::default().fg(Theme::WHITE)),
+            Span::styled(" open in browser   ", Style::default().fg(Theme::GREY_400)),
+            Span::styled("𝘳", Style::default().fg(Theme::WHITE)),
+            Span::styled(" review again   ", Style::default().fg(Theme::GREY_400)),
+            Span::styled("Esc", Style::default().fg(Theme::WHITE)),
+            Span::styled(" close", Style::default().fg(Theme::GREY_400)),
+        ]));
+    } else {
+        lines.push(Line::from(vec![
+            Span::styled("     𝘳", Style::default().fg(Theme::WHITE)),
+            Span::styled(" review   ", Style::default().fg(Theme::GREY_400)),
+            Span::styled("𝘤", Style::default().fg(Theme::WHITE)),
+            Span::styled(" create PR   ", Style::default().fg(Theme::GREY_400)),
+            Span::styled("Esc", Style::default().fg(Theme::WHITE)),
+            Span::styled(" close", Style::default().fg(Theme::GREY_400)),
+        ]));
+    }
+    lines.push(Line::from(""));
+
+    let block = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .block(Block::default()
+            .title(" ✧ 𝘱𝘳 𝘳𝘦𝘷𝘪𝘦𝘸 ")
+            .title_style(Style::default().fg(Theme::GREY_100))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Theme::GREY_400))
+            .style(Style::default().bg(Theme::GREY_900)));
+
+    frame.render_widget(block, area);
+}
+
 fn render_loading_overlay(frame: &mut Frame, state: &LoadingState, anim_frame: usize) {
     let area = frame.area();
     
@@ -1794,22 +2629,62 @@ fn render_loading_overlay(frame: &mut Frame, state: &LoadingState, anim_frame: u
 
 fn render_toast(frame: &mut Frame, toast: &Toast) {
     let area = frame.area();
+    let is_success = toast.message.starts_with('✓');
+    let is_error = toast.message.contains("failed") || toast.message.contains("error") || toast.message.contains("Error");
+    
     let width = (toast.message.len() + 10) as u16;
+    let height = if is_success { 3u16 } else { 1u16 };
     let toast_area = Rect {
         x: (area.width.saturating_sub(width)) / 2,
-        y: area.height.saturating_sub(5),
+        y: (area.height.saturating_sub(height)) / 2, // Center for success, otherwise bottom
         width: width.min(area.width),
-        height: 1,
+        height,
     };
-
-    let content = Paragraph::new(Line::from(vec![
-        Span::styled("  ✧ ", Style::default().fg(Theme::WHITE)),
-        Span::styled(&toast.message, Style::default().fg(Theme::GREY_100).add_modifier(Modifier::ITALIC)),
-        Span::styled("  ", Style::default()),
-    ]))
-    .style(Style::default().bg(Theme::GREY_700));
-
-    frame.render_widget(content, toast_area);
+    
+    // Success toasts get special treatment - centered and green
+    if is_success {
+        frame.render_widget(Clear, toast_area);
+        let lines = vec![
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("  ", Style::default()),
+                Span::styled(&toast.message, Style::default().fg(Theme::WHITE).add_modifier(Modifier::BOLD)),
+                Span::styled("  ", Style::default()),
+            ]),
+            Line::from(""),
+        ];
+        let content = Paragraph::new(lines)
+            .style(Style::default().bg(Theme::GREEN).fg(Theme::GREY_900));
+        frame.render_widget(content, toast_area);
+    } else if is_error {
+        let toast_area = Rect {
+            x: (area.width.saturating_sub(width)) / 2,
+            y: area.height.saturating_sub(5),
+            width: width.min(area.width),
+            height: 1,
+        };
+        let content = Paragraph::new(Line::from(vec![
+            Span::styled("  ✗ ", Style::default().fg(Theme::WHITE)),
+            Span::styled(&toast.message, Style::default().fg(Theme::WHITE)),
+            Span::styled("  ", Style::default()),
+        ]))
+        .style(Style::default().bg(Theme::RED));
+        frame.render_widget(content, toast_area);
+    } else {
+        let toast_area = Rect {
+            x: (area.width.saturating_sub(width)) / 2,
+            y: area.height.saturating_sub(5),
+            width: width.min(area.width),
+            height: 1,
+        };
+        let content = Paragraph::new(Line::from(vec![
+            Span::styled("  ✧ ", Style::default().fg(Theme::WHITE)),
+            Span::styled(&toast.message, Style::default().fg(Theme::GREY_100).add_modifier(Modifier::ITALIC)),
+            Span::styled("  ", Style::default()),
+        ]))
+        .style(Style::default().bg(Theme::GREY_700));
+        frame.render_widget(content, toast_area);
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
