@@ -146,6 +146,14 @@ pub enum ApplyMode {
 /// Spinner animation frames (braille pattern)
 pub const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
+/// Git file status for the status panel
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GitFileStatus {
+    Staged,
+    Modified,
+    Untracked,
+}
+
 /// Overlay state
 #[derive(Debug, Clone, PartialEq, Default)]
 pub enum Overlay {
@@ -196,6 +204,15 @@ pub enum Overlay {
         scroll: usize,
         reviewing: bool,
         pr_url: Option<String>,
+    },
+    /// Git status panel for viewing and managing changed files
+    GitStatus {
+        staged: Vec<String>,
+        modified: Vec<String>,
+        untracked: Vec<String>,
+        selected: usize,
+        scroll: usize,
+        commit_input: Option<String>,
     },
 }
 
@@ -1047,6 +1064,333 @@ impl App {
             *pr_url = Some(url);
         }
     }
+    
+    /// Show the git status panel with current changes
+    pub fn show_git_status(&mut self) {
+        use crate::git_ops;
+        
+        match git_ops::current_status(&self.repo_path) {
+            Ok(status) => {
+                self.overlay = Overlay::GitStatus {
+                    staged: status.staged,
+                    modified: status.modified,
+                    untracked: status.untracked,
+                    selected: 0,
+                    scroll: 0,
+                    commit_input: None,
+                };
+            }
+            Err(e) => {
+                self.show_toast(&format!("Git error: {}", e));
+            }
+        }
+    }
+    
+    /// Refresh git status in the overlay
+    pub fn refresh_git_status(&mut self) {
+        use crate::git_ops;
+        
+        if let Overlay::GitStatus { staged, modified, untracked, selected, .. } = &mut self.overlay {
+            if let Ok(status) = git_ops::current_status(&self.repo_path) {
+                *staged = status.staged;
+                *modified = status.modified;
+                *untracked = status.untracked;
+                // Clamp selection to valid range
+                let total = staged.len() + modified.len() + untracked.len();
+                if *selected >= total && total > 0 {
+                    *selected = total - 1;
+                }
+            }
+        }
+    }
+    
+    /// Navigate in git status panel
+    pub fn git_status_navigate(&mut self, delta: isize) {
+        if let Overlay::GitStatus { staged, modified, untracked, selected, .. } = &mut self.overlay {
+            let total = staged.len() + modified.len() + untracked.len();
+            if total == 0 {
+                return;
+            }
+            
+            let new_sel = (*selected as isize + delta).clamp(0, (total as isize) - 1) as usize;
+            *selected = new_sel;
+        }
+    }
+    
+    /// Get the selected file path in git status panel
+    pub fn git_status_selected_file(&self) -> Option<(String, GitFileStatus)> {
+        if let Overlay::GitStatus { staged, modified, untracked, selected, .. } = &self.overlay {
+            let staged_len = staged.len();
+            let modified_len = modified.len();
+            
+            if *selected < staged_len {
+                return Some((staged[*selected].clone(), GitFileStatus::Staged));
+            } else if *selected < staged_len + modified_len {
+                return Some((modified[*selected - staged_len].clone(), GitFileStatus::Modified));
+            } else if *selected < staged_len + modified_len + untracked.len() {
+                return Some((untracked[*selected - staged_len - modified_len].clone(), GitFileStatus::Untracked));
+            }
+        }
+        None
+    }
+    
+    /// Stage the selected file
+    pub fn git_stage_selected(&mut self) {
+        use crate::git_ops;
+        
+        if let Some((path, status)) = self.git_status_selected_file() {
+            match status {
+                GitFileStatus::Modified | GitFileStatus::Untracked => {
+                    if let Err(e) = git_ops::stage_file(&self.repo_path, &path) {
+                        self.show_toast(&format!("Stage failed: {}", e));
+                    } else {
+                        self.show_toast(&format!("Staged: {}", path));
+                        self.refresh_git_status();
+                    }
+                }
+                GitFileStatus::Staged => {
+                    self.show_toast("Already staged");
+                }
+            }
+        }
+    }
+    
+    /// Unstage the selected file
+    pub fn git_unstage_selected(&mut self) {
+        use std::process::Command;
+        
+        if let Some((path, status)) = self.git_status_selected_file() {
+            if status == GitFileStatus::Staged {
+                let output = Command::new("git")
+                    .current_dir(&self.repo_path)
+                    .args(["reset", "HEAD", "--", &path])
+                    .output();
+                    
+                match output {
+                    Ok(o) if o.status.success() => {
+                        self.show_toast(&format!("Unstaged: {}", path));
+                        self.refresh_git_status();
+                    }
+                    Ok(o) => {
+                        self.show_toast(&format!("Unstage failed: {}", String::from_utf8_lossy(&o.stderr)));
+                    }
+                    Err(e) => {
+                        self.show_toast(&format!("Unstage failed: {}", e));
+                    }
+                }
+            } else {
+                self.show_toast("Not staged");
+            }
+        }
+    }
+    
+    /// Restore (discard changes) the selected file
+    pub fn git_restore_selected(&mut self) {
+        use crate::git_ops;
+        
+        if let Some((path, status)) = self.git_status_selected_file() {
+            match status {
+                GitFileStatus::Modified => {
+                    if let Err(e) = git_ops::reset_file(&self.repo_path, &path) {
+                        self.show_toast(&format!("Restore failed: {}", e));
+                    } else {
+                        self.show_toast(&format!("Restored: {}", path));
+                        self.refresh_git_status();
+                        // Also refresh context
+                        let _ = self.context.refresh();
+                    }
+                }
+                GitFileStatus::Staged => {
+                    self.show_toast("Unstage first (u), then restore");
+                }
+                GitFileStatus::Untracked => {
+                    self.show_toast("Untracked files can't be restored");
+                }
+            }
+        }
+    }
+    
+    /// Stage all modified files
+    pub fn git_stage_all(&mut self) {
+        use crate::git_ops;
+        
+        if let Err(e) = git_ops::stage_all(&self.repo_path) {
+            self.show_toast(&format!("Stage all failed: {}", e));
+        } else {
+            self.show_toast("All files staged");
+            self.refresh_git_status();
+        }
+    }
+    
+    /// Start commit input mode
+    pub fn git_start_commit(&mut self) {
+        if let Overlay::GitStatus { staged, commit_input, .. } = &mut self.overlay {
+            if staged.is_empty() {
+                self.show_toast("No staged files to commit");
+                return;
+            }
+            *commit_input = Some(String::new());
+        }
+    }
+    
+    /// Cancel commit input
+    pub fn git_cancel_commit(&mut self) {
+        if let Overlay::GitStatus { commit_input, .. } = &mut self.overlay {
+            *commit_input = None;
+        }
+    }
+    
+    /// Push character to commit message
+    pub fn git_commit_push(&mut self, c: char) {
+        if let Overlay::GitStatus { commit_input: Some(input), .. } = &mut self.overlay {
+            input.push(c);
+        }
+    }
+    
+    /// Pop character from commit message
+    pub fn git_commit_pop(&mut self) {
+        if let Overlay::GitStatus { commit_input: Some(input), .. } = &mut self.overlay {
+            input.pop();
+        }
+    }
+    
+    /// Execute the commit
+    pub fn git_do_commit(&mut self) -> Result<String, String> {
+        use crate::git_ops;
+        
+        if let Overlay::GitStatus { commit_input: Some(msg), .. } = &self.overlay {
+            if msg.trim().is_empty() {
+                return Err("Commit message cannot be empty".to_string());
+            }
+            
+            match git_ops::commit(&self.repo_path, msg) {
+                Ok(oid) => {
+                    // Clear commit input and refresh
+                    if let Overlay::GitStatus { commit_input, .. } = &mut self.overlay {
+                        *commit_input = None;
+                    }
+                    self.refresh_git_status();
+                    let _ = self.context.refresh();
+                    Ok(oid)
+                }
+                Err(e) => Err(format!("Commit failed: {}", e))
+            }
+        } else {
+            Err("No commit in progress".to_string())
+        }
+    }
+    
+    /// Push current branch
+    pub fn git_push(&mut self) -> Result<String, String> {
+        use crate::git_ops;
+        
+        let branch = self.context.branch.clone();
+        match git_ops::push_branch(&self.repo_path, &branch) {
+            Ok(output) => {
+                let _ = self.context.refresh();
+                Ok(output)
+            }
+            Err(e) => Err(format!("Push failed: {}", e))
+        }
+    }
+    
+    /// Check if we're in commit input mode
+    pub fn is_git_commit_mode(&self) -> bool {
+        matches!(&self.overlay, Overlay::GitStatus { commit_input: Some(_), .. })
+    }
+    
+    /// Get the current commit message being typed
+    pub fn get_git_commit_input(&self) -> Option<&str> {
+        if let Overlay::GitStatus { commit_input: Some(input), .. } = &self.overlay {
+            Some(input.as_str())
+        } else {
+            None
+        }
+    }
+    
+    /// Delete the selected untracked file
+    pub fn git_delete_untracked(&mut self) {
+        use std::fs;
+        
+        if let Some((path, status)) = self.git_status_selected_file() {
+            if status == GitFileStatus::Untracked {
+                let full_path = self.repo_path.join(&path);
+                if full_path.is_dir() {
+                    match fs::remove_dir_all(&full_path) {
+                        Ok(_) => {
+                            self.show_toast(&format!("Deleted: {}", path));
+                            self.refresh_git_status();
+                        }
+                        Err(e) => {
+                            self.show_toast(&format!("Delete failed: {}", e));
+                        }
+                    }
+                } else {
+                    match fs::remove_file(&full_path) {
+                        Ok(_) => {
+                            self.show_toast(&format!("Deleted: {}", path));
+                            self.refresh_git_status();
+                        }
+                        Err(e) => {
+                            self.show_toast(&format!("Delete failed: {}", e));
+                        }
+                    }
+                }
+            } else {
+                self.show_toast("Use 'r' to restore tracked files");
+            }
+        }
+    }
+    
+    /// Clean all untracked files (git clean -fd)
+    pub fn git_clean_untracked(&mut self) -> Result<(), String> {
+        use std::process::Command;
+        
+        let output = Command::new("git")
+            .current_dir(&self.repo_path)
+            .args(["clean", "-fd"])
+            .output()
+            .map_err(|e| format!("Failed to run git clean: {}", e))?;
+        
+        if output.status.success() {
+            self.refresh_git_status();
+            let _ = self.context.refresh();
+            Ok(())
+        } else {
+            Err(format!("git clean failed: {}", String::from_utf8_lossy(&output.stderr)))
+        }
+    }
+    
+    /// Reset branch to clean state (discard all changes + remove untracked)
+    pub fn git_reset_hard(&mut self) -> Result<(), String> {
+        use std::process::Command;
+        
+        // First, reset all tracked changes
+        let reset_output = Command::new("git")
+            .current_dir(&self.repo_path)
+            .args(["reset", "--hard", "HEAD"])
+            .output()
+            .map_err(|e| format!("Failed to run git reset: {}", e))?;
+        
+        if !reset_output.status.success() {
+            return Err(format!("git reset failed: {}", String::from_utf8_lossy(&reset_output.stderr)));
+        }
+        
+        // Then clean untracked files
+        let clean_output = Command::new("git")
+            .current_dir(&self.repo_path)
+            .args(["clean", "-fd"])
+            .output()
+            .map_err(|e| format!("Failed to run git clean: {}", e))?;
+        
+        if clean_output.status.success() {
+            self.refresh_git_status();
+            let _ = self.context.refresh();
+            Ok(())
+        } else {
+            Err(format!("git clean failed: {}", String::from_utf8_lossy(&clean_output.stderr)))
+        }
+    }
 }
 
 /// Build a flat file tree for display with sorting
@@ -1242,6 +1586,9 @@ pub fn render(frame: &mut Frame, app: &App) {
         }
         Overlay::PRReview { branch_name, files_changed, review_comments, scroll, reviewing, pr_url } => {
             render_pr_review(frame, branch_name, files_changed, review_comments, *scroll, *reviewing, pr_url);
+        }
+        Overlay::GitStatus { staged, modified, untracked, selected, scroll, commit_input } => {
+            render_git_status(frame, staged, modified, untracked, *selected, *scroll, commit_input.as_deref());
         }
         Overlay::None => {}
     }
@@ -1785,8 +2132,9 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
         spans.push(Span::styled(" PR", Style::default().fg(Theme::GREY_400)));
     } else if app.context.has_changes() {
         spans.push(Span::styled("  │  ", Style::default().fg(Theme::GREY_600)));
+        spans.push(Span::styled(" c ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_300)));
         spans.push(Span::styled(
-            format!("◐ {} changed", app.context.modified_count),
+            format!(" {} changed ", app.context.modified_count),
             Style::default().fg(Theme::GREY_200),
         ));
     }
@@ -2659,6 +3007,181 @@ fn render_file_detail(frame: &mut Frame, path: &PathBuf, file_index: &crate::ind
             .border_style(Style::default().fg(Theme::GREY_400))
             .style(Style::default().bg(Theme::GREY_900)));
     
+    frame.render_widget(block, area);
+}
+
+fn render_git_status(
+    frame: &mut Frame,
+    staged: &[String],
+    modified: &[String],
+    untracked: &[String],
+    selected: usize,
+    _scroll: usize,
+    commit_input: Option<&str>,
+) {
+    let area = centered_rect(70, 80, frame.area());
+    frame.render_widget(Clear, area);
+
+    let total_files = staged.len() + modified.len() + untracked.len();
+    let mut current_idx = 0usize;
+    
+    let mut lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("     ✧ ", Style::default().fg(Theme::WHITE)),
+            Span::styled("Git Status", Style::default().fg(Theme::WHITE).add_modifier(Modifier::BOLD)),
+        ]),
+        Line::from(""),
+    ];
+    
+    // Helper to render a file with selection indicator
+    let render_file = |path: &str, icon: &str, icon_color: ratatui::style::Color, idx: usize, selected: usize| -> Line<'static> {
+        let is_selected = idx == selected;
+        let cursor = if is_selected { " › " } else { "   " };
+        
+        Line::from(vec![
+            Span::styled(cursor.to_string(), Style::default().fg(Theme::WHITE)),
+            Span::styled(format!("  {} ", icon), Style::default().fg(icon_color)),
+            Span::styled(
+                path.to_string(),
+                if is_selected {
+                    Style::default().fg(Theme::WHITE).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Theme::GREY_200)
+                }
+            ),
+        ])
+    };
+    
+    // Staged files section
+    if !staged.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled("     ─── ", Style::default().fg(Theme::GREY_600)),
+            Span::styled("Staged", Style::default().fg(Theme::GREEN).add_modifier(Modifier::BOLD)),
+            Span::styled(format!(" ({}) ", staged.len()), Style::default().fg(Theme::GREY_400)),
+            Span::styled("────────────────────────────", Style::default().fg(Theme::GREY_600)),
+        ]));
+        lines.push(Line::from(""));
+        
+        for (i, file) in staged.iter().enumerate() {
+            lines.push(render_file(file, "✓", Theme::GREEN, current_idx, selected));
+            current_idx += 1;
+        }
+        lines.push(Line::from(""));
+    }
+    
+    // Modified files section
+    if !modified.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled("     ─── ", Style::default().fg(Theme::GREY_600)),
+            Span::styled("Modified", Style::default().fg(Theme::BADGE_DOCS).add_modifier(Modifier::BOLD)),
+            Span::styled(format!(" ({}) ", modified.len()), Style::default().fg(Theme::GREY_400)),
+            Span::styled("──────────────────────────", Style::default().fg(Theme::GREY_600)),
+        ]));
+        lines.push(Line::from(""));
+        
+        for (i, file) in modified.iter().enumerate() {
+            lines.push(render_file(file, "●", Theme::BADGE_DOCS, current_idx, selected));
+            current_idx += 1;
+        }
+        lines.push(Line::from(""));
+    }
+    
+    // Untracked files section
+    if !untracked.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled("     ─── ", Style::default().fg(Theme::GREY_600)),
+            Span::styled("Untracked", Style::default().fg(Theme::GREY_300).add_modifier(Modifier::BOLD)),
+            Span::styled(format!(" ({}) ", untracked.len()), Style::default().fg(Theme::GREY_400)),
+            Span::styled("─────────────────────────", Style::default().fg(Theme::GREY_600)),
+        ]));
+        lines.push(Line::from(""));
+        
+        for (i, file) in untracked.iter().enumerate() {
+            lines.push(render_file(file, "?", Theme::GREY_400, current_idx, selected));
+            current_idx += 1;
+        }
+        lines.push(Line::from(""));
+    }
+    
+    // Empty state
+    if total_files == 0 {
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled("     ✓ Working tree clean", Style::default().fg(Theme::GREEN)),
+        ]));
+        lines.push(Line::from(""));
+    }
+    
+    // Separator before actions
+    lines.push(Line::from(vec![
+        Span::styled("     ─────────────────────────────────────────────", Style::default().fg(Theme::GREY_600))
+    ]));
+    lines.push(Line::from(""));
+    
+    // Commit input mode
+    if let Some(input) = commit_input {
+        lines.push(Line::from(vec![
+            Span::styled("     Commit message: ", Style::default().fg(Theme::GREY_400)),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled(format!("     │ {}_", input), Style::default().fg(Theme::WHITE)),
+        ]));
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled("     ", Style::default()),
+            Span::styled(" Enter ", Style::default().fg(Theme::GREY_900).bg(Theme::GREEN)),
+            Span::styled(" commit   ", Style::default().fg(Theme::GREY_400)),
+            Span::styled(" Esc ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_400)),
+            Span::styled(" cancel", Style::default().fg(Theme::GREY_400)),
+        ]));
+    } else {
+        // Action hints - Row 1: File operations
+        lines.push(Line::from(vec![
+            Span::styled("     ", Style::default()),
+            Span::styled(" s ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_300)),
+            Span::styled(" stage  ", Style::default().fg(Theme::GREY_400)),
+            Span::styled(" u ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_300)),
+            Span::styled(" unstage  ", Style::default().fg(Theme::GREY_400)),
+            Span::styled(" r ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_300)),
+            Span::styled(" restore  ", Style::default().fg(Theme::GREY_400)),
+            Span::styled(" d ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_300)),
+            Span::styled(" delete", Style::default().fg(Theme::GREY_400)),
+        ]));
+        // Row 2: Batch operations
+        lines.push(Line::from(vec![
+            Span::styled("     ", Style::default()),
+            Span::styled(" S ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_300)),
+            Span::styled(" stage all  ", Style::default().fg(Theme::GREY_400)),
+            Span::styled(" D ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_300)),
+            Span::styled(" clean untracked  ", Style::default().fg(Theme::GREY_400)),
+            Span::styled(" X ", Style::default().fg(Theme::GREY_900).bg(Theme::RED)),
+            Span::styled(" reset all", Style::default().fg(Theme::GREY_400)),
+        ]));
+        // Row 3: Git operations
+        lines.push(Line::from(vec![
+            Span::styled("     ", Style::default()),
+            Span::styled(" c ", Style::default().fg(Theme::GREY_900).bg(Theme::GREEN)),
+            Span::styled(" commit  ", Style::default().fg(Theme::GREY_400)),
+            Span::styled(" P ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_300)),
+            Span::styled(" push  ", Style::default().fg(Theme::GREY_400)),
+            Span::styled(" R ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_400)),
+            Span::styled(" refresh  ", Style::default().fg(Theme::GREY_400)),
+            Span::styled(" q ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_500)),
+            Span::styled(" close", Style::default().fg(Theme::GREY_500)),
+        ]));
+    }
+    lines.push(Line::from(""));
+
+    let block = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .block(Block::default()
+            .title(" ✧ 𝘨𝘪𝘵 ")
+            .title_style(Style::default().fg(Theme::GREY_100))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Theme::GREY_400))
+            .style(Style::default().bg(Theme::GREY_900)));
+
     frame.render_widget(block, area);
 }
 

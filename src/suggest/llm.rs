@@ -862,8 +862,29 @@ fn parse_codebase_suggestions(response: &str) -> anyhow::Result<Vec<Suggestion>>
         clean
     };
 
-    let parsed: Vec<CodebaseSuggestionJson> = serde_json::from_str(json_str)
-        .map_err(|e| anyhow::anyhow!("Failed to parse suggestions: {} | Response preview: {}", e, truncate_str(json_str, 200)))?;
+    // Try to parse as array first
+    let parsed: Vec<CodebaseSuggestionJson> = match serde_json::from_str(json_str) {
+        Ok(v) => v,
+        Err(e) => {
+            // Try to fix common JSON issues and retry
+            let fixed = fix_json_issues(json_str);
+            match serde_json::from_str(&fixed) {
+                Ok(v) => v,
+                Err(_) => {
+                    // If still failing, try to extract individual objects and parse them
+                    match try_parse_individual_suggestions(json_str) {
+                        Ok(v) if !v.is_empty() => v,
+                        _ => {
+                            // Log the error but return empty instead of crashing
+                            eprintln!("Warning: Failed to parse LLM suggestions: {}", e);
+                            eprintln!("Response preview: {}", truncate_str(json_str, 300));
+                            return Ok(Vec::new());
+                        }
+                    }
+                }
+            }
+        }
+    };
 
     let suggestions = parsed
         .into_iter()
@@ -923,6 +944,59 @@ fn truncate_str(s: &str, max: usize) -> &str {
     } else {
         &s[..max]
     }
+}
+
+/// Try to fix common JSON issues from LLM responses
+fn fix_json_issues(json: &str) -> String {
+    let mut fixed = json.to_string();
+    
+    // Remove trailing commas before ] or }
+    fixed = fixed.replace(",]", "]");
+    fixed = fixed.replace(",}", "}");
+    
+    // Fix common quote issues - smart quotes to regular quotes
+    fixed = fixed.replace('\u{201C}', "\"");  // Left double quote
+    fixed = fixed.replace('\u{201D}', "\"");  // Right double quote
+    fixed = fixed.replace('\u{2018}', "'");   // Left single quote
+    fixed = fixed.replace('\u{2019}', "'");   // Right single quote
+    
+    // Remove any control characters that might have slipped in
+    fixed = fixed.chars().filter(|c| !c.is_control() || *c == '\n' || *c == '\t').collect();
+    
+    fixed
+}
+
+/// Try to parse individual suggestion objects if array parsing fails
+fn try_parse_individual_suggestions(json: &str) -> anyhow::Result<Vec<CodebaseSuggestionJson>> {
+    let mut suggestions = Vec::new();
+    let mut depth = 0;
+    let mut start = None;
+    
+    for (i, c) in json.char_indices() {
+        match c {
+            '{' => {
+                if depth == 0 {
+                    start = Some(i);
+                }
+                depth += 1;
+            }
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    if let Some(s) = start {
+                        let obj_str = &json[s..=i];
+                        if let Ok(suggestion) = serde_json::from_str::<CodebaseSuggestionJson>(obj_str) {
+                            suggestions.push(suggestion);
+                        }
+                    }
+                    start = None;
+                }
+            }
+            _ => {}
+        }
+    }
+    
+    Ok(suggestions)
 }
 
 /// Parse JSON suggestions from LLM response

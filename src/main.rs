@@ -462,12 +462,22 @@ fn run_loop<B: Backend>(
     repo_path: PathBuf,
     index: CodebaseIndex,
 ) -> Result<()> {
+    // Track last git status refresh time
+    let mut last_git_refresh = std::time::Instant::now();
+    const GIT_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+    
     loop {
         // Clear expired toasts
         app.clear_expired_toast();
-        
+
         // Advance spinner animation
         app.tick_loading();
+        
+        // Periodically refresh git status (every 2 seconds)
+        if last_git_refresh.elapsed() >= GIT_REFRESH_INTERVAL {
+            let _ = app.context.refresh();
+            last_git_refresh = std::time::Instant::now();
+        }
 
         // Check for background messages (non-blocking)
         while let Ok(msg) = rx.try_recv() {
@@ -1109,6 +1119,112 @@ fn run_loop<B: Backend>(
                         continue;
                     }
                     
+                    // Handle GitStatus overlay
+                    if let Overlay::GitStatus { commit_input, .. } = &app.overlay {
+                        // Check if we're in commit input mode
+                        if commit_input.is_some() {
+                            match key.code {
+                                KeyCode::Esc => {
+                                    app.git_cancel_commit();
+                                }
+                                KeyCode::Enter => {
+                                    match app.git_do_commit() {
+                                        Ok(_oid) => {
+                                            app.show_toast("Committed successfully");
+                                        }
+                                        Err(e) => {
+                                            app.show_toast(&e);
+                                        }
+                                    }
+                                }
+                                KeyCode::Backspace => {
+                                    app.git_commit_pop();
+                                }
+                                KeyCode::Char(c) => {
+                                    app.git_commit_push(c);
+                                }
+                                _ => {}
+                            }
+                        } else {
+                            // Normal git status navigation
+                            match key.code {
+                                KeyCode::Esc | KeyCode::Char('q') => {
+                                    app.close_overlay();
+                                }
+                                KeyCode::Down | KeyCode::Char('j') => {
+                                    app.git_status_navigate(1);
+                                }
+                                KeyCode::Up | KeyCode::Char('k') => {
+                                    app.git_status_navigate(-1);
+                                }
+                                KeyCode::Char('s') => {
+                                    // Stage selected file
+                                    app.git_stage_selected();
+                                }
+                                KeyCode::Char('S') => {
+                                    // Stage all files
+                                    app.git_stage_all();
+                                }
+                                KeyCode::Char('u') => {
+                                    // Unstage selected file
+                                    app.git_unstage_selected();
+                                }
+                                KeyCode::Char('r') => {
+                                    // Restore (discard changes) selected file
+                                    app.git_restore_selected();
+                                }
+                                KeyCode::Char('R') => {
+                                    // Refresh git status
+                                    app.refresh_git_status();
+                                    app.show_toast("Refreshed");
+                                }
+                                KeyCode::Char('c') => {
+                                    // Start commit
+                                    app.git_start_commit();
+                                }
+                                KeyCode::Char('P') => {
+                                    // Push
+                                    match app.git_push() {
+                                        Ok(_) => {
+                                            app.show_toast("Pushed successfully");
+                                        }
+                                        Err(e) => {
+                                            app.show_toast(&e);
+                                        }
+                                    }
+                                }
+                                KeyCode::Char('d') | KeyCode::Char('x') => {
+                                    // Delete untracked file
+                                    app.git_delete_untracked();
+                                }
+                                KeyCode::Char('D') => {
+                                    // Clean all untracked files
+                                    match app.git_clean_untracked() {
+                                        Ok(_) => {
+                                            app.show_toast("Cleaned all untracked files");
+                                        }
+                                        Err(e) => {
+                                            app.show_toast(&e);
+                                        }
+                                    }
+                                }
+                                KeyCode::Char('X') => {
+                                    // Reset hard - nuke everything back to clean
+                                    match app.git_reset_hard() {
+                                        Ok(_) => {
+                                            app.show_toast("Branch reset to clean state");
+                                        }
+                                        Err(e) => {
+                                            app.show_toast(&e);
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        continue;
+                    }
+                    
                     // Handle other overlays
                     match key.code {
                         KeyCode::Esc | KeyCode::Char('q') => app.close_overlay(),
@@ -1246,6 +1362,10 @@ fn run_loop<B: Backend>(
                     KeyCode::Char('p') => {
                         // PR workflow - show PR review panel
                         app.show_pr_review();
+                    }
+                    KeyCode::Char('c') => {
+                        // Git status - view and manage changed files
+                        app.show_git_status();
                     }
                     KeyCode::Char('r') => {
                         if let Err(e) = app.context.refresh() {
