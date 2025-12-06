@@ -15,6 +15,7 @@
 //! ║  main ● 5 changed │ ? inquiry  ↵ view  a apply  q quit      ║
 //! ╚══════════════════════════════════════════════════════════════╝
 
+pub mod markdown;
 pub mod panels;
 pub mod theme;
 
@@ -103,6 +104,7 @@ pub enum InputMode {
     #[default]
     Normal,
     Search,
+    Question,  // Asking cosmos a question
 }
 
 /// Loading state for background tasks
@@ -288,6 +290,9 @@ pub struct App {
     pub sort_mode: SortMode,
     pub view_mode: ViewMode,
     
+    // Question input (ask cosmos)
+    pub question_input: String,
+    
     // Loading state for background tasks
     pub loading: LoadingState,
     pub loading_frame: usize,
@@ -350,6 +355,7 @@ impl App {
             search_query: String::new(),
             sort_mode: SortMode::Name,
             view_mode: ViewMode::Grouped,  // Default to grouped view
+            question_input: String::new(),
             loading: LoadingState::None,
             loading_frame: 0,
             llm_summaries: std::collections::HashMap::new(),
@@ -413,6 +419,36 @@ impl App {
         self.input_mode = InputMode::Normal;
         self.search_query.clear();
         self.apply_filter();
+    }
+    
+    /// Enter question mode
+    pub fn start_question(&mut self) {
+        self.input_mode = InputMode::Question;
+        self.question_input.clear();
+    }
+    
+    /// Exit question mode
+    pub fn exit_question(&mut self) {
+        self.input_mode = InputMode::Normal;
+        self.question_input.clear();
+    }
+    
+    /// Add character to question input
+    pub fn question_push(&mut self, c: char) {
+        self.question_input.push(c);
+    }
+    
+    /// Remove last character from question input
+    pub fn question_pop(&mut self) {
+        self.question_input.pop();
+    }
+    
+    /// Get the current question and clear it
+    pub fn take_question(&mut self) -> String {
+        let q = self.question_input.clone();
+        self.question_input.clear();
+        self.input_mode = InputMode::Normal;
+        q
     }
     
     /// Add character to search query
@@ -1250,6 +1286,30 @@ fn render_main(frame: &mut Frame, area: Rect, app: &App) {
         ])
         .split(area);
     
+    // Check if we're in question mode or have a question
+    let show_question_box = app.input_mode == InputMode::Question || !app.question_input.is_empty();
+    
+    // Split vertically: optional question input + main panels
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(if show_question_box {
+            vec![
+                Constraint::Length(3),   // Question input box
+                Constraint::Min(10),     // Main panels
+            ]
+        } else {
+            vec![
+                Constraint::Length(0),   // Hidden question box
+                Constraint::Min(10),     // Main panels
+            ]
+        })
+        .split(padded[1]);
+    
+    // Render question input box when in question mode
+    if show_question_box {
+        render_question_input(frame, vertical[0], app);
+    }
+    
     // Split into two panels with gap
     let panels = Layout::default()
         .direction(Direction::Horizontal)
@@ -1258,7 +1318,7 @@ fn render_main(frame: &mut Frame, area: Rect, app: &App) {
             Constraint::Length(2),       // Gap between panels
             Constraint::Percentage(62),  // Suggestions (wider for wrapped text)
         ])
-        .split(padded[1]);
+        .split(vertical[1]);
 
     render_project_panel(frame, panels[0], app);
     render_suggestions_panel(frame, panels[2], app);
@@ -1574,6 +1634,49 @@ fn render_suggestions_panel(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(paragraph, area);
 }
 
+fn render_question_input(frame: &mut Frame, area: Rect, app: &App) {
+    let is_active = app.input_mode == InputMode::Question;
+    
+    let border_style = if is_active {
+        Style::default().fg(Theme::WHITE)
+    } else {
+        Style::default().fg(Theme::GREY_500)
+    };
+    
+    // Build the input display
+    let prompt = "✦ Ask cosmos: ";
+    let cursor = if is_active { "█" } else { "" };
+    
+    let spans = vec![
+        Span::styled(prompt, Style::default().fg(Theme::GREY_300)),
+        Span::styled(&app.question_input, Style::default().fg(Theme::WHITE)),
+        Span::styled(cursor, Style::default().fg(Theme::WHITE)),
+    ];
+    
+    let hint = if is_active {
+        if app.question_input.is_empty() {
+            "  (Enter to ask, Esc to cancel)"
+        } else {
+            ""
+        }
+    } else {
+        "  (press 'i' to ask a question)"
+    };
+    
+    let mut full_spans = spans;
+    full_spans.push(Span::styled(hint, Style::default().fg(Theme::GREY_500)));
+    
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border_style)
+        .style(Style::default().bg(Theme::GREY_800));
+    
+    let paragraph = Paragraph::new(Line::from(full_spans))
+        .block(block);
+    
+    frame.render_widget(paragraph, area);
+}
+
 fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
     // Top line - subtle separator
     let separator = Line::from(vec![
@@ -1632,6 +1735,7 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
 
     // Key hints with elegant styling - high contrast
     let hints = [
+        ("𝘪", "𝘢𝘴𝘬"),
         ("𝘨", "𝘨𝘳𝘰𝘶𝘱"),
         ("/", "𝘴𝘦𝘢𝘳𝘤𝘩"),
         ("?", "𝘩𝘦𝘭𝘱"),
@@ -1725,7 +1829,7 @@ fn render_help(frame: &mut Frame) {
         Line::from(""),
         Line::from(vec![
             Span::styled("     𝘪", Style::default().fg(Theme::WHITE)),
-            Span::styled("                 AI inquiry", Style::default().fg(Theme::GREY_300)),
+            Span::styled("                 Ask cosmos a question", Style::default().fg(Theme::GREY_300)),
         ]),
         Line::from(vec![
             Span::styled("     𝘢", Style::default().fg(Theme::WHITE)),
@@ -1819,30 +1923,31 @@ fn render_suggestion_detail(frame: &mut Frame, suggestion: &Suggestion, scroll: 
             Span::styled("     ─────────────────────────────────────────", Style::default().fg(Theme::GREY_600))
         ]));
         lines.push(Line::from(""));
+
+        // Parse markdown and render with styling
+        let parsed_lines = markdown::parse_markdown(detail, inner_width.saturating_sub(10));
         
-        // Wrap each line of detail text
-        let detail_lines: Vec<&str> = detail.lines().collect();
-        let mut wrapped_detail_lines = Vec::new();
+        // Add padding to each line
+        let padded_lines: Vec<Line<'static>> = parsed_lines.into_iter()
+            .map(|line| {
+                let mut spans = vec![Span::styled("     ", Style::default())];
+                spans.extend(line.spans);
+                Line::from(spans)
+            })
+            .collect();
         
-        for line in &detail_lines {
-            let wrapped = wrap_text(line, inner_width.saturating_sub(10));
-            for w in wrapped {
-                wrapped_detail_lines.push(w);
-            }
+        let total_lines = padded_lines.len();
+
+        for line in padded_lines.iter().skip(scroll).take(visible_height) {
+            lines.push(line.clone());
         }
-        
-        for line in wrapped_detail_lines.iter().skip(scroll).take(visible_height) {
-            lines.push(Line::from(vec![
-                Span::styled(format!("     {}", line), Style::default().fg(Theme::GREY_100)),
-            ]));
-        }
-        
+
         // Scroll indicator
-        if wrapped_detail_lines.len() > visible_height {
+        if total_lines > visible_height {
             lines.push(Line::from(""));
             lines.push(Line::from(vec![
                 Span::styled(
-                    format!("     ↕ {}/{} ", scroll + 1, wrapped_detail_lines.len().saturating_sub(visible_height) + 1), 
+                    format!("     ↕ {}/{} ", scroll + 1, total_lines.saturating_sub(visible_height) + 1),
                     Style::default().fg(Theme::GREY_400)
                 ),
             ]));
@@ -1882,13 +1987,13 @@ fn render_inquiry(frame: &mut Frame, response: &str, scroll: usize) {
 
     let visible_height = area.height.saturating_sub(10) as usize;
     let inner_width = area.width.saturating_sub(10) as usize;
-    
+
     let mut lines = vec![
         Line::from(""),
         Line::from(""),
         Line::from(vec![
             Span::styled("     ✧ ", Style::default().fg(Theme::WHITE)),
-            Span::styled("𝘤𝘰𝘴𝘮𝘰𝘴 𝘴𝘶𝘨𝘨𝘦𝘴𝘵𝘴...", Style::default().fg(Theme::GREY_200).add_modifier(Modifier::ITALIC)),
+            Span::styled("𝘤𝘰𝘴𝘮𝘰𝘴 𝘳𝘦𝘴𝘱𝘰𝘯𝘥𝘴...", Style::default().fg(Theme::GREY_200).add_modifier(Modifier::ITALIC)),
         ]),
         Line::from(""),
         Line::from(vec![
@@ -1897,33 +2002,30 @@ fn render_inquiry(frame: &mut Frame, response: &str, scroll: usize) {
         Line::from(""),
     ];
 
-    // Wrap each line of the response
-    let response_lines: Vec<&str> = response.lines().collect();
-    let mut wrapped_lines = Vec::new();
+    // Parse markdown and render with styling
+    let parsed_lines = markdown::parse_markdown(response, inner_width.saturating_sub(10));
     
-    for line in &response_lines {
-        if line.is_empty() {
-            wrapped_lines.push(String::new());
-        } else {
-            let wrapped = wrap_text(line, inner_width.saturating_sub(10));
-            for w in wrapped {
-                wrapped_lines.push(w);
-            }
-        }
+    // Add padding to each line
+    let padded_lines: Vec<Line<'static>> = parsed_lines.into_iter()
+        .map(|line| {
+            let mut spans = vec![Span::styled("     ", Style::default())];
+            spans.extend(line.spans);
+            Line::from(spans)
+        })
+        .collect();
+
+    for line in padded_lines.iter().skip(scroll).take(visible_height) {
+        lines.push(line.clone());
     }
     
-    for line in wrapped_lines.iter().skip(scroll).take(visible_height) {
-        lines.push(Line::from(vec![
-            Span::styled(format!("     {}", line), Style::default().fg(Theme::GREY_100)),
-        ]));
-    }
+    let total_lines = padded_lines.len();
     
     // Scroll indicator
-    if wrapped_lines.len() > visible_height {
+    if total_lines > visible_height {
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
             Span::styled(
-                format!("     ↕ {}/{} ", scroll + 1, wrapped_lines.len().saturating_sub(visible_height) + 1), 
+                format!("     ↕ {}/{} ", scroll + 1, total_lines.saturating_sub(visible_height) + 1),
                 Style::default().fg(Theme::GREY_400)
             ),
         ]));

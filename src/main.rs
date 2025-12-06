@@ -120,6 +120,12 @@ pub enum BackgroundMessage {
     PRCreated(String), // PR URL
     /// Generic error (used for push/etc)
     Error(String),
+    /// Response to a user question
+    QuestionResponse {
+        question: String,
+        answer: String,
+        usage: Option<suggest::llm::Usage>,
+    },
 }
 
 #[tokio::main]
@@ -606,6 +612,19 @@ fn run_loop<B: Backend>(
                 BackgroundMessage::Error(e) => {
                     app.show_toast(&truncate(&e, 50));
                 }
+                BackgroundMessage::QuestionResponse { question, answer, usage } => {
+                    // Track cost
+                    if let Some(u) = usage {
+                        let cost = u.calculate_cost(suggest::llm::Model::GrokFast);
+                        app.session_cost += cost;
+                        app.session_tokens += u.total_tokens;
+                    }
+                    
+                    app.loading = LoadingState::None;
+                    // Show the response in the inquiry overlay
+                    let response = format!("Q: {}\n\n{}", question, answer);
+                    app.show_inquiry(response);
+                }
             }
         }
 
@@ -628,6 +647,44 @@ fn run_loop<B: Backend>(
                         }
                         KeyCode::Backspace => app.search_pop(),
                         KeyCode::Char(c) => app.search_push(c),
+                        _ => {}
+                    }
+                    continue;
+                }
+                
+                // Handle question input mode
+                if app.input_mode == InputMode::Question {
+                    match key.code {
+                        KeyCode::Esc => app.exit_question(),
+                        KeyCode::Enter => {
+                            let question = app.take_question();
+                            if !question.is_empty() {
+                                // Send question to LLM
+                                let index_clone = index.clone();
+                                let context_clone = app.context.clone();
+                                let tx_question = tx.clone();
+                                
+                                app.loading = LoadingState::GeneratingSuggestions;
+                                app.show_toast("Thinking...");
+                                
+                                tokio::spawn(async move {
+                                    match suggest::llm::ask_question(&index_clone, &context_clone, &question).await {
+                                        Ok((answer, usage)) => {
+                                            let _ = tx_question.send(BackgroundMessage::QuestionResponse {
+                                                question,
+                                                answer,
+                                                usage,
+                                            });
+                                        }
+                                        Err(e) => {
+                                            let _ = tx_question.send(BackgroundMessage::Error(e.to_string()));
+                                        }
+                                    }
+                                });
+                            }
+                        }
+                        KeyCode::Backspace => app.question_pop(),
+                        KeyCode::Char(c) => app.question_push(c),
                         _ => {}
                     }
                     continue;
@@ -1179,7 +1236,7 @@ fn run_loop<B: Backend>(
                         if !suggest::llm::is_available() {
                             app.show_toast("Run: cosmos --setup");
                         } else {
-                            app.show_toast("Inquiry coming soon...");
+                            app.start_question();
                         }
                     }
                     KeyCode::Char('b') => {

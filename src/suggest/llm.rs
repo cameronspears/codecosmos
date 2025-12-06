@@ -302,6 +302,67 @@ Be specific to this code. Don't be generic."#;
     call_llm(system, &user, Model::GrokFast).await
 }
 
+/// Ask cosmos a general question about the codebase
+pub async fn ask_question(
+    index: &CodebaseIndex,
+    context: &WorkContext,
+    question: &str,
+) -> anyhow::Result<(String, Option<Usage>)> {
+    let system = r#"You are Cosmos, a contemplative companion for codebases. The developer is asking you a question about their code.
+
+Respond thoughtfully and concisely. Be specific to their codebase when you can.
+Use the project context provided to give relevant answers.
+If the question is about specific files or code, reference them by path.
+Keep responses focused and actionable - developers appreciate brevity.
+
+Format your response with markdown for readability:
+- Use **bold** for emphasis
+- Use `code` for file names, functions, and code snippets
+- Use bullet points for lists
+- Use ### for section headers if needed
+- Keep it clean and scannable"#;
+
+    // Build context about the codebase
+    let stats = index.stats();
+    let file_list: Vec<_> = index.files.keys()
+        .take(50)  // Limit to avoid huge prompts
+        .map(|p| p.display().to_string())
+        .collect();
+    
+    // Get symbols for context
+    let symbols: Vec<_> = index.files.values()
+        .flat_map(|f| f.symbols.iter())
+        .filter(|s| matches!(s.kind, SymbolKind::Function | SymbolKind::Struct | SymbolKind::Enum))
+        .take(100)
+        .map(|s| format!("{:?}: {}", s.kind, s.name))
+        .collect();
+
+    let user = format!(
+        r#"PROJECT CONTEXT:
+- {} files, {} lines of code
+- {} symbols total
+- Branch: {}, {} uncommitted changes
+- Key files: {}
+
+KEY SYMBOLS:
+{}
+
+QUESTION:
+{}"#,
+        stats.file_count,
+        stats.total_loc,
+        stats.symbol_count,
+        context.branch,
+        context.modified_count,
+        file_list.join(", "),
+        symbols.join("\n"),
+        question
+    );
+
+    let response = call_llm_with_usage(system, &user, Model::GrokFast, false).await?;
+    Ok((response.content, response.usage))
+}
+
 /// Generate a fix/change for a specific suggestion (returns diff format)
 pub async fn generate_fix(
     path: &PathBuf,
