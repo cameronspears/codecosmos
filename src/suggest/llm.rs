@@ -302,7 +302,7 @@ Be specific to this code. Don't be generic."#;
     call_llm(system, &user, Model::GrokFast).await
 }
 
-/// Generate a fix/change for a specific suggestion
+/// Generate a fix/change for a specific suggestion (returns diff format)
 pub async fn generate_fix(
     path: &PathBuf,
     content: &str,
@@ -331,6 +331,226 @@ Be precise. Only change what's necessary."#;
     );
 
     call_llm(system, &user, Model::Opus).await
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  DIRECT CODE GENERATION (Human plan → Opus applies changes)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Result of generating and applying a fix
+#[derive(Debug, Clone)]
+pub struct AppliedFix {
+    /// Human-readable description of what was changed
+    pub description: String,
+    /// The new file content (to be written directly)
+    pub new_content: String,
+    /// Which functions/areas were modified
+    pub modified_areas: Vec<String>,
+    /// Usage stats
+    pub usage: Option<Usage>,
+}
+
+/// Generate the actual fixed code content based on a human-language plan
+/// This is Phase 2 of the two-phase fix flow - Opus generates the actual changes
+pub async fn generate_fix_content(
+    path: &PathBuf,
+    content: &str,
+    suggestion: &Suggestion,
+    plan: &FixPreview,
+) -> anyhow::Result<AppliedFix> {
+    let system = r#"You are a senior developer implementing a code fix. You've been given a plan - now implement it.
+
+OUTPUT FORMAT (JSON):
+{
+  "description": "1-2 sentence summary of what you changed",
+  "modified_areas": ["function_name", "another_function"],
+  "new_content": "THE COMPLETE UPDATED FILE CONTENT"
+}
+
+CRITICAL RULES:
+- new_content must be the COMPLETE file, not a snippet
+- Preserve all existing functionality that isn't being changed
+- Maintain the exact same coding style and conventions
+- Only change what the plan describes
+- Keep imports, comments, and structure intact"#;
+
+    let plan_text = format!(
+        "Plan: {}\nScope: {}\nAffected areas: {}{}",
+        plan.description,
+        plan.scope.label(),
+        plan.affected_areas.join(", "),
+        plan.modifier.as_ref().map(|m| format!("\nUser modifications: {}", m)).unwrap_or_default()
+    );
+
+    let user = format!(
+        "File: {}\n\nOriginal Issue: {}\n{}\n\n{}\n\nCurrent Code:\n```\n{}\n```\n\nImplement the fix according to the plan. Output the complete updated file.",
+        path.display(),
+        suggestion.summary,
+        suggestion.detail.as_deref().unwrap_or(""),
+        plan_text,
+        content
+    );
+
+    let response = call_llm_with_usage(system, &user, Model::Opus, true).await?;
+    
+    // Parse the JSON response
+    let json_str = extract_json_object(&response.content)
+        .ok_or_else(|| anyhow::anyhow!("No JSON found in fix response"))?;
+    
+    let parsed: serde_json::Value = serde_json::from_str(json_str)
+        .map_err(|e| anyhow::anyhow!("Failed to parse fix JSON: {}", e))?;
+    
+    let description = parsed.get("description")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Applied the requested fix")
+        .to_string();
+    
+    let modified_areas = parsed.get("modified_areas")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    
+    let new_content = parsed.get("new_content")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("Missing new_content in response"))?
+        .to_string();
+    
+    // Validate the new content isn't empty or too short
+    if new_content.trim().is_empty() {
+        return Err(anyhow::anyhow!("Generated content is empty"));
+    }
+    
+    // Basic sanity check - new content should be similar length to original
+    let length_ratio = new_content.len() as f64 / content.len() as f64;
+    if length_ratio < 0.3 || length_ratio > 3.0 {
+        // Allow but warn - the change might be legitimate
+        eprintln!("Warning: Generated content length differs significantly (ratio: {:.2})", length_ratio);
+    }
+    
+    Ok(AppliedFix {
+        description,
+        new_content,
+        modified_areas,
+        usage: response.usage,
+    })
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  FAST FIX PREVIEW (Phase 1 of two-phase fix)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Quick preview of what a fix will do - generated in <1 second
+#[derive(Debug, Clone, PartialEq)]
+pub struct FixPreview {
+    /// Human-readable description of what will change (1-2 sentences)
+    pub description: String,
+    /// Which functions/areas are affected
+    pub affected_areas: Vec<String>,
+    /// Estimated scope: small (few lines), medium (function), large (multiple functions/file restructure)
+    pub scope: FixScope,
+    /// Optional user modifier to refine the fix
+    pub modifier: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FixScope {
+    Small,   // Few lines changed
+    Medium,  // A function or two
+    Large,   // Multiple functions or file restructure
+}
+
+impl FixScope {
+    pub fn label(&self) -> &'static str {
+        match self {
+            FixScope::Small => "small",
+            FixScope::Medium => "medium", 
+            FixScope::Large => "large",
+        }
+    }
+    
+    pub fn icon(&self) -> &'static str {
+        match self {
+            FixScope::Small => "·",
+            FixScope::Medium => "◐",
+            FixScope::Large => "●",
+        }
+    }
+}
+
+/// Generate a quick preview of what the fix will do (uses Grok Fast for speed)
+/// This is Phase 1 of the two-phase fix flow - lets users approve before waiting for full diff
+pub async fn generate_fix_preview(
+    path: &PathBuf,
+    suggestion: &Suggestion,
+    modifier: Option<&str>,
+) -> anyhow::Result<FixPreview> {
+    let system = r#"You are a code assistant. Briefly describe what changes are needed to fix this issue.
+
+OUTPUT FORMAT (JSON):
+{
+  "description": "1-2 sentence description of what will change",
+  "affected_areas": ["function_name", "another_function"],
+  "scope": "small|medium|large"
+}
+
+SCOPE GUIDE:
+- small: few lines, simple change
+- medium: modifying a function or adding a new one
+- large: multiple functions, restructuring, or splitting files
+
+Be concise. No code, just describe the change in plain English."#;
+
+    let modifier_text = modifier
+        .map(|m| format!("\n\nUser wants: {}", m))
+        .unwrap_or_default();
+
+    let user = format!(
+        "File: {}\nIssue: {}\n{}{}",
+        path.display(),
+        suggestion.summary,
+        suggestion.detail.as_deref().unwrap_or(""),
+        modifier_text
+    );
+
+    let response = call_llm(system, &user, Model::GrokFast).await?;
+    parse_fix_preview(&response, modifier.map(String::from))
+}
+
+/// Parse the preview JSON response
+fn parse_fix_preview(response: &str, modifier: Option<String>) -> anyhow::Result<FixPreview> {
+    // Extract JSON from response
+    let json_str = extract_json_object(response)
+        .ok_or_else(|| anyhow::anyhow!("No JSON found in preview response"))?;
+
+    let parsed: serde_json::Value = serde_json::from_str(json_str)
+        .map_err(|e| anyhow::anyhow!("Failed to parse preview JSON: {}", e))?;
+
+    let description = parsed.get("description")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Fix the identified issue")
+        .to_string();
+
+    let affected_areas = parsed.get("affected_areas")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let scope = match parsed.get("scope").and_then(|v| v.as_str()) {
+        Some("small") => FixScope::Small,
+        Some("large") => FixScope::Large,
+        _ => FixScope::Medium,
+    };
+
+    Ok(FixPreview {
+        description,
+        affected_areas,
+        scope,
+        modifier,
+    })
 }
 
 /// Refine a fix based on user feedback via chat
@@ -1003,29 +1223,46 @@ pub async fn generate_file_summaries(
 }
 
 /// Generate summaries for a specific list of files with project context
+/// Uses parallel batch processing for speed
 pub async fn generate_summaries_for_files(
     index: &CodebaseIndex,
     files: &[PathBuf],
     project_context: &str,
 ) -> anyhow::Result<(HashMap<PathBuf, String>, Option<Usage>)> {
-    let batch_size = 4;
+    // Increased batch size for fewer API calls
+    let batch_size = 8;
+    // Number of concurrent API calls (be careful with rate limits)
+    let concurrency = 2;
+    
+    let batches: Vec<_> = files.chunks(batch_size).collect();
     
     let mut all_summaries = HashMap::new();
     let mut total_usage = Usage::default();
     
-    for batch in files.chunks(batch_size) {
-        match generate_summary_batch(index, batch, project_context).await {
-            Ok(result) => {
-                all_summaries.extend(result.summaries);
-                if let Some(usage) = result.usage {
-                    total_usage.prompt_tokens += usage.prompt_tokens;
-                    total_usage.completion_tokens += usage.completion_tokens;
-                    total_usage.total_tokens += usage.total_tokens;
+    // Process batches with limited concurrency
+    for batch_group in batches.chunks(concurrency) {
+        // Run concurrent batches
+        let futures: Vec<_> = batch_group
+            .iter()
+            .map(|batch| generate_summary_batch(index, batch, project_context))
+            .collect();
+        
+        let results = futures::future::join_all(futures).await;
+        
+        for result in results {
+            match result {
+                Ok(batch_result) => {
+                    all_summaries.extend(batch_result.summaries);
+                    if let Some(usage) = batch_result.usage {
+                        total_usage.prompt_tokens += usage.prompt_tokens;
+                        total_usage.completion_tokens += usage.completion_tokens;
+                        total_usage.total_tokens += usage.total_tokens;
+                    }
                 }
-            }
-            Err(e) => {
-                // Log error but continue with other batches
-                eprintln!("Warning: Failed to generate summaries for batch: {}", e);
+                Err(e) => {
+                    // Log error but continue with other batches
+                    eprintln!("Warning: Failed to generate summaries for batch: {}", e);
+                }
             }
         }
     }
@@ -1117,7 +1354,7 @@ OUTPUT: A JSON object mapping file paths to summary strings. Example:
 
     let user_prompt = build_batch_context(index, files, project_context);
     
-    let response = call_llm_with_usage(system, &user_prompt, Model::Opus, true).await?;
+    let response = call_llm_with_usage(system, &user_prompt, Model::GrokFast, true).await?;
     
     let summaries = parse_summaries_response(&response.content)?;
     

@@ -88,7 +88,8 @@ pub enum LoadingState {
     None,
     GeneratingSuggestions,
     GeneratingSummaries,
-    GeneratingFix,
+    GeneratingPreview,  // Fast preview generation (<1s)
+    GeneratingFix,      // Full fix generation (slower)
 }
 
 impl LoadingState {
@@ -96,7 +97,8 @@ impl LoadingState {
         match self {
             LoadingState::None => "",
             LoadingState::GeneratingSuggestions => "Analyzing codebase with Opus 4.5",
-            LoadingState::GeneratingSummaries => "Generating file summaries",
+            LoadingState::GeneratingSummaries => "Summarizing files with Grok",
+            LoadingState::GeneratingPreview => "Previewing fix...",
             LoadingState::GeneratingFix => "Generating fix with Opus 4.5",
         }
     }
@@ -141,6 +143,14 @@ pub enum Overlay {
         chat_input: String,
         file_path: PathBuf,
         summary: String,
+    },
+    /// Fast preview of what a fix will do - Phase 1 of two-phase fix flow
+    FixPreview {
+        suggestion_id: uuid::Uuid,
+        file_path: PathBuf,
+        summary: String,
+        preview: crate::suggest::llm::FixPreview,
+        modifier_input: String,
     },
     FileDetail {
         path: PathBuf,
@@ -201,6 +211,9 @@ pub struct App {
     pub session_tokens: u32,        // Total tokens used this session
     pub active_model: Option<String>, // Current/last model used
     
+    // Track if summaries need generation (to avoid showing loading state when all cached)
+    pub needs_summary_generation: bool,
+    
     // Cached data for display
     pub file_tree: Vec<FlatTreeEntry>,
     pub filtered_tree: Vec<FlatTreeEntry>,
@@ -239,6 +252,7 @@ impl App {
             session_cost: 0.0,
             session_tokens: 0,
             active_model: None,
+            needs_summary_generation: false,
             file_tree,
             filtered_tree,
             repo_path,
@@ -252,9 +266,10 @@ impl App {
         }
     }
     
-    /// Update file summaries from LLM
+    /// Update file summaries from LLM (merges with existing, doesn't replace)
     pub fn update_summaries(&mut self, summaries: std::collections::HashMap<PathBuf, String>) {
-        self.llm_summaries = summaries;
+        // IMPORTANT: Extend, don't replace! This preserves cached summaries
+        self.llm_summaries.extend(summaries);
     }
     
     /// Get LLM summary for a file
@@ -437,6 +452,40 @@ impl App {
             file_path,
             summary,
         };
+    }
+
+    /// Show fix preview overlay (Phase 1 - fast preview)
+    pub fn show_fix_preview(&mut self, suggestion_id: uuid::Uuid, file_path: PathBuf, summary: String, preview: crate::suggest::llm::FixPreview) {
+        self.overlay = Overlay::FixPreview {
+            suggestion_id,
+            file_path,
+            summary,
+            preview,
+            modifier_input: String::new(),
+        };
+    }
+
+    /// Push character to preview modifier input
+    pub fn preview_modifier_push(&mut self, c: char) {
+        if let Overlay::FixPreview { modifier_input, .. } = &mut self.overlay {
+            modifier_input.push(c);
+        }
+    }
+
+    /// Pop character from preview modifier input
+    pub fn preview_modifier_pop(&mut self) {
+        if let Overlay::FixPreview { modifier_input, .. } = &mut self.overlay {
+            modifier_input.pop();
+        }
+    }
+
+    /// Get the current preview modifier text
+    pub fn get_preview_modifier(&self) -> Option<&str> {
+        if let Overlay::FixPreview { modifier_input, .. } = &self.overlay {
+            Some(modifier_input.as_str())
+        } else {
+            None
+        }
     }
 
     /// Get mutable access to apply confirm edit buffer
@@ -667,6 +716,9 @@ pub fn render(frame: &mut Frame, app: &App) {
         }
         Overlay::ApplyConfirm { diff_preview, scroll, mode, edit_buffer, chat_input, file_path, summary, .. } => {
             render_apply_confirm(frame, diff_preview, *scroll, mode, edit_buffer, chat_input, file_path, summary);
+        }
+        Overlay::FixPreview { file_path, summary, preview, modifier_input, .. } => {
+            render_fix_preview(frame, file_path, summary, preview, modifier_input);
         }
         Overlay::FileDetail { path, scroll } => {
             if let Some(file_index) = app.index.files.get(path) {
@@ -1286,6 +1338,115 @@ fn render_inquiry(frame: &mut Frame, response: &str, scroll: usize) {
             .border_style(Style::default().fg(Theme::GREY_400))
             .style(Style::default().bg(Theme::GREY_900)));
     
+    frame.render_widget(block, area);
+}
+
+fn render_fix_preview(
+    frame: &mut Frame,
+    file_path: &PathBuf,
+    summary: &str,
+    preview: &crate::suggest::llm::FixPreview,
+    modifier_input: &str,
+) {
+    let area = centered_rect(60, 50, frame.area());
+    frame.render_widget(Clear, area);
+
+    let inner_width = area.width.saturating_sub(12) as usize;
+    
+    let file_name = file_path.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown");
+
+    let mut lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("     ✧ ", Style::default().fg(Theme::WHITE)),
+            Span::styled("Quick Preview", Style::default().fg(Theme::WHITE).add_modifier(Modifier::BOLD)),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(format!("     {} ", file_name), Style::default().fg(Theme::GREY_100)),
+            Span::styled(format!("{}  {}", preview.scope.icon(), preview.scope.label()), 
+                Style::default().fg(Theme::GREY_400)),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("     ─────────────────────────────────────────", Style::default().fg(Theme::GREY_600))
+        ]),
+        Line::from(""),
+    ];
+
+    // Wrap the description
+    let desc_wrapped = wrap_text(&preview.description, inner_width.saturating_sub(10));
+    for wrapped_line in &desc_wrapped {
+        lines.push(Line::from(vec![
+            Span::styled(format!("     {}", wrapped_line), Style::default().fg(Theme::GREY_50)),
+        ]));
+    }
+
+    // Affected areas
+    if !preview.affected_areas.is_empty() {
+        lines.push(Line::from(""));
+        let areas_str = preview.affected_areas.join(", ");
+        let areas_wrapped = wrap_text(&format!("Affects: {}", areas_str), inner_width.saturating_sub(10));
+        for wrapped_line in &areas_wrapped {
+            lines.push(Line::from(vec![
+                Span::styled(format!("     {}", wrapped_line), Style::default().fg(Theme::GREY_300)),
+            ]));
+        }
+    }
+
+    // Modifier input (if user is typing)
+    if !modifier_input.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled("     ─────────────────────────────────────────", Style::default().fg(Theme::GREY_600))
+        ]));
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled("     Your request: ", Style::default().fg(Theme::GREY_400)),
+            Span::styled(modifier_input, Style::default().fg(Theme::WHITE)),
+            Span::styled("_", Style::default().fg(Theme::WHITE).add_modifier(Modifier::SLOW_BLINK)),
+        ]));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("     ─────────────────────────────────────────", Style::default().fg(Theme::GREY_600))
+    ]));
+    lines.push(Line::from(""));
+    
+    // Key hints
+    if modifier_input.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled("     𝘺", Style::default().fg(Theme::WHITE)),
+            Span::styled(" apply   ", Style::default().fg(Theme::GREY_400)),
+            Span::styled("𝘥", Style::default().fg(Theme::WHITE)),
+            Span::styled(" diff   ", Style::default().fg(Theme::GREY_400)),
+            Span::styled("𝘮", Style::default().fg(Theme::WHITE)),
+            Span::styled(" tweak   ", Style::default().fg(Theme::GREY_400)),
+            Span::styled("Esc", Style::default().fg(Theme::WHITE)),
+            Span::styled(" cancel", Style::default().fg(Theme::GREY_400)),
+        ]));
+    } else {
+        lines.push(Line::from(vec![
+            Span::styled("     Enter", Style::default().fg(Theme::WHITE)),
+            Span::styled(" regenerate with changes   ", Style::default().fg(Theme::GREY_400)),
+            Span::styled("Esc", Style::default().fg(Theme::WHITE)),
+            Span::styled(" cancel", Style::default().fg(Theme::GREY_400)),
+        ]));
+    }
+    lines.push(Line::from(""));
+
+    let block = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .block(Block::default()
+            .title(" ✧ 𝘱𝘳𝘦𝘷𝘪𝘦𝘸 ")
+            .title_style(Style::default().fg(Theme::GREY_100))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Theme::GREY_400))
+            .style(Style::default().bg(Theme::GREY_900)));
+
     frame.render_widget(block, area);
 }
 
