@@ -2271,7 +2271,7 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
     // Spacer before buttons
     let status_len: usize = spans.iter().map(|s| s.content.chars().count()).sum();
     let available = area.width as usize;
-    let button_area_approx = 45; // Approximate width needed for buttons
+    let button_area_approx = 50; // Approximate width needed for buttons
     let spacer_len = available.saturating_sub(status_len + button_area_approx);
     if spacer_len > 0 {
         spans.push(Span::styled(" ".repeat(spacer_len), Style::default()));
