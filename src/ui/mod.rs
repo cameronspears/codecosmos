@@ -1961,46 +1961,52 @@ fn render_suggestions_panel(frame: &mut Frame, area: Rect, app: &App) {
     let mut lines = vec![];
     
     if suggestions.is_empty() {
-        // Empty state with nice styling
-        lines.push(Line::from(""));
-        lines.push(Line::from(""));
-        lines.push(Line::from(vec![
-            Span::styled("    ╭", Style::default().fg(Theme::GREY_700)),
-            Span::styled("──────────────────────────────────", Style::default().fg(Theme::GREY_700)),
-            Span::styled("╮", Style::default().fg(Theme::GREY_700)),
-        ]));
-        lines.push(Line::from(vec![
-            Span::styled("    │", Style::default().fg(Theme::GREY_700)),
-            Span::styled("                                  ", Style::default()),
-            Span::styled("│", Style::default().fg(Theme::GREY_700)),
-        ]));
-        lines.push(Line::from(vec![
-            Span::styled("    │", Style::default().fg(Theme::GREY_700)),
-            Span::styled("     ✧ ", Style::default().fg(Theme::GREY_500)),
-            Span::styled("𝘤𝘰𝘥𝘦𝘣𝘢𝘴𝘦 𝘪𝘴 𝘴𝘦𝘳𝘦𝘯𝘦", Style::default().fg(Theme::GREY_400).add_modifier(Modifier::ITALIC)),
-            Span::styled("         │", Style::default().fg(Theme::GREY_700)),
-        ]));
-        lines.push(Line::from(vec![
-            Span::styled("    │", Style::default().fg(Theme::GREY_700)),
-            Span::styled("     𝑛𝑜 𝑠𝑢𝑔𝑔𝑒𝑠𝑡𝑖𝑜𝑛𝑠 𝑎𝑡 𝑡𝘩𝘪𝘴 𝑡𝑖𝑚𝑒", Style::default().fg(Theme::GREY_500)),
-            Span::styled("    │", Style::default().fg(Theme::GREY_700)),
-        ]));
-        lines.push(Line::from(vec![
-            Span::styled("    │", Style::default().fg(Theme::GREY_700)),
-            Span::styled("                                  ", Style::default()),
-            Span::styled("│", Style::default().fg(Theme::GREY_700)),
-        ]));
-        lines.push(Line::from(vec![
-            Span::styled("    ╰", Style::default().fg(Theme::GREY_700)),
-            Span::styled("──────────────────────────────────", Style::default().fg(Theme::GREY_700)),
-            Span::styled("╯", Style::default().fg(Theme::GREY_700)),
-        ]));
-        lines.push(Line::from(""));
-        lines.push(Line::from(vec![
-            Span::styled("    ", Style::default()),
-            Span::styled(" r ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_400)),
-            Span::styled(" refresh status", Style::default().fg(Theme::GREY_400)),
-        ]));
+        let is_loading = matches!(app.loading, LoadingState::GeneratingSuggestions);
+        
+        // Only show the empty state box when not loading
+        // (loading status is already shown in the footer)
+        if !is_loading {
+            lines.push(Line::from(""));
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::styled("    ╭", Style::default().fg(Theme::GREY_700)),
+                Span::styled("──────────────────────────────────", Style::default().fg(Theme::GREY_700)),
+                Span::styled("╮", Style::default().fg(Theme::GREY_700)),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("    │", Style::default().fg(Theme::GREY_700)),
+                Span::styled("                                  ", Style::default()),
+                Span::styled("│", Style::default().fg(Theme::GREY_700)),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("    │", Style::default().fg(Theme::GREY_700)),
+                Span::styled("       ✓ ", Style::default().fg(Theme::GREEN)),
+                Span::styled("No issues found", Style::default().fg(Theme::GREY_300)),
+                Span::styled("          │", Style::default().fg(Theme::GREY_700)),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("    │", Style::default().fg(Theme::GREY_700)),
+                Span::styled("         Nothing to suggest", Style::default().fg(Theme::GREY_500)),
+                Span::styled("       │", Style::default().fg(Theme::GREY_700)),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("    │", Style::default().fg(Theme::GREY_700)),
+                Span::styled("                                  ", Style::default()),
+                Span::styled("│", Style::default().fg(Theme::GREY_700)),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("    ╰", Style::default().fg(Theme::GREY_700)),
+                Span::styled("──────────────────────────────────", Style::default().fg(Theme::GREY_700)),
+                Span::styled("╯", Style::default().fg(Theme::GREY_700)),
+            ]));
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::styled("    ", Style::default()),
+                Span::styled(" r ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_400)),
+                Span::styled(" refresh status", Style::default().fg(Theme::GREY_400)),
+            ]));
+        }
+        // When loading, panel stays empty - footer shows "Generating suggestions"
     } else {
         let mut line_count = 0;
         
