@@ -318,7 +318,7 @@ async fn run_tui(
                     let _ = tx_suggestions.send(BackgroundMessage::SuggestionsReady {
                         suggestions,
                         usage,
-                        model: "speed".to_string(),
+                        model: "smart".to_string(),
                     });
                 }
                 Err(e) => {
@@ -476,9 +476,9 @@ fn run_loop<B: Backend>(
                         app.suggestions.add_llm_suggestion(s);
                     }
                     
-                    // Track cost (Speed preset for suggestions)
+                    // Track cost (Smart preset for suggestions)
                     if let Some(u) = usage {
-                        let cost = u.calculate_cost(suggest::llm::Model::Speed);
+                        let cost = u.calculate_cost(suggest::llm::Model::Smart);
                         app.session_cost += cost;
                         app.session_tokens += u.total_tokens;
                     }

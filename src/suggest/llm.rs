@@ -497,7 +497,7 @@ fn parse_fix_preview(response: &str, modifier: Option<String>) -> anyhow::Result
 //  UNIFIED CODEBASE ANALYSIS
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Analyze entire codebase with @preset/speed for fast suggestions
+/// Analyze entire codebase with @preset/smart for quality suggestions
 /// 
 /// This is the main entry point for generating high-quality suggestions.
 /// Uses smart context building to pack maximum insight into the prompt.
@@ -531,7 +531,8 @@ GUIDELINES:
 
     let user_prompt = build_codebase_context(index, context);
     
-    let response = call_llm_with_usage(system, &user_prompt, Model::Speed, true).await?;
+    // Use Smart preset for quality reasoning on suggestions
+    let response = call_llm_with_usage(system, &user_prompt, Model::Smart, true).await?;
     
     let suggestions = parse_codebase_suggestions(&response.content)?;
     Ok((suggestions, response.usage))
