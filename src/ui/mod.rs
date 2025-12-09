@@ -727,10 +727,12 @@ impl App {
     }
 
     fn ensure_suggestion_visible(&mut self) {
+        // Each suggestion card is ~7-8 lines tall, so only ~3-4 fit in view
+        let visible_count = 3;
         if self.suggestion_selected < self.suggestion_scroll {
             self.suggestion_scroll = self.suggestion_selected;
-        } else if self.suggestion_selected >= self.suggestion_scroll + 10 {
-            self.suggestion_scroll = self.suggestion_selected.saturating_sub(9);
+        } else if self.suggestion_selected >= self.suggestion_scroll + visible_count {
+            self.suggestion_scroll = self.suggestion_selected.saturating_sub(visible_count - 1);
         }
     }
 
@@ -2041,7 +2043,7 @@ fn render_suggestions_panel(frame: &mut Frame, area: Rect, app: &App) {
     let counts = app.suggestions.counts();
     let scroll_indicator = if suggestions.len() > 3 {
         let total = suggestions.len();
-        let current = app.suggestion_scroll + 1;
+        let current = app.suggestion_selected + 1;  // Show selected item, not scroll offset
         format!(" ↕ {}/{}", current, total)
     } else {
         String::new()
