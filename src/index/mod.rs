@@ -740,7 +740,7 @@ impl FileTree {
             is_dir: !is_last,
             depth,
             priority: if is_last { file_index.priority_indicator() } else { ' ' },
-            expanded: true,
+            expanded: false,
             children: Vec::new(),
         };
 

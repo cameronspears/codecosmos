@@ -217,8 +217,6 @@ impl Theme {
     pub const BULLET_FILLED: char = '●';
     pub const BULLET_EMPTY: char = '○';
     pub const BULLET_HALF: char = '◐';
-    pub const DIAMOND_FILLED: char = '◆';
-    pub const DIAMOND_EMPTY: char = '◇';
     pub const ARROW_RIGHT: char = '▸';
     pub const ARROW_DOWN: char = '▾';
     pub const DOT_SEPARATOR: char = '·';
@@ -289,18 +287,9 @@ impl Theme {
     pub const MOON_WANING: char = '◑';     // Waning moon
     pub const MOON_CRESCENT: char = '☽';   // Crescent moon (decorative)
 
-    /// Stars - for highlights and ratings
-    pub const STAR_FILLED: char = '✦';     // Filled star
-    pub const STAR_EMPTY: char = '✧';      // Empty star
-    pub const STAR_SPARKLE: char = '✨';   // Sparkle/suggestion
-    pub const STAR_FOUR: char = '✦';       // Four-pointed star
-    pub const STAR_SIX: char = '✶';        // Six-pointed star
-
     /// Cosmic decorations
     pub const CONSTELLATION: &'static str = "· · ·";
     pub const ORBIT: &'static str = "◌";
-    pub const GALAXY: char = '✴';
-    pub const COMET: &'static str = "━━━★";
 
     /// Priority indicators (cosmic)
     pub const PRIORITY_HIGH: char = '●';   // Full moon - attention
@@ -417,14 +406,14 @@ pub fn constellation_line(width: usize) -> String {
     pattern.repeat(repeat)[..width].to_string()
 }
 
-/// Generate stars rating (e.g., ✦✦✦✧✧)
-pub fn star_rating(filled: usize, total: usize) -> String {
+/// Generate dot rating (e.g., ●●●○○)
+pub fn dot_rating(filled: usize, total: usize) -> String {
     let mut result = String::new();
     for i in 0..total {
         if i < filled {
-            result.push(Theme::STAR_FILLED);
+            result.push(Theme::BULLET_FILLED);
         } else {
-            result.push(Theme::STAR_EMPTY);
+            result.push(Theme::BULLET_EMPTY);
         }
     }
     result

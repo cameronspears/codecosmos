@@ -103,7 +103,7 @@ pub fn parse_markdown(text: &str, max_width: usize) -> Vec<Line<'static>> {
 fn render_h1(text: &str, _max_width: usize) -> Line<'static> {
     Line::from(vec![
         Span::styled(
-            format!("✦ {}", text),
+            format!("{}", text),
             Style::default()
                 .fg(Theme::WHITE)
                 .add_modifier(Modifier::BOLD)
@@ -115,7 +115,7 @@ fn render_h1(text: &str, _max_width: usize) -> Line<'static> {
 fn render_h2(text: &str, _max_width: usize) -> Line<'static> {
     Line::from(vec![
         Span::styled(
-            format!("◆ {}", text),
+            format!("{}", text),
             Style::default()
                 .fg(Theme::GREY_100)
                 .add_modifier(Modifier::BOLD)

@@ -2,7 +2,7 @@
 //!
 //! Layout:
 //! ╔══════════════════════════════════════════════════════════════╗
-//! ║                    ☽ C O S M O S ✦                           ║
+//! ║                      C O S M O S                             ║
 //! ║          a contemplative companion for your codebase         ║
 //! ╠═══════════════════════════╦══════════════════════════════════╣
 //! ║  PROJECT                  ║  SUGGESTIONS                     ║
@@ -1819,11 +1819,11 @@ fn file_icon(name: &str) -> (&'static str, ratatui::style::Color) {
     let ext = name.rsplit('.').next().unwrap_or("");
     match ext {
         // React/JSX - subtle blue tint
-        "tsx" | "jsx" => ("◆", Theme::BADGE_QUALITY),
+        "tsx" | "jsx" => ("›", Theme::BADGE_QUALITY),
         // TypeScript - subtle yellow
-        "ts" => ("◇", Theme::BADGE_DOCS),
+        "ts" => ("›", Theme::BADGE_DOCS),
         // JavaScript
-        "js" | "mjs" | "cjs" => ("◇", Theme::BADGE_DOCS),
+        "js" | "mjs" | "cjs" => ("›", Theme::BADGE_DOCS),
         // Styles - purple
         "css" | "scss" | "sass" | "less" => ("◈", Theme::BADGE_REFACTOR),
         // Data files - muted
@@ -2169,7 +2169,7 @@ fn render_question_input(frame: &mut Frame, area: Rect, app: &App) {
     };
     
     // Build the input display
-    let prompt = "✦ Ask cosmos: ";
+    let prompt = "> Ask cosmos: ";
     let cursor = if is_active { "█" } else { "" };
     
     let spans = vec![
@@ -2402,7 +2402,7 @@ fn render_help(frame: &mut Frame) {
 
     let block = Paragraph::new(help_text)
         .block(Block::default()
-            .title(" ✧ 𝘩𝘦𝘭𝘱 ")
+            .title(" › 𝘩𝘦𝘭𝘱 ")
             .title_style(Style::default().fg(Theme::GREY_100))
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Theme::GREY_400))
@@ -2577,7 +2577,7 @@ fn render_suggestion_detail(frame: &mut Frame, suggestion: &Suggestion, scroll: 
     let block = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
         .block(Block::default()
-            .title(" ✧ 𝘥𝘦𝘵𝘢𝘪𝘭 ")
+            .title(" › 𝘥𝘦𝘵𝘢𝘪𝘭 ")
             .title_style(Style::default().fg(Theme::GREY_100))
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Theme::GREY_400))
@@ -2597,7 +2597,7 @@ fn render_inquiry(frame: &mut Frame, response: &str, scroll: usize) {
         Line::from(""),
         Line::from(vec![
             Span::styled("    ", Style::default()),
-            Span::styled(" ✧ ", Style::default().fg(Theme::GREY_900).bg(Theme::WHITE).add_modifier(Modifier::BOLD)),
+            Span::styled(" › ", Style::default().fg(Theme::GREY_900).bg(Theme::WHITE).add_modifier(Modifier::BOLD)),
             Span::styled("  𝘤𝘰𝘴𝘮𝘰𝘴 𝘳𝘦𝘴𝘱𝘰𝘯𝘥𝘴...", Style::default().fg(Theme::GREY_200).add_modifier(Modifier::ITALIC)),
         ]),
         Line::from(""),
@@ -2673,7 +2673,7 @@ fn render_inquiry(frame: &mut Frame, response: &str, scroll: usize) {
     let block = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
         .block(Block::default()
-            .title(" ✧ 𝘪𝘯𝘲𝘶𝘪𝘳𝘺 ")
+            .title(" › 𝘪𝘯𝘲𝘶𝘪𝘳𝘺 ")
             .title_style(Style::default().fg(Theme::GREY_100))
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Theme::GREY_400))
@@ -2701,7 +2701,7 @@ fn render_fix_preview(
     let mut lines = vec![
         Line::from(""),
         Line::from(vec![
-            Span::styled("     ✧ ", Style::default().fg(Theme::WHITE)),
+            Span::styled("     › ", Style::default().fg(Theme::WHITE)),
             Span::styled("Quick Preview", Style::default().fg(Theme::WHITE).add_modifier(Modifier::BOLD)),
         ]),
         Line::from(""),
@@ -2794,7 +2794,7 @@ fn render_fix_preview(
     let block = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
         .block(Block::default()
-            .title(" ✧ 𝘱𝘳𝘦𝘷𝘪𝘦𝘸 ")
+            .title(" › 𝘱𝘳𝘦𝘷𝘪𝘦𝘸 ")
             .title_style(Style::default().fg(Theme::GREY_100))
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Theme::GREY_400))
@@ -2828,7 +2828,7 @@ fn render_apply_confirm(
         Line::from(""),
         Line::from(""),
         Line::from(vec![
-            Span::styled("     ✧ ", Style::default().fg(Theme::WHITE)),
+            Span::styled("     › ", Style::default().fg(Theme::WHITE)),
             Span::styled(file_name, Style::default().fg(Theme::WHITE).add_modifier(Modifier::BOLD)),
         ]),
         Line::from(vec![
@@ -2942,9 +2942,9 @@ fn render_apply_confirm(
     lines.push(Line::from(""));
 
     let title = match mode {
-        ApplyMode::View => " ✧ 𝘢𝘱𝘱𝘭𝘺 𝘤𝘩𝘢𝘯𝘨𝘦𝘴 ",
-        ApplyMode::Edit => " ✧ 𝘦𝘥𝘪𝘵 𝘥𝘪𝘧𝘧 ",
-        ApplyMode::Chat => " ✧ 𝘳𝘦𝘧𝘪𝘯𝘦 𝘧𝘪𝘹 ",
+        ApplyMode::View => " › 𝘢𝘱𝘱𝘭𝘺 𝘤𝘩𝘢𝘯𝘨𝘦𝘴 ",
+        ApplyMode::Edit => " › 𝘦𝘥𝘪𝘵 𝘥𝘪𝘧𝘧 ",
+        ApplyMode::Chat => " › 𝘳𝘦𝘧𝘪𝘯𝘦 𝘧𝘪𝘹 ",
     };
 
     let block = Paragraph::new(lines)
@@ -3117,7 +3117,7 @@ fn render_file_detail(frame: &mut Frame, path: &PathBuf, file_index: &crate::ind
     let block = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
         .block(Block::default()
-            .title(" ✧ 𝘧𝘪𝘭𝘦 𝘥𝘦𝘵𝘢𝘪𝘭 ")
+            .title(" › 𝘧𝘪𝘭𝘦 𝘥𝘦𝘵𝘢𝘪𝘭 ")
             .title_style(Style::default().fg(Theme::GREY_100))
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Theme::GREY_400))
@@ -3144,7 +3144,7 @@ fn render_git_status(
     let mut lines = vec![
         Line::from(""),
         Line::from(vec![
-            Span::styled("     ✧ ", Style::default().fg(Theme::WHITE)),
+            Span::styled("     › ", Style::default().fg(Theme::WHITE)),
             Span::styled("Git Status", Style::default().fg(Theme::WHITE).add_modifier(Modifier::BOLD)),
         ]),
         Line::from(""),
@@ -3292,7 +3292,7 @@ fn render_git_status(
     let block = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
         .block(Block::default()
-            .title(" ✧ 𝘨𝘪𝘵 ")
+            .title(" › 𝘨𝘪𝘵 ")
             .title_style(Style::default().fg(Theme::GREY_100))
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Theme::GREY_400))
@@ -3315,7 +3315,7 @@ fn render_branch_dialog(
     let mut lines = vec![
         Line::from(""),
         Line::from(vec![
-            Span::styled("     ✧ ", Style::default().fg(Theme::WHITE)),
+            Span::styled("     › ", Style::default().fg(Theme::WHITE)),
             Span::styled("Create Branch & Commit", Style::default().fg(Theme::WHITE).add_modifier(Modifier::BOLD)),
         ]),
         Line::from(""),
@@ -3381,7 +3381,7 @@ fn render_branch_dialog(
     let block = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
         .block(Block::default()
-            .title(" ✧ 𝘣𝘳𝘢𝘯𝘤𝘩 ")
+            .title(" › 𝘣𝘳𝘢𝘯𝘤𝘩 ")
             .title_style(Style::default().fg(Theme::GREY_100))
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Theme::GREY_400))
@@ -3407,7 +3407,7 @@ fn render_pr_review(
     let mut lines = vec![
         Line::from(""),
         Line::from(vec![
-            Span::styled("     ✧ ", Style::default().fg(Theme::WHITE)),
+            Span::styled("     › ", Style::default().fg(Theme::WHITE)),
             Span::styled("PR Review", Style::default().fg(Theme::WHITE).add_modifier(Modifier::BOLD)),
         ]),
         Line::from(""),
@@ -3502,7 +3502,7 @@ fn render_pr_review(
     let block = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
         .block(Block::default()
-            .title(" ✧ 𝘱𝘳 𝘳𝘦𝘷𝘪𝘦𝘸 ")
+            .title(" › 𝘱𝘳 𝘳𝘦𝘷𝘪𝘦𝘸 ")
             .title_style(Style::default().fg(Theme::GREY_100))
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Theme::GREY_400))
@@ -3603,7 +3603,7 @@ fn render_toast(frame: &mut Frame, toast: &Toast) {
             height: 1,
         };
         let content = Paragraph::new(Line::from(vec![
-            Span::styled("  ✧ ", Style::default().fg(Theme::WHITE)),
+            Span::styled("  › ", Style::default().fg(Theme::WHITE)),
             Span::styled(&toast.message, Style::default().fg(Theme::GREY_100).add_modifier(Modifier::ITALIC)),
             Span::styled("  ", Style::default()),
         ]))

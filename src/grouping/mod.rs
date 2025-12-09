@@ -99,8 +99,8 @@ impl Layer {
     /// Get icon for the layer
     pub fn icon(&self) -> &'static str {
         match self {
-            Layer::Frontend => "◇",  // Diamond - UI
-            Layer::Backend => "◆",   // Filled diamond - Server
+            Layer::Frontend => "›",  // UI
+            Layer::Backend => "›",   // Server
             Layer::API => "⬡",       // Hexagon - Routes
             Layer::Database => "◈",  // Diamond with dot - Data
             Layer::Shared => "○",    // Circle - Shared
@@ -208,7 +208,7 @@ pub struct FileGroup {
 }
 
 fn default_expanded() -> bool {
-    true
+    false
 }
 
 impl FileGroup {
@@ -217,7 +217,7 @@ impl FileGroup {
             layer,
             features: Vec::new(),
             ungrouped_files: Vec::new(),
-            expanded: true,
+            expanded: false,
         }
     }
 

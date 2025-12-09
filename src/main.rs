@@ -1,6 +1,6 @@
 //! Cosmos - A contemplative vibe coding companion
 //!
-//! ☽ C O S M O S ✦
+//! C O S M O S
 //!
 //! An AI-powered IDE in the terminal that uses codebase indexing
 //! to suggest improvements, bug fixes, and optimizations.
@@ -38,7 +38,7 @@ use ui::{ActivePanel, App, InputMode, LoadingState, Overlay};
 #[command(
     name = "cosmos",
     about = "A contemplative vibe coding companion",
-    long_about = "☽ C O S M O S ✦\n\n\
+    long_about = "C O S M O S\n\n\
                   A contemplative companion for your codebase.\n\n\
                   Uses AST-based indexing and AI to suggest improvements,\n\
                   bug fixes, features, and optimizations.",
@@ -187,7 +187,7 @@ fn print_stats(index: &CodebaseIndex, suggestions: &SuggestionEngine, context: &
 
     println!();
     println!("  ╔══════════════════════════════════════════════════╗");
-    println!("  ║           ☽ C O S M O S ✦ Stats                  ║");
+    println!("  ║             C O S M O S   Stats                  ║");
     println!("  ╠══════════════════════════════════════════════════╣");
     println!("  ║                                                  ║");
     println!("  ║  Files:     {:>6}                               ║", stats.file_count);
@@ -487,7 +487,7 @@ fn run_loop<B: Backend>(
                     app.loading = LoadingState::None;
                     
                     // More prominent toast for suggestions
-                    app.show_toast(&format!("✦ {} suggestions ready ({})", count, &model));
+                    app.show_toast(&format!("{} suggestions ready ({})", count, &model));
                     app.active_model = Some(model);
                 }
                 BackgroundMessage::SuggestionsError(e) => {
