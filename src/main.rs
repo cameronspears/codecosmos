@@ -678,13 +678,18 @@ fn run_loop<B: Backend>(
                             }
                             KeyCode::Char('y') if !is_typing_modifier => {
                                 // Phase 2: Generate and apply fix with Smart preset
+                                let preview = if let Overlay::FixPreview { preview, .. } = &app.overlay {
+                                    preview.clone()
+                                } else {
+                                    continue;
+                                };
+                                
+                                // Show warning toast if proceeding with unverified fix
+                                if !preview.verified {
+                                    app.show_toast("Proceeding with unverified fix...");
+                                }
+                                
                                 if let Some(suggestion) = app.suggestions.suggestions.iter().find(|s| s.id == suggestion_id) {
-                                    // Get the preview from the overlay
-                                    let preview = if let Overlay::FixPreview { preview, .. } = &app.overlay {
-                                        preview.clone()
-                                    } else {
-                                        continue;
-                                    };
                                     
                                     let suggestion_clone = suggestion.clone();
                                     let repo_path_clone = repo_path.clone();
@@ -794,6 +799,12 @@ fn run_loop<B: Backend>(
                                         }
                                     });
                                 }
+                            }
+                            KeyCode::Char('d') if !is_typing_modifier => {
+                                // Dismiss the suggestion (especially useful when not verified)
+                                app.suggestions.dismiss(suggestion_id);
+                                app.show_toast("Dismissed");
+                                app.close_overlay();
                             }
                             KeyCode::Backspace if is_typing_modifier => {
                                 app.preview_modifier_pop();

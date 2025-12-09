@@ -127,8 +127,8 @@ impl LoadingState {
             LoadingState::None => "",
             LoadingState::GeneratingSuggestions => "Generating suggestions",
             LoadingState::GeneratingSummaries => "Summarizing files",
-            LoadingState::GeneratingPreview => "Previewing fix...",
-            LoadingState::GeneratingFix => "Generating fix...",
+            LoadingState::GeneratingPreview => "Verifying issue...",
+            LoadingState::GeneratingFix => "Applying fix...",
             LoadingState::Answering => "Thinking...",
         }
     }
@@ -2096,7 +2096,7 @@ fn render_suggestions_panel(frame: &mut Frame, area: Rect, app: &App) {
                 lines.push(Line::from(vec![
                     Span::styled("    ", Style::default()),
                     Span::styled("a", Style::default().fg(Theme::GREEN).add_modifier(Modifier::BOLD)),
-                    Span::styled(" fix  ", Style::default().fg(Theme::GREY_500)),
+                    Span::styled(" verify & fix  ", Style::default().fg(Theme::GREY_500)),
                     Span::styled("↵", Style::default().fg(Theme::GREY_300).add_modifier(Modifier::BOLD)),
                     Span::styled(" details  ", Style::default().fg(Theme::GREY_500)),
                     Span::styled("d", Style::default().fg(Theme::GREY_500).add_modifier(Modifier::BOLD)),
@@ -2212,14 +2212,19 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
         spans.push(Span::styled("│ ", Style::default().fg(Theme::GREY_600)));
     }
     
-    // Project name and branch with icon
+    // Project name and branch with icon (truncate long branch names)
     let project_name = app.context.repo_root
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("unknown");
     spans.push(Span::styled(project_name, Style::default().fg(Theme::GREY_400)));
     spans.push(Span::styled(" ⎇ ", Style::default().fg(Theme::GREY_500)));
-    spans.push(Span::styled(&app.context.branch, Style::default().fg(Theme::GREY_100)));
+    let branch_display = if app.context.branch.len() > 20 {
+        format!("{}…", &app.context.branch[..19])
+    } else {
+        app.context.branch.clone()
+    };
+    spans.push(Span::styled(branch_display, Style::default().fg(Theme::GREY_100)));
 
     // Show pending changes count with prominent action hints
     let pending_count = app.pending_change_count();
@@ -2239,16 +2244,6 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
         spans.push(Span::styled(
             format!(" {} changed ", app.context.modified_count),
             Style::default().fg(Theme::GREY_200),
-        ));
-    }
-
-    // Model indicator with icon
-    if let Some(model) = &app.active_model {
-        spans.push(Span::styled("  │  ", Style::default().fg(Theme::GREY_600)));
-        spans.push(Span::styled("⚙ ", Style::default().fg(Theme::GREY_500)));
-        spans.push(Span::styled(
-            model.clone(),
-            Style::default().fg(Theme::GREY_300),
         ));
     }
 
@@ -2365,7 +2360,7 @@ fn render_help(frame: &mut Frame) {
     help_text.extend(section_start("Actions"));
     help_text.push(section_spacer());
     help_text.push(key_row("i", "Ask cosmos a question"));
-    help_text.push(key_row("a", "Apply/fix suggestion"));
+    help_text.push(key_row("a", "Verify & fix suggestion"));
     help_text.push(key_row("d", "Dismiss suggestion"));
     help_text.push(key_row("r", "Refresh status"));
     help_text.push(section_spacer());
@@ -2603,7 +2598,7 @@ fn render_suggestion_detail(
     lines.push(Line::from(vec![
         Span::styled("    ", Style::default()),
         Span::styled(" a ", Style::default().fg(Theme::GREY_900).bg(Theme::GREEN).add_modifier(Modifier::BOLD)),
-        Span::styled(" Apply Fix ", Style::default().fg(Theme::GREEN)),
+        Span::styled(" Verify & Fix ", Style::default().fg(Theme::GREEN)),
         Span::styled("  ", Style::default()),
         Span::styled(" d ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_400)),
         Span::styled(" Dismiss ", Style::default().fg(Theme::GREY_400)),
@@ -2728,39 +2723,77 @@ fn render_fix_preview(
     preview: &crate::suggest::llm::FixPreview,
     modifier_input: &str,
 ) {
-    let area = centered_rect(60, 50, frame.area());
-    frame.render_widget(Clear, area);
+    // Main area for the overlay
+    let outer_area = centered_rect(65, 60, frame.area());
+    frame.render_widget(Clear, outer_area);
+    
+    // Split into content pane and action bar
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(8),      // Content pane (flexible)
+            Constraint::Length(3),   // Action bar (fixed)
+        ])
+        .split(outer_area);
+    
+    let content_area = layout[0];
+    let action_area = layout[1];
 
-    let inner_width = area.width.saturating_sub(12) as usize;
+    let inner_width = content_area.width.saturating_sub(8) as usize;
     
     let file_name = file_path.file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("unknown");
 
+    // Verification status styling
+    let (verify_icon, verify_label, verify_color) = if preview.verified {
+        ("✓", "VERIFIED", Theme::GREEN)
+    } else {
+        ("✗", "NOT CONFIRMED", Theme::BADGE_BUG)
+    };
+
     let mut lines = vec![
         Line::from(""),
         Line::from(vec![
-            Span::styled("     › ", Style::default().fg(Theme::WHITE)),
-            Span::styled("Quick Preview", Style::default().fg(Theme::WHITE).add_modifier(Modifier::BOLD)),
+            Span::styled("   › ", Style::default().fg(Theme::WHITE)),
+            Span::styled("Verification Result", Style::default().fg(Theme::WHITE).add_modifier(Modifier::BOLD)),
         ]),
         Line::from(""),
+        // Verification status badge
         Line::from(vec![
-            Span::styled(format!("     {} ", file_name), Style::default().fg(Theme::GREY_100)),
-            Span::styled(format!("{}  {}", preview.scope.icon(), preview.scope.label()), 
-                Style::default().fg(Theme::GREY_400)),
-        ]),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("     ─────────────────────────────────────────", Style::default().fg(Theme::GREY_600))
+            Span::styled("   ", Style::default()),
+            Span::styled(format!(" {} {} ", verify_icon, verify_label), 
+                Style::default().fg(Theme::GREY_900).bg(verify_color).add_modifier(Modifier::BOLD)),
         ]),
         Line::from(""),
     ];
 
+    // Verification note
+    let note_wrapped = wrap_text(&preview.verification_note, inner_width.saturating_sub(6));
+    for wrapped_line in &note_wrapped {
+        lines.push(Line::from(vec![
+            Span::styled(format!("   {}", wrapped_line), Style::default().fg(Theme::GREY_200)),
+        ]));
+    }
+
+    // Show fix details
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("   ─".to_string() + &"─".repeat(inner_width.saturating_sub(6)), Style::default().fg(Theme::GREY_600))
+    ]));
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled(format!("   {} ", file_name), Style::default().fg(Theme::GREY_100)),
+        Span::styled(format!("{}  {}", preview.scope.icon(), preview.scope.label()), 
+            Style::default().fg(Theme::GREY_400)),
+    ]));
+    lines.push(Line::from(""));
+
     // Wrap the description
-    let desc_wrapped = wrap_text(&preview.description, inner_width.saturating_sub(10));
+    let desc_wrapped = wrap_text(&preview.description, inner_width.saturating_sub(6));
     for wrapped_line in &desc_wrapped {
         lines.push(Line::from(vec![
-            Span::styled(format!("     {}", wrapped_line), Style::default().fg(Theme::GREY_50)),
+            Span::styled(format!("   {}", wrapped_line), Style::default().fg(Theme::GREY_50)),
         ]));
     }
 
@@ -2768,10 +2801,10 @@ fn render_fix_preview(
     if !preview.affected_areas.is_empty() {
         lines.push(Line::from(""));
         let areas_str = preview.affected_areas.join(", ");
-        let areas_wrapped = wrap_text(&format!("Affects: {}", areas_str), inner_width.saturating_sub(10));
+        let areas_wrapped = wrap_text(&format!("Affects: {}", areas_str), inner_width.saturating_sub(6));
         for wrapped_line in &areas_wrapped {
             lines.push(Line::from(vec![
-                Span::styled(format!("     {}", wrapped_line), Style::default().fg(Theme::GREY_300)),
+                Span::styled(format!("   {}", wrapped_line), Style::default().fg(Theme::GREY_300)),
             ]));
         }
     }
@@ -2780,66 +2813,71 @@ fn render_fix_preview(
     if !modifier_input.is_empty() {
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
-            Span::styled("     ─────────────────────────────────────────", Style::default().fg(Theme::GREY_600))
+            Span::styled("   ─".to_string() + &"─".repeat(inner_width.saturating_sub(6)), Style::default().fg(Theme::GREY_600))
         ]));
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
-            Span::styled("     Your request: ", Style::default().fg(Theme::GREY_400)),
+            Span::styled("   Your request: ", Style::default().fg(Theme::GREY_400)),
             Span::styled(modifier_input, Style::default().fg(Theme::WHITE)),
             Span::styled("_", Style::default().fg(Theme::WHITE).add_modifier(Modifier::SLOW_BLINK)),
         ]));
     }
-
-    lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        Span::styled("     ─────────────────────────────────────────", Style::default().fg(Theme::GREY_600))
-    ]));
     
-    // Key hints - make them IMPOSSIBLE TO MISS
-    if modifier_input.is_empty() {
-        lines.push(Line::from(""));
-        lines.push(Line::from(vec![
-            Span::styled("     ▶ ", Style::default().fg(Theme::WHITE).add_modifier(Modifier::BOLD)),
-            Span::styled("Press ", Style::default().fg(Theme::WHITE)),
-            Span::styled(" Y ", Style::default().fg(Theme::GREY_900).bg(Theme::GREEN).add_modifier(Modifier::BOLD)),
-            Span::styled(" to apply this fix now", Style::default().fg(Theme::WHITE).add_modifier(Modifier::BOLD)),
-        ]));
-        lines.push(Line::from(""));
-        lines.push(Line::from(vec![
-            Span::styled("       ", Style::default()),
-            Span::styled("d", Style::default().fg(Theme::GREY_300)),
-            Span::styled(" diff    ", Style::default().fg(Theme::GREY_500)),
-            Span::styled("m", Style::default().fg(Theme::GREY_300)),
-            Span::styled(" tweak    ", Style::default().fg(Theme::GREY_500)),
-            Span::styled("Esc", Style::default().fg(Theme::GREY_300)),
-            Span::styled(" cancel", Style::default().fg(Theme::GREY_500)),
-        ]));
-    } else {
-        lines.push(Line::from(""));
-        lines.push(Line::from(vec![
-            Span::styled("     ▶ ", Style::default().fg(Theme::WHITE).add_modifier(Modifier::BOLD)),
-            Span::styled("Press ", Style::default().fg(Theme::WHITE)),
-            Span::styled(" Enter ", Style::default().fg(Theme::GREY_900).bg(Theme::GREEN).add_modifier(Modifier::BOLD)),
-            Span::styled(" to regenerate", Style::default().fg(Theme::WHITE).add_modifier(Modifier::BOLD)),
-        ]));
-        lines.push(Line::from(""));
-        lines.push(Line::from(vec![
-            Span::styled("       Esc", Style::default().fg(Theme::GREY_300)),
-            Span::styled(" cancel", Style::default().fg(Theme::GREY_500)),
-        ]));
-    }
     lines.push(Line::from(""));
 
-    let block = Paragraph::new(lines)
+    // Render content pane
+    let content_block = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
         .block(Block::default()
-            .title(" › 𝘱𝘳𝘦𝘷𝘪𝘦𝘸 ")
+            .title(" › 𝘷𝘦𝘳𝘪𝘧𝘺 ")
             .title_style(Style::default().fg(Theme::GREY_100))
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Theme::GREY_400))
+            .border_style(Style::default().fg(if preview.verified { Theme::GREY_400 } else { Theme::BADGE_BUG }))
             .style(Style::default().bg(Theme::GREY_900)));
+    frame.render_widget(content_block, content_area);
 
-    frame.render_widget(block, area);
+    // Render action bar (always visible at bottom)
+    let action_line = if !modifier_input.is_empty() {
+        // Typing mode
+        Line::from(vec![
+            Span::styled("  ", Style::default()),
+            Span::styled(" Enter ", Style::default().fg(Theme::GREY_900).bg(Theme::GREEN).add_modifier(Modifier::BOLD)),
+            Span::styled(" regenerate  ", Style::default().fg(Theme::GREY_300)),
+            Span::styled(" Esc ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_500)),
+            Span::styled(" cancel", Style::default().fg(Theme::GREY_400)),
+        ])
+    } else if preview.verified {
+        // Verified - normal actions
+        Line::from(vec![
+            Span::styled("  ", Style::default()),
+            Span::styled(" Y ", Style::default().fg(Theme::GREY_900).bg(Theme::GREEN).add_modifier(Modifier::BOLD)),
+            Span::styled(" apply  ", Style::default().fg(Theme::GREY_300)),
+            Span::styled(" d ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_500)),
+            Span::styled(" dismiss  ", Style::default().fg(Theme::GREY_400)),
+            Span::styled(" m ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_500)),
+            Span::styled(" tweak  ", Style::default().fg(Theme::GREY_400)),
+            Span::styled(" Esc ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_600)),
+            Span::styled(" cancel", Style::default().fg(Theme::GREY_500)),
+        ])
+    } else {
+        // Not verified - show proceed anyway option
+        Line::from(vec![
+            Span::styled("  ", Style::default()),
+            Span::styled(" Y ", Style::default().fg(Theme::GREY_900).bg(Theme::BADGE_DOCS).add_modifier(Modifier::BOLD)),
+            Span::styled(" proceed anyway  ", Style::default().fg(Theme::GREY_300)),
+            Span::styled(" d ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_500)),
+            Span::styled(" dismiss  ", Style::default().fg(Theme::GREY_400)),
+            Span::styled(" Esc ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_600)),
+            Span::styled(" cancel", Style::default().fg(Theme::GREY_500)),
+        ])
+    };
+
+    let action_block = Paragraph::new(vec![Line::from(""), action_line])
+        .block(Block::default()
+            .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
+            .border_style(Style::default().fg(if preview.verified { Theme::GREY_400 } else { Theme::BADGE_BUG }))
+            .style(Style::default().bg(Theme::GREY_800)));
+    frame.render_widget(action_block, action_area);
 }
 
 fn render_apply_confirm(

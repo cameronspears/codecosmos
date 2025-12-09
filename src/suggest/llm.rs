@@ -315,7 +315,9 @@ CRITICAL RULES:
 - Keep imports, comments, and structure intact"#;
 
     let plan_text = format!(
-        "Plan: {}\nScope: {}\nAffected areas: {}{}",
+        "Verification: {} - {}\nPlan: {}\nScope: {}\nAffected areas: {}{}",
+        if plan.verified { "CONFIRMED" } else { "UNCONFIRMED" },
+        plan.verification_note,
         plan.description,
         plan.scope.label(),
         plan.affected_areas.join(", "),
@@ -382,6 +384,10 @@ CRITICAL RULES:
 /// Quick preview of what a fix will do - generated in <1 second
 #[derive(Debug, Clone, PartialEq)]
 pub struct FixPreview {
+    /// Whether the issue was verified to exist in the code
+    pub verified: bool,
+    /// Explanation of verification result
+    pub verification_note: String,
     /// Human-readable description of what will change (1-2 sentences)
     pub description: String,
     /// Which functions/areas are affected
@@ -418,27 +424,29 @@ impl FixScope {
 }
 
 /// Generate a quick preview of what the fix will do (uses Grok Fast for speed)
-/// This is Phase 1 of the two-phase fix flow - lets users approve before waiting for full diff
+/// This is Phase 1 of the two-phase fix flow - verifies the issue and lets users approve before waiting for full diff
 pub async fn generate_fix_preview(
     path: &PathBuf,
     suggestion: &Suggestion,
     modifier: Option<&str>,
 ) -> anyhow::Result<FixPreview> {
-    let system = r#"You are a code assistant. Briefly describe what changes are needed to fix this issue.
+    let system = r#"You are a code assistant. First VERIFY whether this issue actually exists in the code, then describe what changes would fix it.
 
 OUTPUT FORMAT (JSON):
 {
-  "description": "1-2 sentence description of what will change",
+  "verified": true,
+  "verification_note": "Brief explanation of whether the issue was found and where",
+  "description": "1-2 sentence description of what will change (if verified)",
   "affected_areas": ["function_name", "another_function"],
-  "scope": "small|medium|large"
+  "scope": "small"
 }
 
-SCOPE GUIDE:
-- small: few lines, simple change
-- medium: modifying a function or adding a new one
-- large: multiple functions, restructuring, or splitting files
+RULES:
+- verified: boolean true if issue exists, false if it doesn't exist or was already fixed
+- verification_note: explain what you found
+- scope: one of "small", "medium", or "large"
 
-Be concise. No code, just describe the change in plain English."#;
+Be concise. No code, just describe the verification result and planned change in plain English."#;
 
     let modifier_text = modifier
         .map(|m| format!("\n\nUser wants: {}", m))
@@ -465,6 +473,24 @@ fn parse_fix_preview(response: &str, modifier: Option<String>) -> anyhow::Result
     let parsed: serde_json::Value = serde_json::from_str(json_str)
         .map_err(|e| anyhow::anyhow!("Failed to parse preview JSON: {}", e))?;
 
+    // Handle verified as either boolean or string
+    let verified = parsed.get("verified")
+        .map(|v| {
+            if let Some(b) = v.as_bool() {
+                b
+            } else if let Some(s) = v.as_str() {
+                s.eq_ignore_ascii_case("true")
+            } else {
+                true // Default to true
+            }
+        })
+        .unwrap_or(true); // Default to true for backwards compatibility
+
+    let verification_note = parsed.get("verification_note")
+        .and_then(|v| v.as_str())
+        .unwrap_or(if verified { "Issue verified" } else { "Issue not found" })
+        .to_string();
+
     let description = parsed.get("description")
         .and_then(|v| v.as_str())
         .unwrap_or("Fix the identified issue")
@@ -486,6 +512,8 @@ fn parse_fix_preview(response: &str, modifier: Option<String>) -> anyhow::Result
     };
 
     Ok(FixPreview {
+        verified,
+        verification_note,
         description,
         affected_areas,
         scope,
