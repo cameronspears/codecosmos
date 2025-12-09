@@ -1743,35 +1743,105 @@ fn render_project_panel(frame: &mut Frame, area: Rect, app: &App) {
 
 /// Render the flat file tree
 fn render_flat_tree<'a>(lines: &mut Vec<Line<'a>>, app: &'a App, is_active: bool, visible_height: usize) {
-    for (i, entry) in app.filtered_tree.iter()
+    let tree = &app.filtered_tree;
+    let total = tree.len();
+    
+    for (i, entry) in tree.iter()
         .enumerate()
         .skip(app.project_scroll)
         .take(visible_height)
     {
         let is_selected = i == app.project_selected && is_active;
-        let indent = "  ".repeat(entry.depth);
+        
+        // Calculate tree connectors
+        let is_last = {
+            if i + 1 >= total {
+                true
+            } else {
+                tree[i + 1].depth <= entry.depth
+            }
+        };
+        
+        let connector = if is_last { "└" } else { "├" };
+        let indent_str: String = (0..entry.depth.saturating_sub(1))
+            .map(|d| {
+                // Check if ancestor at this depth has more siblings
+                let has_more = tree.iter().skip(i + 1).any(|e| e.depth == d + 1);
+                if has_more { "│ " } else { "  " }
+            })
+            .collect();
+        
+        let (file_icon_str, icon_color) = if entry.is_dir {
+            ("▸", Theme::GREY_400)
+        } else {
+            file_icon(&entry.name)
+        };
         
         let name_style = if is_selected {
-            Style::default().fg(Theme::WHITE).add_modifier(Modifier::BOLD)
+            Style::default().fg(Theme::WHITE)
+        } else if entry.is_dir {
+            Style::default().fg(Theme::GREY_300)
         } else if entry.priority == Theme::PRIORITY_HIGH {
-            Style::default().fg(Theme::GREY_50)  // Bright for high priority
+            Style::default().fg(Theme::GREY_200)
         } else {
-            Style::default().fg(Theme::GREY_200)  // Legible for regular files
+            Style::default().fg(Theme::GREY_500)
         };
         
-        let cursor = if is_selected { " ›" } else { "  " };
+        let cursor = if is_selected { "›" } else { " " };
         let priority_indicator = if entry.priority == Theme::PRIORITY_HIGH {
-            "  ●"
+            Span::styled(" ●", Style::default().fg(Theme::GREY_300))
         } else {
-            ""
+            Span::styled("", Style::default())
         };
         
-        lines.push(Line::from(vec![
-            Span::styled(cursor.to_string(), Style::default().fg(Theme::GREY_100)),
-            Span::styled(format!(" {}", indent), Style::default().fg(Theme::GREY_600)),
-            Span::styled(entry.name.clone(), name_style),
-            Span::styled(priority_indicator.to_string(), Style::default().fg(Theme::GREY_200)),
-        ]));
+        if entry.depth == 0 {
+            // Root level - no connector
+            lines.push(Line::from(vec![
+                Span::styled(format!(" {} ", cursor), Style::default().fg(if is_selected { Theme::WHITE } else { Theme::GREY_600 })),
+                Span::styled(format!("{} ", file_icon_str), Style::default().fg(icon_color)),
+                Span::styled(entry.name.clone(), name_style),
+                priority_indicator,
+            ]));
+        } else {
+            lines.push(Line::from(vec![
+                Span::styled(format!(" {} ", cursor), Style::default().fg(if is_selected { Theme::WHITE } else { Theme::GREY_600 })),
+                Span::styled(format!("{}{}", indent_str, connector), Style::default().fg(Theme::GREY_700)),
+                Span::styled(format!(" {} ", file_icon_str), Style::default().fg(icon_color)),
+                Span::styled(entry.name.clone(), name_style),
+                priority_indicator,
+            ]));
+        }
+    }
+}
+
+/// Get file type icon based on extension - minimal and clean
+fn file_icon(name: &str) -> (&'static str, ratatui::style::Color) {
+    let ext = name.rsplit('.').next().unwrap_or("");
+    match ext {
+        // React/JSX - subtle blue tint
+        "tsx" | "jsx" => ("◆", Theme::BADGE_QUALITY),
+        // TypeScript - subtle yellow
+        "ts" => ("◇", Theme::BADGE_DOCS),
+        // JavaScript
+        "js" | "mjs" | "cjs" => ("◇", Theme::BADGE_DOCS),
+        // Styles - purple
+        "css" | "scss" | "sass" | "less" => ("◈", Theme::BADGE_REFACTOR),
+        // Data files - muted
+        "json" | "yaml" | "yml" | "toml" => ("○", Theme::GREY_600),
+        // Rust - orange
+        "rs" => ("●", Theme::BADGE_SECURITY),
+        // Python - teal
+        "py" => ("●", Theme::BADGE_PERF),
+        // Go - blue
+        "go" => ("●", Theme::BADGE_QUALITY),
+        // Config - very muted
+        "env" | "config" => ("○", Theme::GREY_700),
+        // Markdown - muted
+        "md" | "mdx" => ("○", Theme::GREY_600),
+        // Tests - teal indicator
+        _ if name.contains("test") || name.contains("spec") => ("◎", Theme::BADGE_PERF),
+        // Default - minimal dot
+        _ => ("·", Theme::GREY_600),
     }
 }
 
@@ -1779,74 +1849,97 @@ fn render_flat_tree<'a>(lines: &mut Vec<Line<'a>>, app: &'a App, is_active: bool
 fn render_grouped_tree<'a>(lines: &mut Vec<Line<'a>>, app: &'a App, is_active: bool, visible_height: usize) {
     use crate::grouping::GroupedEntryKind;
     
-    for (i, entry) in app.filtered_grouped_tree.iter()
+    let tree = &app.filtered_grouped_tree;
+    
+    for (i, entry) in tree.iter()
         .enumerate()
         .skip(app.project_scroll)
         .take(visible_height)
     {
         let is_selected = i == app.project_selected && is_active;
-        let cursor = if is_selected { " ›" } else { "  " };
+        let cursor = if is_selected { "›" } else { " " };
         
         match &entry.kind {
-            GroupedEntryKind::Layer(layer) => {
-                // Layer header - bold with icon
-                let expand_icon = if entry.expanded { "▼" } else { "▶" };
-                let count_str = format!(" ({})", entry.file_count);
+            GroupedEntryKind::Layer(_layer) => {
+                // Add spacing before layer (except first)
+                if i > 0 && app.project_scroll == 0 || (i > app.project_scroll && app.project_scroll > 0) {
+                    // Check if previous visible item was a file - add separator
+                    if i > 0 {
+                        if let Some(prev) = tree.get(i.saturating_sub(1)) {
+                            if prev.kind == GroupedEntryKind::File {
+                                lines.push(Line::from(""));
+                            }
+                        }
+                    }
+                }
                 
-                let style = if is_selected {
-                    Style::default().fg(Theme::WHITE).add_modifier(Modifier::BOLD)
+                // Layer header - clean and minimal
+                let expand_icon = if entry.expanded { "▾" } else { "▸" };
+                let count_str = format!(" {}", entry.file_count);
+                
+                let (name_style, count_style) = if is_selected {
+                    (
+                        Style::default().fg(Theme::WHITE).add_modifier(Modifier::BOLD),
+                        Style::default().fg(Theme::GREY_200),
+                    )
                 } else {
-                    Style::default().fg(Theme::GREY_100).add_modifier(Modifier::BOLD)
+                    (
+                        Style::default().fg(Theme::GREY_100),
+                        Style::default().fg(Theme::GREY_600),
+                    )
                 };
                 
                 lines.push(Line::from(vec![
-                    Span::styled(cursor.to_string(), Style::default().fg(Theme::GREY_100)),
-                    Span::styled(format!(" {} ", layer.icon()), Style::default().fg(Theme::GREY_300)),
-                    Span::styled(expand_icon.to_string(), Style::default().fg(Theme::GREY_400)),
-                    Span::styled(format!(" {}", layer.label()), style),
-                    Span::styled(count_str, Style::default().fg(Theme::GREY_500)),
+                    Span::styled(format!(" {} ", cursor), Style::default().fg(if is_selected { Theme::WHITE } else { Theme::GREY_600 })),
+                    Span::styled(expand_icon.to_string(), Style::default().fg(Theme::GREY_500)),
+                    Span::styled(format!(" {}", entry.name), name_style),
+                    Span::styled(count_str, count_style),
                 ]));
             }
             GroupedEntryKind::Feature => {
-                // Feature header - indented, italic
+                // Feature header - subtle folder-like grouping
                 let style = if is_selected {
-                    Style::default().fg(Theme::WHITE).add_modifier(Modifier::ITALIC)
-                } else {
-                    Style::default().fg(Theme::GREY_200).add_modifier(Modifier::ITALIC)
-                };
-                
-                let count_str = format!(" ({})", entry.file_count);
-                
-                lines.push(Line::from(vec![
-                    Span::styled(cursor.to_string(), Style::default().fg(Theme::GREY_100)),
-                    Span::styled("    ".to_string(), Style::default()),
-                    Span::styled(entry.name.clone(), style),
-                    Span::styled(count_str, Style::default().fg(Theme::GREY_500)),
-                ]));
-            }
-            GroupedEntryKind::File => {
-                // File entry - indented based on depth
-                let indent = "  ".repeat(entry.depth + 1);
-                
-                let name_style = if is_selected {
-                    Style::default().fg(Theme::WHITE).add_modifier(Modifier::BOLD)
-                } else if entry.priority == Theme::PRIORITY_HIGH {
-                    Style::default().fg(Theme::GREY_50)
+                    Style::default().fg(Theme::WHITE)
                 } else {
                     Style::default().fg(Theme::GREY_300)
                 };
                 
-                let priority_indicator = if entry.priority == Theme::PRIORITY_HIGH {
-                    "  ●"
-                } else {
-                    ""
-                };
+                let count_str = format!(" {}", entry.file_count);
                 
                 lines.push(Line::from(vec![
-                    Span::styled(cursor.to_string(), Style::default().fg(Theme::GREY_100)),
-                    Span::styled(indent, Style::default().fg(Theme::GREY_600)),
+                    Span::styled(format!(" {} ", cursor), Style::default().fg(if is_selected { Theme::WHITE } else { Theme::GREY_700 })),
+                    Span::styled("   ├─ ", Style::default().fg(Theme::GREY_700)),
+                    Span::styled(entry.name.clone(), style),
+                    Span::styled(count_str, Style::default().fg(Theme::GREY_600)),
+                ]));
+            }
+            GroupedEntryKind::File => {
+                // Simple clean file display with subtle guide
+                let (file_icon_str, icon_color) = file_icon(&entry.name);
+                
+                let name_style = if is_selected {
+                    Style::default().fg(Theme::WHITE)
+                } else if entry.priority == Theme::PRIORITY_HIGH {
+                    Style::default().fg(Theme::GREY_200)
+                } else {
+                    Style::default().fg(Theme::GREY_500)
+                };
+                
+                let priority_indicator = if entry.priority == Theme::PRIORITY_HIGH {
+                    Span::styled(" ●", Style::default().fg(Theme::GREY_400))
+                } else {
+                    Span::styled("", Style::default())
+                };
+                
+                // Simple indentation with subtle vertical guide
+                let indent = "     │  ";
+                
+                lines.push(Line::from(vec![
+                    Span::styled(format!(" {} ", cursor), Style::default().fg(if is_selected { Theme::WHITE } else { Theme::GREY_700 })),
+                    Span::styled(indent.to_string(), Style::default().fg(Theme::GREY_800)),
+                    Span::styled(format!("{} ", file_icon_str), Style::default().fg(icon_color)),
                     Span::styled(entry.name.clone(), name_style),
-                    Span::styled(priority_indicator.to_string(), Style::default().fg(Theme::GREY_200)),
+                    priority_indicator,
                 ]));
             }
         }
