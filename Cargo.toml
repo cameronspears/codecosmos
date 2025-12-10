@@ -26,6 +26,9 @@ futures = "0.3"
 dirs = "5"
 uuid = { version = "1", features = ["v4", "serde"] }
 
+# Database for suggestion history
+rusqlite = { version = "0.32", features = ["bundled"] }
+
 # AST parsing for multi-language support
 tree-sitter = "0.24"
 tree-sitter-rust = "0.23"

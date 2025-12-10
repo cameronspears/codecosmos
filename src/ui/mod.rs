@@ -345,6 +345,9 @@ pub struct App {
     // Pending changes for batch commit workflow
     pub pending_changes: Vec<PendingChange>,
     pub cosmos_branch: Option<String>,
+
+    // License tier for Pro badge
+    pub license_tier: crate::license::Tier,
 }
 
 impl App {
@@ -396,6 +399,7 @@ impl App {
             filtered_grouped_tree,
             pending_changes: Vec::new(),
             cosmos_branch: None,
+            license_tier: crate::license::LicenseManager::load().tier(),
         }
     }
     
@@ -1612,15 +1616,35 @@ pub fn render(frame: &mut Frame, app: &App) {
     }
 }
 
-fn render_header(frame: &mut Frame, area: Rect, _app: &App) {
+fn render_header(frame: &mut Frame, area: Rect, app: &App) {
+    // Build spans for the logo and optional Pro badge
+    let mut spans = vec![
+        Span::styled(
+            format!("   {}", Theme::COSMOS_LOGO),
+            Style::default().fg(Theme::WHITE).add_modifier(Modifier::BOLD)
+        ),
+    ];
+
+    // Add Pro badge if licensed
+    match app.license_tier {
+        crate::license::Tier::Pro => {
+            spans.push(Span::styled(
+                "  PRO",
+                Style::default().fg(Theme::GREY_400).add_modifier(Modifier::BOLD)
+            ));
+        }
+        crate::license::Tier::Team => {
+            spans.push(Span::styled(
+                "  TEAM",
+                Style::default().fg(Theme::GREY_400).add_modifier(Modifier::BOLD)
+            ));
+        }
+        crate::license::Tier::Free => {}
+    }
+
     let lines = vec![
         Line::from(""),
-        Line::from(vec![
-            Span::styled(
-                format!("   {}", Theme::COSMOS_LOGO),
-                Style::default().fg(Theme::WHITE).add_modifier(Modifier::BOLD)
-            ),
-        ]),
+        Line::from(spans),
     ];
 
     let header = Paragraph::new(lines).style(Style::default().bg(Theme::BG));
@@ -1964,6 +1988,7 @@ fn render_suggestions_panel(frame: &mut Frame, area: Rect, app: &App) {
     
     if suggestions.is_empty() {
         let is_loading = matches!(app.loading, LoadingState::GeneratingSuggestions);
+        let has_ai = crate::suggest::llm::is_available();
         
         // Only show the empty state box when not loading
         // (loading status is already shown in the footer)
@@ -1980,17 +2005,47 @@ fn render_suggestions_panel(frame: &mut Frame, area: Rect, app: &App) {
                 Span::styled("                                  ", Style::default()),
                 Span::styled("│", Style::default().fg(Theme::GREY_700)),
             ]));
-            lines.push(Line::from(vec![
-                Span::styled("    │", Style::default().fg(Theme::GREY_700)),
-                Span::styled("       ✓ ", Style::default().fg(Theme::GREEN)),
-                Span::styled("No issues found", Style::default().fg(Theme::GREY_300)),
-                Span::styled("          │", Style::default().fg(Theme::GREY_700)),
-            ]));
-            lines.push(Line::from(vec![
-                Span::styled("    │", Style::default().fg(Theme::GREY_700)),
-                Span::styled("         Nothing to suggest", Style::default().fg(Theme::GREY_500)),
-                Span::styled("       │", Style::default().fg(Theme::GREY_700)),
-            ]));
+            
+            if has_ai {
+                // AI is configured but no suggestions found
+                lines.push(Line::from(vec![
+                    Span::styled("    │", Style::default().fg(Theme::GREY_700)),
+                    Span::styled("       ✓ ", Style::default().fg(Theme::GREEN)),
+                    Span::styled("No issues found", Style::default().fg(Theme::GREY_300)),
+                    Span::styled("          │", Style::default().fg(Theme::GREY_700)),
+                ]));
+                lines.push(Line::from(vec![
+                    Span::styled("    │", Style::default().fg(Theme::GREY_700)),
+                    Span::styled("         Nothing to suggest", Style::default().fg(Theme::GREY_500)),
+                    Span::styled("       │", Style::default().fg(Theme::GREY_700)),
+                ]));
+            } else {
+                // AI is not configured - show setup hint
+                lines.push(Line::from(vec![
+                    Span::styled("    │", Style::default().fg(Theme::GREY_700)),
+                    Span::styled("       ☽ ", Style::default().fg(Theme::GREY_400)),
+                    Span::styled("AI not configured", Style::default().fg(Theme::GREY_300)),
+                    Span::styled("        │", Style::default().fg(Theme::GREY_700)),
+                ]));
+                lines.push(Line::from(vec![
+                    Span::styled("    │", Style::default().fg(Theme::GREY_700)),
+                    Span::styled("                                  ", Style::default()),
+                    Span::styled("│", Style::default().fg(Theme::GREY_700)),
+                ]));
+                lines.push(Line::from(vec![
+                    Span::styled("    │", Style::default().fg(Theme::GREY_700)),
+                    Span::styled("   cosmos --setup    ", Style::default().fg(Theme::GREY_500)),
+                    Span::styled("(BYOK)", Style::default().fg(Theme::GREY_600)),
+                    Span::styled("   │", Style::default().fg(Theme::GREY_700)),
+                ]));
+                lines.push(Line::from(vec![
+                    Span::styled("    │", Style::default().fg(Theme::GREY_700)),
+                    Span::styled("   cosmos --activate ", Style::default().fg(Theme::GREY_500)),
+                    Span::styled("(Pro) ", Style::default().fg(Theme::GREY_600)),
+                    Span::styled("   │", Style::default().fg(Theme::GREY_700)),
+                ]));
+            }
+            
             lines.push(Line::from(vec![
                 Span::styled("    │", Style::default().fg(Theme::GREY_700)),
                 Span::styled("                                  ", Style::default()),
@@ -2002,11 +2057,22 @@ fn render_suggestions_panel(frame: &mut Frame, area: Rect, app: &App) {
                 Span::styled("╯", Style::default().fg(Theme::GREY_700)),
             ]));
             lines.push(Line::from(""));
-            lines.push(Line::from(vec![
-                Span::styled("    ", Style::default()),
-                Span::styled(" r ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_400)),
-                Span::styled(" refresh status", Style::default().fg(Theme::GREY_400)),
-            ]));
+            
+            if has_ai {
+                lines.push(Line::from(vec![
+                    Span::styled("    ", Style::default()),
+                    Span::styled(" i ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_400)),
+                    Span::styled(" inquiry · ", Style::default().fg(Theme::GREY_400)),
+                    Span::styled(" r ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_400)),
+                    Span::styled(" refresh", Style::default().fg(Theme::GREY_400)),
+                ]));
+            } else {
+                lines.push(Line::from(vec![
+                    Span::styled("    ", Style::default()),
+                    Span::styled(" q ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_400)),
+                    Span::styled(" quit to setup", Style::default().fg(Theme::GREY_400)),
+                ]));
+            }
         }
         // When loading, panel stays empty - footer shows "Generating suggestions"
     } else {

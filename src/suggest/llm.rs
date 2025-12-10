@@ -1,5 +1,9 @@
 //! LLM-powered suggestions via OpenRouter
 //!
+//! Supports two modes:
+//! - BYOK (Bring Your Own Key): User provides OpenRouter API key, billed directly
+//! - Managed (Pro): Cosmos proxy handles API calls, billed through license
+//!
 //! Uses @preset/speed for ultra-fast analysis/summaries, @preset/smart for quality code generation.
 //! Uses smart context building to maximize insight per token.
 
@@ -9,11 +13,75 @@ use super::{Priority, Suggestion, SuggestionKind, SuggestionSource};
 use crate::config::Config;
 use crate::context::WorkContext;
 use crate::index::{CodebaseIndex, PatternKind, SymbolKind};
+use crate::license::LicenseManager;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+/// OpenRouter direct API URL (BYOK mode)
 const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
+
+/// Cosmos managed API URL (Pro mode) - proxies to OpenRouter with usage tracking
+/// TODO: Set this to your hosted endpoint when ready
+/// For now, Pro users still use OpenRouter directly (with usage tracking locally)
+const COSMOS_API_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
+
+/// API mode for LLM calls
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApiMode {
+    /// User's own OpenRouter API key (free tier)
+    Byok,
+    /// Cosmos managed API (Pro/Team tier)
+    Managed,
+}
+
+impl ApiMode {
+    /// Determine the API mode based on license and config
+    pub fn detect() -> (Self, Option<String>) {
+        let license_manager = LicenseManager::load();
+        let config = Config::load();
+        
+        // Check if user has an OpenRouter API key configured (BYOK)
+        let byok_key = config.get_api_key();
+        
+        // Pro/Team users: 
+        // - If managed API is ready (COSMOS_API_URL != OpenRouter), use managed mode
+        // - Otherwise, fall back to BYOK if they have a key configured
+        // - Track usage locally either way
+        if license_manager.tier().has_managed_ai() {
+            // For now, managed mode uses OpenRouter directly (until we have a proxy)
+            // Pro users must also have BYOK configured until managed API is live
+            if let Some(key) = byok_key {
+                return (ApiMode::Managed, Some(key));
+            }
+            // Pro license but no API key - can't make calls yet
+            // Return None so we show a helpful error
+            return (ApiMode::Managed, None);
+        }
+        
+        // Free tier: use BYOK if configured
+        if let Some(key) = byok_key {
+            return (ApiMode::Byok, Some(key));
+        }
+        
+        // No API access available
+        (ApiMode::Byok, None)
+    }
+    
+    /// Get the API URL for this mode
+    pub fn url(&self) -> &'static str {
+        // Both modes use OpenRouter for now until managed proxy is live
+        OPENROUTER_URL
+    }
+    
+    /// Get the appropriate header name for the API key
+    pub fn auth_header(&self) -> &'static str {
+        match self {
+            ApiMode::Byok => "Authorization",
+            ApiMode::Managed => "Authorization", // Same for now, will change when proxy is live
+        }
+    }
+}
 
 // Model pricing per million tokens (as of 2024)
 // Speed preset: ultra-fast routing for analysis
@@ -129,32 +197,49 @@ struct MessageContent {
     content: String,
 }
 
-/// Get API key from config
-fn get_api_key() -> Option<String> {
-    Config::load().get_api_key()
-}
-
-/// Check if LLM is available
+/// Check if LLM is available (either BYOK or managed)
 pub fn is_available() -> bool {
-    get_api_key().is_some()
+    let (_, api_key) = ApiMode::detect();
+    api_key.is_some()
 }
 
-/// Call OpenRouter API (returns content only, for backwards compatibility)
+/// Get current API mode (for display/debugging)
+pub fn current_mode() -> ApiMode {
+    let (mode, _) = ApiMode::detect();
+    mode
+}
+
+/// Call LLM API (returns content only, for backwards compatibility)
 async fn call_llm(system: &str, user: &str, model: Model) -> anyhow::Result<String> {
     let response = call_llm_with_usage(system, user, model, false).await?;
     Ok(response.content)
 }
 
-/// Call OpenRouter API with full response including usage stats
+/// Call LLM API with full response including usage stats
+/// Automatically routes to BYOK (OpenRouter) or Managed (Cosmos API) based on license
 async fn call_llm_with_usage(
     system: &str, 
     user: &str, 
     model: Model,
     json_mode: bool,
 ) -> anyhow::Result<LlmResponse> {
-    let api_key = get_api_key().ok_or_else(|| anyhow::anyhow!("No API key configured"))?;
+    let (mode, api_key) = ApiMode::detect();
+    let api_key = api_key.ok_or_else(|| {
+        match mode {
+            ApiMode::Managed => {
+                // Pro user but no API key - managed proxy not live yet
+                anyhow::anyhow!(
+                    "Cosmos Pro managed API coming soon! For now, please also run 'cosmos --setup' to configure your OpenRouter key."
+                )
+            }
+            ApiMode::Byok => {
+                anyhow::anyhow!("No API key configured. Run 'cosmos --setup' to get started.")
+            }
+        }
+    })?;
 
     let client = reqwest::Client::new();
+    let url = mode.url();
 
     let response_format = if json_mode {
         Some(ResponseFormat {
@@ -181,12 +266,17 @@ async fn call_llm_with_usage(
         response_format,
     };
 
-    let response = client
-        .post(OPENROUTER_URL)
-        .header("Authorization", format!("Bearer {}", api_key))
+    // Build request with appropriate headers for the API mode
+    let mut request_builder = client
+        .post(url)
         .header("Content-Type", "application/json")
-        .header("HTTP-Referer", "https://github.com/cosmos")
-        .header("X-Title", "Cosmos")
+        .header("HTTP-Referer", "https://cosmos.dev")
+        .header("X-Title", "Cosmos");
+
+    // Add auth header (both modes use OpenRouter directly for now)
+    request_builder = request_builder.header("Authorization", format!("Bearer {}", api_key));
+
+    let response = request_builder
         .json(&request)
         .send()
         .await?;
@@ -194,7 +284,24 @@ async fn call_llm_with_usage(
     if !response.status().is_success() {
         let status = response.status();
         let text = response.text().await.unwrap_or_default();
-        return Err(anyhow::anyhow!("API error {}: {}", status, text));
+        
+        // Provide helpful error messages based on status
+        let error_msg = match status.as_u16() {
+            401 => {
+                match mode {
+                    ApiMode::Byok => "Invalid API key. Run 'cosmos --setup' to update it.".to_string(),
+                    ApiMode::Managed => "License invalid or expired. Check 'cosmos --status'.".to_string(),
+                }
+            }
+            429 => {
+                match mode {
+                    ApiMode::Byok => "Rate limited by OpenRouter. Try again in a moment.".to_string(),
+                    ApiMode::Managed => "Token quota exceeded. Upgrade at cosmos.dev/pro".to_string(),
+                }
+            }
+            _ => format!("API error {}: {}", status, text),
+        };
+        return Err(anyhow::anyhow!("{}", error_msg));
     }
 
     let chat_response: ChatResponse = response.json().await?;
@@ -204,6 +311,14 @@ async fn call_llm_with_usage(
         .first()
         .map(|c| c.message.content.clone())
         .ok_or_else(|| anyhow::anyhow!("No response from AI"))?;
+    
+    // Record usage for Pro users (managed mode)
+    if mode == ApiMode::Managed {
+        if let Some(ref usage) = chat_response.usage {
+            let mut license_manager = LicenseManager::load();
+            license_manager.record_usage(usage.total_tokens as u64);
+        }
+    }
     
     Ok(LlmResponse {
         content,
@@ -1521,23 +1636,56 @@ fn parse_summaries_response(response: &str) -> anyhow::Result<HashMap<PathBuf, S
     let json_str = extract_json_object(response)
         .ok_or_else(|| anyhow::anyhow!("No JSON object found in response"))?;
 
-    let parsed: HashMap<String, String> = serde_json::from_str(json_str)
-        .map_err(|e| {
-            // Try to provide helpful error context
-            let preview = if json_str.len() > 100 {
-                format!("{}...", &json_str[..100])
-            } else {
-                json_str.to_string()
-            };
-            anyhow::anyhow!("JSON parse error: {} | Preview: {}", e, preview)
-        })?;
+    // First try to parse as a simple {path: summary} object
+    if let Ok(parsed) = serde_json::from_str::<HashMap<String, String>>(json_str) {
+        let summaries = parsed
+            .into_iter()
+            .map(|(path, summary)| (PathBuf::from(path), summary))
+            .collect();
+        return Ok(summaries);
+    }
 
-    let summaries = parsed
-        .into_iter()
-        .map(|(path, summary)| (PathBuf::from(path), summary))
-        .collect();
+    // Try to parse as a wrapper object (e.g., {"analysis": {...}, "summaries": {...}})
+    if let Ok(wrapper) = serde_json::from_str::<serde_json::Value>(json_str) {
+        // Look for common wrapper keys that might contain summaries
+        for key in ["summaries", "files", "results", "data"] {
+            if let Some(inner) = wrapper.get(key) {
+                if let Ok(parsed) = serde_json::from_value::<HashMap<String, String>>(inner.clone()) {
+                    let summaries = parsed
+                        .into_iter()
+                        .map(|(path, summary)| (PathBuf::from(path), summary))
+                        .collect();
+                    return Ok(summaries);
+                }
+            }
+        }
+        
+        // If the wrapper is an object, try to extract string values directly
+        // (handles case where LLM adds extra keys like "analysis" alongside file paths)
+        if let Some(obj) = wrapper.as_object() {
+            let mut summaries = HashMap::new();
+            for (key, value) in obj {
+                // Skip meta keys that aren't file paths
+                if key == "analysis" || key == "notes" || key == "summary" {
+                    continue;
+                }
+                if let Some(summary) = value.as_str() {
+                    summaries.insert(PathBuf::from(key), summary.to_string());
+                }
+            }
+            if !summaries.is_empty() {
+                return Ok(summaries);
+            }
+        }
+    }
 
-    Ok(summaries)
+    // Final fallback: provide helpful error
+    let preview = if json_str.len() > 200 {
+        format!("{}...", &json_str[..200])
+    } else {
+        json_str.to_string()
+    };
+    Err(anyhow::anyhow!("Could not extract summaries from response. Preview: {}", preview))
 }
 
 // ============================================================================

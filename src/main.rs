@@ -9,7 +9,10 @@ mod cache;
 mod config;
 mod context;
 mod grouping;
+mod history;
 mod index;
+mod license;
+mod onboarding;
 mod suggest;
 mod ui;
 
@@ -49,13 +52,33 @@ struct Args {
     #[arg(default_value = ".")]
     path: PathBuf,
 
-    /// Set up OpenRouter API key for AI features
+    /// Set up OpenRouter API key for AI features (BYOK mode)
     #[arg(long)]
     setup: bool,
 
     /// Show stats and exit (no TUI)
     #[arg(long)]
     stats: bool,
+
+    /// Activate a Cosmos Pro license
+    #[arg(long, value_name = "LICENSE_KEY")]
+    activate: Option<String>,
+
+    /// Deactivate current license
+    #[arg(long)]
+    deactivate: bool,
+
+    /// Show license and usage status
+    #[arg(long)]
+    status: bool,
+
+    /// Show token usage statistics
+    #[arg(long)]
+    usage: bool,
+
+    /// Generate a test license key (dev only)
+    #[arg(long, hide = true)]
+    generate_key: Option<String>,
 }
 
 /// Messages from background tasks to the main UI thread
@@ -114,9 +137,53 @@ pub enum BackgroundMessage {
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    // Handle --setup flag
+    // Handle --setup flag (BYOK mode)
     if args.setup {
         return setup_api_key();
+    }
+
+    // Handle --activate flag
+    if let Some(key) = args.activate {
+        return activate_license(&key);
+    }
+
+    // Handle --deactivate flag
+    if args.deactivate {
+        return deactivate_license();
+    }
+
+    // Handle --status flag
+    if args.status {
+        license::show_status();
+        return Ok(());
+    }
+
+    // Handle --usage flag
+    if args.usage {
+        return show_usage();
+    }
+
+    // Handle --generate-key flag (dev only)
+    if let Some(tier) = args.generate_key {
+        return generate_test_key(&tier);
+    }
+
+    // Check for first run and show onboarding
+    if onboarding::is_first_run() {
+        match onboarding::run_onboarding() {
+            Ok(true) => {
+                // Setup completed, continue to TUI
+                eprintln!();
+            }
+            Ok(false) => {
+                // Setup skipped, continue to TUI
+                eprintln!();
+            }
+            Err(e) => {
+                eprintln!("  Onboarding error: {}", e);
+                eprintln!("  Continuing without setup...");
+            }
+        }
     }
 
     let path = args.path.canonicalize()?;
@@ -1213,5 +1280,125 @@ fn truncate(s: &str, max: usize) -> String {
     } else {
         format!("{}...", &s[..max - 3])
     }
+}
+
+/// Activate a Cosmos Pro license
+fn activate_license(key: &str) -> Result<()> {
+    let mut manager = license::LicenseManager::load();
+    match manager.activate(key) {
+        Ok(tier) => {
+            println!();
+            println!("  ✓ License activated! You now have Cosmos {}.", tier.label().to_uppercase());
+            println!("  ✓ Saved to {}", license::LicenseManager::license_location());
+            println!();
+            Ok(())
+        }
+        Err(e) => {
+            println!();
+            println!("  ✗ Activation failed: {}", e);
+            println!();
+            Err(anyhow::anyhow!(e))
+        }
+    }
+}
+
+/// Deactivate the current license
+fn deactivate_license() -> Result<()> {
+    license::deactivate_interactive()
+        .map_err(|e| anyhow::anyhow!(e))
+}
+
+/// Show usage statistics
+fn show_usage() -> Result<()> {
+    let manager = license::LicenseManager::load();
+    let stats = manager.usage_stats();
+
+    println!();
+    println!("  ┌─────────────────────────────────────────────────────────┐");
+    println!("  │  ✦ COSMOS USAGE                                         │");
+    println!("  └─────────────────────────────────────────────────────────┘");
+    println!();
+
+    match stats.tier {
+        license::Tier::Free => {
+            println!("  Tier:   FREE (BYOK mode)");
+            println!();
+            println!("  In BYOK mode, usage is billed directly to your");
+            println!("  OpenRouter account. Check your dashboard at:");
+            println!("  https://openrouter.ai/activity");
+        }
+        license::Tier::Pro | license::Tier::Team => {
+            let allowance = stats.tier.token_allowance();
+            let pct = if allowance > 0 {
+                (stats.tokens_used as f64 / allowance as f64 * 100.0) as u32
+            } else {
+                0
+            };
+
+            println!("  Tier:      {}", stats.tier.label().to_uppercase());
+            println!("  Tokens:    {} / {} ({:.1}%)", 
+                format_tokens(stats.tokens_used),
+                format_tokens(allowance),
+                pct
+            );
+            println!("  Remaining: {}", format_tokens(stats.tokens_remaining));
+
+            if let Some(reset) = stats.period_resets_at {
+                let days_until = (reset - chrono::Utc::now()).num_days();
+                println!("  Resets in: {} days ({})", days_until, reset.format("%Y-%m-%d"));
+            }
+
+            // Usage bar
+            println!();
+            print!("  [");
+            let bar_width = 40;
+            let filled = (pct as usize * bar_width / 100).min(bar_width);
+            for i in 0..bar_width {
+                if i < filled {
+                    print!("█");
+                } else {
+                    print!("░");
+                }
+            }
+            println!("] {}%", pct);
+        }
+    }
+
+    println!();
+    Ok(())
+}
+
+/// Format token count for display
+fn format_tokens(tokens: u64) -> String {
+    if tokens >= 1_000_000 {
+        format!("{:.1}M", tokens as f64 / 1_000_000.0)
+    } else if tokens >= 1_000 {
+        format!("{:.1}K", tokens as f64 / 1_000.0)
+    } else {
+        format!("{}", tokens)
+    }
+}
+
+/// Generate a test license key (dev only)
+fn generate_test_key(tier: &str) -> Result<()> {
+    let tier = match tier.to_lowercase().as_str() {
+        "pro" => license::Tier::Pro,
+        "team" => license::Tier::Team,
+        "free" => license::Tier::Free,
+        _ => {
+            println!("  Invalid tier. Use: pro, team, or free");
+            return Ok(());
+        }
+    };
+
+    let key = license::generate_license_key(tier);
+    println!();
+    println!("  Generated {} license key:", tier.label().to_uppercase());
+    println!("  {}", key);
+    println!();
+    println!("  Activate with: cosmos --activate {}", key);
+    println!();
+
+    Ok(())
 }
 
