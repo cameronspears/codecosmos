@@ -122,10 +122,10 @@ impl LoadingState {
     pub fn message(&self) -> &'static str {
         match self {
             LoadingState::None => "",
-            LoadingState::GeneratingSuggestions => "Analyzing codebase with Opus 4.5",
-            LoadingState::GeneratingSummaries => "Summarizing files with Grok",
+            LoadingState::GeneratingSuggestions => "Analyzing codebase",
+            LoadingState::GeneratingSummaries => "Summarizing files",
             LoadingState::GeneratingPreview => "Previewing fix...",
-            LoadingState::GeneratingFix => "Generating fix with Opus 4.5",
+            LoadingState::GeneratingFix => "Generating fix",
         }
     }
     

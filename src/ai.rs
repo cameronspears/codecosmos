@@ -1,6 +1,6 @@
 //! AI integration via OpenRouter
 //!
-//! Uses Claude Opus 4 for complex analysis and DeepSeek for simpler tasks.
+//! Uses Smart preset (Opus 4.5) for complex analysis and Speed preset (GPT OSS 120B) for simpler tasks.
 
 use crate::config::Config;
 use serde::{Deserialize, Serialize};
@@ -9,25 +9,25 @@ const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
 
 #[derive(Debug, Clone, Copy)]
 pub enum Model {
-    Claude,    // anthropic/claude-opus-4.5 - for complex refactoring
-    DeepSeek,  // deepseek/deepseek-v3.2 - for simpler analysis
-    GrokFast,  // x-ai/grok-4.1-fast - for quick summaries
+    Smart,     // anthropic/claude-opus-4.5 - for complex refactoring
+    DeepSeek,  // deepseek/deepseek-v3.2 - for simpler analysis (legacy)
+    Speed,     // openrouter/gpt-oss-120b - for quick summaries
 }
 
 impl Model {
     pub fn id(&self) -> &'static str {
         match self {
-            Model::Claude => "anthropic/claude-opus-4.5",
+            Model::Smart => "anthropic/claude-opus-4.5",
             Model::DeepSeek => "deepseek/deepseek-v3.2",
-            Model::GrokFast => "x-ai/grok-4.1-fast",
+            Model::Speed => "openrouter/gpt-oss-120b",
         }
     }
 
     pub fn name(&self) -> &'static str {
         match self {
-            Model::Claude => "Claude Opus 4.5",
+            Model::Smart => "Opus 4.5",
             Model::DeepSeek => "DeepSeek V3.2",
-            Model::GrokFast => "Grok 4.1 Fast",
+            Model::Speed => "GPT OSS 120B",
         }
     }
 }
@@ -125,7 +125,7 @@ pub async fn chat(prompt: &str, model: Model) -> Result<String, String> {
 /// Generate a fix suggestion for a file issue (prose analysis)
 pub async fn suggest_fix(prompt: &str) -> Result<String, String> {
     // Use Claude for complex refactoring suggestions
-    chat(prompt, Model::Claude).await
+    chat(prompt, Model::Smart).await
 }
 
 /// Quick analysis using cheaper model
@@ -185,7 +185,7 @@ RULES:
         file_path, loc, fn_count, issue, content
     );
 
-    chat_with_system(system_prompt, &user_prompt, Model::Claude).await
+    chat_with_system(system_prompt, &user_prompt, Model::Smart).await
 }
 
 /// Parse AI response into explanation and changes
@@ -511,7 +511,7 @@ RULES:
         content.lines().take(200).collect::<Vec<_>>().join("\n")
     );
 
-    let response = chat_with_system(system_prompt, &user_prompt, Model::GrokFast).await?;
+    let response = chat_with_system(system_prompt, &user_prompt, Model::Speed).await?;
     parse_file_summary(&response)
 }
 
@@ -615,7 +615,7 @@ RULES:
         content.lines().take(150).collect::<Vec<_>>().join("\n")
     );
 
-    let response = chat_with_system(system_prompt, &user_prompt, Model::GrokFast).await?;
+    let response = chat_with_system(system_prompt, &user_prompt, Model::Speed).await?;
     parse_enhancements(&response)
 }
 
@@ -679,9 +679,9 @@ mod tests {
 
     #[test]
     fn test_model_ids() {
-        assert!(Model::Claude.id().contains("claude"));
+        assert!(Model::Smart.id().contains("claude"));
         assert!(Model::DeepSeek.id().contains("deepseek"));
-        assert!(Model::GrokFast.id().contains("grok"));
+        assert!(Model::Speed.id().contains("gpt-oss"));
     }
     
     #[test]

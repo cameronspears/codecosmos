@@ -2,7 +2,7 @@
 
 A contemplative companion for your codebase.
 
-Cosmos is a terminal-based AI coding assistant that analyzes your project using AST-based indexing and provides intelligent suggestions for improvements, bug fixes, and optimizations. It uses Claude Opus 4.5 for deep analysis and Grok 4.1 Fast for quick operations, all through the OpenRouter API.
+Cosmos is a terminal-based AI coding assistant that analyzes your project using AST-based indexing and provides intelligent suggestions for improvements, bug fixes, and optimizations. It uses two OpenRouter presets: **Smart** (Opus 4.5) for deep analysis and code generation, and **Speed** (GPT OSS 120B) for fast summaries and categorization.
 
 ```
 +---------------------------+----------------------------------+
@@ -133,22 +133,21 @@ Files are automatically categorized into architectural layers:
 
 ### 3. AI Analysis
 
-Cosmos uses a tiered approach to minimize cost while maximizing insight:
+Cosmos uses two model presets via OpenRouter:
 
-| Tier | Model | Purpose | Cost |
-|------|-------|---------|------|
-| Cached | - | Previously generated suggestions | $0 |
-| Fast | Grok 4.1 Fast | File summaries, quick categorization | ~$0.005/1K tokens |
-| Deep | Claude Opus 4.5 | Codebase-wide analysis, fix generation | ~$15-75/1M tokens |
+| Preset | Model | Purpose |
+|--------|-------|---------|
+| **Smart** | Opus 4.5 | Deep codebase analysis, code generation, fix application |
+| **Speed** | GPT OSS 120B | File summaries, quick categorization, fix previews |
 
-The initial analysis uses Opus 4.5 to review your entire codebase and generate 5-10 high-value suggestions. Summaries are generated incrementally using Grok for speed.
+The initial analysis uses the Smart preset to review your entire codebase and generate 5-10 high-value suggestions. Summaries are generated incrementally using the Speed preset for fast startup.
 
 ### 4. Fix Generation
 
 When you apply a suggestion:
 
-1. **Preview Phase** - Grok quickly describes what will change
-2. **Apply Phase** - Opus generates the complete fixed file
+1. **Preview Phase** - Speed preset quickly describes what will change
+2. **Apply Phase** - Smart preset generates the complete fixed file
 3. **Backup** - Original file backed up before changes
 4. **Commit Ready** - Changes tracked for batch commit
 

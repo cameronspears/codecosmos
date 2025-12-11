@@ -3,8 +3,8 @@
 //! Tiered approach to minimize LLM spend:
 //! - Layer 1: Static rules (FREE)
 //! - Layer 2: Cached suggestions (ONE-TIME)
-//! - Layer 3: Grok Fast for categorization (~$0.0001/call)
-//! - Layer 4: Opus 4.5 for deep analysis (on-demand only)
+//! - Layer 3: Speed preset (GPT OSS 120B) for categorization
+//! - Layer 4: Smart preset (Opus 4.5) for deep analysis (on-demand only)
 
 pub mod llm;
 pub mod static_rules;
@@ -22,9 +22,9 @@ pub enum SuggestionSource {
     Static,
     /// Previously generated, loaded from cache
     Cached,
-    /// Grok Fast for quick categorization
+    /// Speed preset (GPT OSS 120B) for quick categorization
     LlmFast,
-    /// Opus 4.5 for detailed analysis
+    /// Smart preset (Opus 4.5) for detailed analysis
     LlmDeep,
 }
 

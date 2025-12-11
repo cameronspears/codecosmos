@@ -99,7 +99,7 @@ pub enum BackgroundMessage {
         usage: Option<suggest::llm::Usage>,
     },
     FixError(String),
-    /// Direct fix applied (Opus generated + applied the change)
+    /// Direct fix applied (Smart preset generated + applied the change)
     DirectFixApplied {
         suggestion_id: uuid::Uuid,
         file_path: PathBuf,
@@ -318,7 +318,7 @@ async fn run_tui(
     
     if has_api_key {
         app.loading = LoadingState::GeneratingSuggestions;
-        app.show_toast("Analyzing codebase with Opus 4.5...");
+        app.show_toast("Analyzing codebase...");
     }
     
     eprintln!();
@@ -480,7 +480,7 @@ fn run_loop<B: Backend>(
                     
                     // Track cost
                     if let Some(u) = usage {
-                        let cost = u.calculate_cost(suggest::llm::Model::Opus);
+                        let cost = u.calculate_cost(suggest::llm::Model::Smart);
                         app.session_cost += cost;
                         app.session_tokens += u.total_tokens;
                     }
@@ -509,9 +509,9 @@ fn run_loop<B: Backend>(
                     let new_count = summaries.len();
                     app.update_summaries(summaries);
 
-                    // Track cost (using GrokFast for summaries)
+                    // Track cost (using Speed preset for summaries)
                     if let Some(u) = usage {
-                        let cost = u.calculate_cost(suggest::llm::Model::GrokFast);
+                        let cost = u.calculate_cost(suggest::llm::Model::Speed);
                         app.session_cost += cost;
                         app.session_tokens += u.total_tokens;
                     }
@@ -538,7 +538,7 @@ fn run_loop<B: Backend>(
                 BackgroundMessage::FixReady { suggestion_id, diff_preview, file_path, summary, usage } => {
                     // Track cost
                     if let Some(u) = usage {
-                        let cost = u.calculate_cost(suggest::llm::Model::Opus);
+                        let cost = u.calculate_cost(suggest::llm::Model::Smart);
                         app.session_cost += cost;
                         app.session_tokens += u.total_tokens;
                     }
@@ -553,7 +553,7 @@ fn run_loop<B: Backend>(
                 BackgroundMessage::RefinedFixReady { diff_preview, usage } => {
                     // Track cost
                     if let Some(u) = usage {
-                        let cost = u.calculate_cost(suggest::llm::Model::Opus);
+                        let cost = u.calculate_cost(suggest::llm::Model::Smart);
                         app.session_cost += cost;
                         app.session_tokens += u.total_tokens;
                     }
@@ -569,7 +569,7 @@ fn run_loop<B: Backend>(
                 BackgroundMessage::DirectFixApplied { suggestion_id, file_path, description, modified_areas, backup_path, usage } => {
                     // Track cost
                     if let Some(u) = usage {
-                        let cost = u.calculate_cost(suggest::llm::Model::Opus);
+                        let cost = u.calculate_cost(suggest::llm::Model::Smart);
                         app.session_cost += cost;
                         app.session_tokens += u.total_tokens;
                     }
@@ -615,7 +615,7 @@ fn run_loop<B: Backend>(
                 BackgroundMessage::QuestionResponse { question, answer, usage } => {
                     // Track cost
                     if let Some(u) = usage {
-                        let cost = u.calculate_cost(suggest::llm::Model::GrokFast);
+                        let cost = u.calculate_cost(suggest::llm::Model::Speed);
                         app.session_cost += cost;
                         app.session_tokens += u.total_tokens;
                     }
@@ -835,7 +835,7 @@ fn run_loop<B: Backend>(
                                 app.close_overlay();
                             }
                             KeyCode::Char('y') if !is_typing_modifier => {
-                                // Phase 2: Generate and apply fix directly with Opus
+                                // Phase 2: Generate and apply fix directly with Smart preset
                                 if let Some(suggestion) = app.suggestions.suggestions.iter().find(|s| s.id == suggestion_id) {
                                     // Get the preview from the overlay
                                     let preview = if let Overlay::FixPreview { preview, .. } = &app.overlay {

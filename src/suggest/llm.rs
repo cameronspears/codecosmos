@@ -14,47 +14,49 @@ use std::path::PathBuf;
 const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
 
 // Model pricing per million tokens (as of 2024)
+// Smart preset (Opus 4.5)
 const OPUS_INPUT_COST: f64 = 15.0;   // $15 per 1M input tokens
 const OPUS_OUTPUT_COST: f64 = 75.0;  // $75 per 1M output tokens
-const GROK_INPUT_COST: f64 = 5.0;    // $5 per 1M input tokens  
-const GROK_OUTPUT_COST: f64 = 15.0;  // $15 per 1M output tokens
+// Speed preset (GPT OSS 120B)
+const SPEED_INPUT_COST: f64 = 1.0;   // $1 per 1M input tokens  
+const SPEED_OUTPUT_COST: f64 = 1.0;  // $1 per 1M output tokens
 
-/// Models available for suggestions
+/// Models available for suggestions (OpenRouter presets)
 #[derive(Debug, Clone, Copy)]
 pub enum Model {
-    /// Grok Fast - for quick categorization
-    GrokFast,
-    /// Opus 4.5 - for deep analysis
-    Opus,
+    /// Speed preset - GPT OSS 120B for quick categorization and summaries
+    Speed,
+    /// Smart preset - Opus 4.5 for deep analysis and code generation
+    Smart,
 }
 
 impl Model {
     pub fn id(&self) -> &'static str {
         match self {
-            Model::GrokFast => "x-ai/grok-4.1-fast",
-            Model::Opus => "anthropic/claude-opus-4.5",
+            Model::Speed => "openrouter/gpt-oss-120b",
+            Model::Smart => "anthropic/claude-opus-4.5",
         }
     }
 
     pub fn max_tokens(&self) -> u32 {
         match self {
-            Model::GrokFast => 1024,
-            Model::Opus => 8192,
+            Model::Speed => 1024,
+            Model::Smart => 8192,
         }
     }
     
     pub fn display_name(&self) -> &'static str {
         match self {
-            Model::GrokFast => "grok-4.1-fast",
-            Model::Opus => "opus-4.5",
+            Model::Speed => "gpt-oss-120b",
+            Model::Smart => "opus-4.5",
         }
     }
     
     /// Calculate cost in USD based on token usage
     pub fn calculate_cost(&self, prompt_tokens: u32, completion_tokens: u32) -> f64 {
         let (input_rate, output_rate) = match self {
-            Model::GrokFast => (GROK_INPUT_COST, GROK_OUTPUT_COST),
-            Model::Opus => (OPUS_INPUT_COST, OPUS_OUTPUT_COST),
+            Model::Speed => (SPEED_INPUT_COST, SPEED_OUTPUT_COST),
+            Model::Smart => (OPUS_INPUT_COST, OPUS_OUTPUT_COST),
         };
         
         let input_cost = (prompt_tokens as f64 / 1_000_000.0) * input_rate;
@@ -208,7 +210,7 @@ async fn call_llm_with_usage(
     })
 }
 
-/// Quick file summary using Grok Fast
+/// Quick file summary using Speed preset (GPT OSS 120B)
 pub async fn quick_summary(path: &PathBuf, content: &str, file_index: &FileIndex) -> anyhow::Result<String> {
     let system = r#"You are a code analyst. Provide a brief summary of what this file does.
 Output exactly 1-2 sentences. Be specific and technical."#;
@@ -221,7 +223,7 @@ Output exactly 1-2 sentences. Be specific and technical."#;
         truncate_content(content, 2000)
     );
 
-    call_llm(system, &user, Model::GrokFast).await
+    call_llm(system, &user, Model::Speed).await
 }
 
 /// Deep analysis using Opus 4.5 (on-demand only)
@@ -265,7 +267,7 @@ GUIDELINES:
         truncate_content(content, 8000)
     );
 
-    let response = call_llm(system, &user, Model::Opus).await?;
+    let response = call_llm(system, &user, Model::Smart).await?;
 
     parse_suggestions(&response, path)
 }
@@ -299,7 +301,7 @@ Be specific to this code. Don't be generic."#;
         truncate_content(content, 4000)
     );
 
-    call_llm(system, &user, Model::GrokFast).await
+    call_llm(system, &user, Model::Speed).await
 }
 
 /// Ask cosmos a general question about the codebase
@@ -359,7 +361,7 @@ QUESTION:
         question
     );
 
-    let response = call_llm_with_usage(system, &user, Model::GrokFast, false).await?;
+    let response = call_llm_with_usage(system, &user, Model::Speed, false).await?;
     Ok((response.content, response.usage))
 }
 
@@ -391,7 +393,7 @@ Be precise. Only change what's necessary."#;
         truncate_content(content, 6000)
     );
 
-    call_llm(system, &user, Model::Opus).await
+    call_llm(system, &user, Model::Smart).await
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -452,7 +454,7 @@ CRITICAL RULES:
         content
     );
 
-    let response = call_llm_with_usage(system, &user, Model::Opus, true).await?;
+    let response = call_llm_with_usage(system, &user, Model::Smart, true).await?;
     
     // Parse the JSON response
     let json_str = extract_json_object(&response.content)
@@ -538,7 +540,7 @@ impl FixScope {
     }
 }
 
-/// Generate a quick preview of what the fix will do (uses Grok Fast for speed)
+/// Generate a quick preview of what the fix will do (uses Speed preset for fast response)
 /// This is Phase 1 of the two-phase fix flow - lets users approve before waiting for full diff
 pub async fn generate_fix_preview(
     path: &PathBuf,
@@ -573,7 +575,7 @@ Be concise. No code, just describe the change in plain English."#;
         modifier_text
     );
 
-    let response = call_llm(system, &user, Model::GrokFast).await?;
+    let response = call_llm(system, &user, Model::Speed).await?;
     parse_fix_preview(&response, modifier.map(String::from))
 }
 
@@ -646,7 +648,7 @@ Incorporate the user's feedback into the fix. Be precise. Only change what's nec
         truncate_content(content, 4000)
     );
 
-    call_llm(system, &user, Model::Opus).await
+    call_llm(system, &user, Model::Smart).await
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -687,7 +689,7 @@ GUIDELINES:
 
     let user_prompt = build_codebase_context(index, context);
     
-    let response = call_llm_with_usage(system, &user_prompt, Model::Opus, true).await?;
+    let response = call_llm_with_usage(system, &user_prompt, Model::Smart, true).await?;
     
     let suggestions = parse_codebase_suggestions(&response.content)?;
     Ok((suggestions, response.usage))
@@ -1415,7 +1417,7 @@ OUTPUT: A JSON object mapping file paths to summary strings. Example:
 
     let user_prompt = build_batch_context(index, files, project_context);
     
-    let response = call_llm_with_usage(system, &user_prompt, Model::GrokFast, true).await?;
+    let response = call_llm_with_usage(system, &user_prompt, Model::Speed, true).await?;
     
     let summaries = parse_summaries_response(&response.content)?;
     
@@ -1643,8 +1645,8 @@ Only include features that need improvement. Skip generic names like "misc-*" or
     
     let system_prompt = "You are a code organization expert. Analyze feature groupings and suggest clearer names and descriptions. Respond only with valid JSON.";
     
-    // Use Grok for fast categorization
-    let response = call_llm_with_usage(system_prompt, &user_prompt, Model::GrokFast, true).await?;
+    // Use Speed preset for fast categorization
+    let response = call_llm_with_usage(system_prompt, &user_prompt, Model::Speed, true).await?;
     
     // Parse response
     let enhancements = parse_feature_enhancements(&response.content)?;
@@ -1725,7 +1727,7 @@ Be constructive and focused. Skip trivial issues. Highlight the most important p
     let user_prompt = format!("Review these changes:\n{}", changes_text);
     
     // Use Opus for thorough review
-    let response = call_llm_with_usage(system_prompt, &user_prompt, Model::Opus, true).await?;
+    let response = call_llm_with_usage(system_prompt, &user_prompt, Model::Smart, true).await?;
     
     let usage = response.usage.unwrap_or_default();
     
