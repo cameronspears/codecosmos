@@ -147,6 +147,14 @@ pub enum ApplyMode {
     Chat,   // Chat input to refine suggestion
 }
 
+/// Mode for the repo memory overlay
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RepoMemoryMode {
+    #[default]
+    View,
+    Add,
+}
+
 /// Spinner animation frames (braille pattern)
 pub const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -171,6 +179,19 @@ pub enum Overlay {
     Inquiry {
         response: String,
         scroll: usize,
+    },
+    /// Privacy preview for inquiry (what will be sent)
+    InquiryPreview {
+        question: String,
+        preview: String,
+        scroll: usize,
+    },
+    /// Repo memory: local decisions and conventions
+    RepoMemory {
+        mode: RepoMemoryMode,
+        selected: usize,
+        scroll: usize,
+        input: String,
     },
     ApplyConfirm {
         suggestion_id: uuid::Uuid,
@@ -218,6 +239,37 @@ pub enum Overlay {
         scroll: usize,
         commit_input: Option<String>,
     },
+    /// Ship dialog - streamlined commit + push + PR flow
+    ShipDialog {
+        branch_name: String,
+        commit_message: String,
+        files: Vec<PathBuf>,
+        step: ShipStep,
+    },
+    /// Safe Apply report - what changed, why safe, how to undo
+    SafeApplyReport {
+        description: String,
+        file_path: PathBuf,
+        branch_name: String,
+        backup_path: PathBuf,
+        checks: Vec<crate::safe_apply::CheckResult>,
+        scroll: usize,
+    },
+    /// Ritual mode - time-boxed curated queue
+    Ritual {
+        scroll: usize,
+    },
+}
+
+/// Steps in the Ship workflow
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ShipStep {
+    #[default]
+    Confirm,    // Show what will happen
+    Committing, // Committing changes
+    Pushing,    // Pushing to remote
+    CreatingPR, // Creating pull request
+    Done,       // PR created successfully
 }
 
 /// A comment from AI code review
@@ -273,17 +325,73 @@ pub struct PendingChange {
     pub file_path: PathBuf,
     pub description: String,
     pub diff: String,
+    pub backup_path: PathBuf,
     pub applied_at: Instant,
 }
 
 impl PendingChange {
-    pub fn new(suggestion_id: uuid::Uuid, file_path: PathBuf, description: String, diff: String) -> Self {
+    pub fn new(
+        suggestion_id: uuid::Uuid,
+        file_path: PathBuf,
+        description: String,
+        diff: String,
+        backup_path: PathBuf,
+    ) -> Self {
         Self {
             suggestion_id,
             file_path,
             description,
             diff,
+            backup_path,
             applied_at: Instant::now(),
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  RITUAL MODE (time-boxed queue)
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RitualItemStatus {
+    Todo,
+    Done,
+    Skipped,
+    Dismissed,
+}
+
+impl RitualItemStatus {
+    pub fn icon(&self) -> &'static str {
+        match self {
+            RitualItemStatus::Todo => "○",
+            RitualItemStatus::Done => "✓",
+            RitualItemStatus::Skipped => "·",
+            RitualItemStatus::Dismissed => "×",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RitualItem {
+    pub suggestion_id: uuid::Uuid,
+    pub status: RitualItemStatus,
+}
+
+#[derive(Debug, Clone)]
+pub struct RitualState {
+    pub minutes: u32,
+    pub started_at: Instant,
+    pub items: Vec<RitualItem>,
+    pub selected: usize,
+}
+
+impl RitualState {
+    pub fn new(minutes: u32) -> Self {
+        Self {
+            minutes,
+            started_at: Instant::now(),
+            items: Vec::new(),
+            selected: 0,
         }
     }
 }
@@ -294,6 +402,7 @@ pub struct App {
     pub index: CodebaseIndex,
     pub suggestions: SuggestionEngine,
     pub context: WorkContext,
+    pub config: crate::config::Config,
     
     // UI state
     pub active_panel: ActivePanel,
@@ -320,6 +429,9 @@ pub struct App {
     
     // LLM-generated file summaries
     pub llm_summaries: std::collections::HashMap<PathBuf, String>,
+
+    // Personal repo memory (local)
+    pub repo_memory: crate::cache::RepoMemory,
     
     // Cost tracking
     pub session_cost: f64,          // Total USD spent this session
@@ -346,6 +458,9 @@ pub struct App {
     pub pending_changes: Vec<PendingChange>,
     pub cosmos_branch: Option<String>,
 
+    // Ritual mode (optional)
+    pub ritual: Option<RitualState>,
+
     // License tier for Pro badge
     pub license_tier: crate::license::Tier,
 }
@@ -370,6 +485,7 @@ impl App {
             index,
             suggestions,
             context,
+            config: crate::config::Config::load(),
             active_panel: ActivePanel::default(),
             project_scroll: 0,
             project_selected: 0,
@@ -386,6 +502,7 @@ impl App {
             loading: LoadingState::None,
             loading_frame: 0,
             llm_summaries: std::collections::HashMap::new(),
+            repo_memory: crate::cache::RepoMemory::default(),
             session_cost: 0.0,
             session_tokens: 0,
             active_model: None,
@@ -399,13 +516,130 @@ impl App {
             filtered_grouped_tree,
             pending_changes: Vec::new(),
             cosmos_branch: None,
+            ritual: None,
             license_tier: crate::license::LicenseManager::load().tier(),
         }
     }
+
+    /// Start (or reopen) a time-boxed ritual session.
+    /// If suggestions aren't ready yet, the ritual will auto-populate when they arrive.
+    pub fn start_ritual(&mut self, minutes: u32) {
+        self.ritual = Some(RitualState::new(minutes.max(1)));
+        self.populate_ritual_items_if_possible();
+        self.overlay = Overlay::Ritual { scroll: 0 };
+        self.show_toast(&format!("Ritual: {}m", minutes.max(1)));
+    }
+
+    /// Close ritual overlay (ritual state remains so it can be reopened)
+    pub fn close_ritual_overlay(&mut self) {
+        if matches!(self.overlay, Overlay::Ritual { .. }) {
+            self.overlay = Overlay::None;
+        }
+    }
+
+    /// Mark selected ritual item status
+    pub fn ritual_set_selected_status(&mut self, status: RitualItemStatus) {
+        let Some(state) = self.ritual.as_mut() else { return; };
+        if state.items.is_empty() { return; }
+        if let Some(item) = state.items.get_mut(state.selected) {
+            item.status = status;
+        }
+    }
+
+    /// Move ritual selection up/down
+    pub fn ritual_move(&mut self, delta: isize) {
+        let Some(state) = self.ritual.as_mut() else { return; };
+        if state.items.is_empty() { return; }
+        let len = state.items.len() as isize;
+        let mut next = state.selected as isize + delta;
+        if next < 0 { next = 0; }
+        if next >= len { next = len - 1; }
+        state.selected = next as usize;
+    }
+
+    /// Get the currently selected ritual suggestion (by id)
+    pub fn selected_ritual_suggestion(&self) -> Option<&crate::suggest::Suggestion> {
+        let state = self.ritual.as_ref()?;
+        let item = state.items.get(state.selected)?;
+        self.suggestions.suggestions.iter().find(|s| s.id == item.suggestion_id)
+    }
+
+    /// Remaining seconds in the ritual timer (0 when elapsed)
+    pub fn ritual_seconds_remaining(&self) -> Option<u64> {
+        let state = self.ritual.as_ref()?;
+        let total = (state.minutes as u64) * 60;
+        let elapsed = state.started_at.elapsed().as_secs();
+        Some(total.saturating_sub(elapsed))
+    }
+
+    /// Populate ritual items if we already have suggestions.
+    /// This is safe to call multiple times.
+    pub fn populate_ritual_items_if_possible(&mut self) {
+        let Some(state) = self.ritual.as_mut() else { return; };
+        if !state.items.is_empty() {
+            return;
+        }
+        let candidates: Vec<_> = self.suggestions.active_suggestions();
+        if candidates.is_empty() {
+            return;
+        }
+
+        // Score suggestions for “high leverage, low fuss” solo-dev maintenance.
+        let changed: std::collections::HashSet<PathBuf> = self.context
+            .all_changed_files()
+            .into_iter()
+            .cloned()
+            .collect();
+
+        let mut scored: Vec<(i64, uuid::Uuid)> = candidates
+            .into_iter()
+            .map(|s| {
+                let pri = match s.priority {
+                    crate::suggest::Priority::High => 120,
+                    crate::suggest::Priority::Medium => 60,
+                    crate::suggest::Priority::Low => 20,
+                };
+                let kind = match s.kind {
+                    crate::suggest::SuggestionKind::BugFix => 35,
+                    crate::suggest::SuggestionKind::Optimization => 25,
+                    crate::suggest::SuggestionKind::Testing => 20,
+                    crate::suggest::SuggestionKind::Quality => 15,
+                    crate::suggest::SuggestionKind::Documentation => 10,
+                    crate::suggest::SuggestionKind::Improvement => 10,
+                    crate::suggest::SuggestionKind::Feature => 0,
+                };
+                let changed_bonus = if changed.contains(&s.file) { 70 } else { 0 };
+                let size_bonus = self.index.files.get(&s.file).map(|f| {
+                    if f.loc <= 300 { 18 }
+                    else if f.loc <= 600 { 6 }
+                    else { -10 }
+                }).unwrap_or(0);
+
+                (pri + kind + changed_bonus + size_bonus, s.id)
+            })
+            .collect();
+
+        scored.sort_by(|a, b| b.0.cmp(&a.0));
+        let chosen: Vec<_> = scored.into_iter().take(5).map(|(_, id)| id).collect();
+
+        state.items = chosen
+            .into_iter()
+            .map(|id| RitualItem { suggestion_id: id, status: RitualItemStatus::Todo })
+            .collect();
+        state.selected = 0;
+    }
     
     /// Add a pending change from an applied fix
-    pub fn add_pending_change(&mut self, suggestion_id: uuid::Uuid, file_path: PathBuf, description: String, diff: String) {
-        self.pending_changes.push(PendingChange::new(suggestion_id, file_path, description, diff));
+    pub fn add_pending_change(
+        &mut self,
+        suggestion_id: uuid::Uuid,
+        file_path: PathBuf,
+        description: String,
+        diff: String,
+        backup_path: PathBuf,
+    ) {
+        self.pending_changes
+            .push(PendingChange::new(suggestion_id, file_path, description, diff, backup_path));
     }
     
     /// Get count of pending changes
@@ -417,6 +651,45 @@ impl App {
     pub fn clear_pending_changes(&mut self) {
         self.pending_changes.clear();
         self.cosmos_branch = None;
+    }
+
+    /// Show the Safe Apply report overlay after applying a fix.
+    pub fn show_safe_apply_report(
+        &mut self,
+        description: String,
+        file_path: PathBuf,
+        branch_name: String,
+        backup_path: PathBuf,
+        checks: Vec<crate::safe_apply::CheckResult>,
+    ) {
+        self.overlay = Overlay::SafeApplyReport {
+            description,
+            file_path,
+            branch_name,
+            backup_path,
+            checks,
+            scroll: 0,
+        };
+    }
+
+    /// Undo the most recent applied change by restoring its backup file.
+    /// Removes it from the pending queue.
+    pub fn undo_last_pending_change(&mut self) -> Result<(), String> {
+        let change = self.pending_changes.pop().ok_or_else(|| "No pending changes to undo".to_string())?;
+        let target = self.repo_path.join(&change.file_path);
+
+        if !change.backup_path.exists() {
+            return Err("Backup file not found (cannot undo)".to_string());
+        }
+
+        std::fs::copy(&change.backup_path, &target)
+            .map_err(|e| format!("Failed to restore backup: {}", e))?;
+        let _ = std::fs::remove_file(&change.backup_path);
+
+        // Mark suggestion as not applied (so it can be re-applied if desired).
+        self.suggestions.unmark_applied(change.suggestion_id);
+
+        Ok(())
     }
     
     /// Tick the loading animation
@@ -789,6 +1062,122 @@ impl App {
         self.overlay = Overlay::Inquiry { response, scroll: 0 };
     }
 
+    /// Show a privacy preview for an inquiry (what will be sent).
+    pub fn show_inquiry_preview(&mut self, question: String) {
+        let mut preview = String::new();
+        preview.push_str("Cosmos will send:\\n");
+        preview.push_str("- Repo stats (file count, LOC, symbol count)\\n");
+        preview.push_str("- Up to 50 file paths (top-level key files)\\n");
+        preview.push_str("- Up to 100 symbol names (functions/structs/enums)\\n");
+
+        let changed: Vec<String> = self.context
+            .all_changed_files()
+            .into_iter()
+            .take(10)
+            .map(|p| p.display().to_string())
+            .collect();
+        if !changed.is_empty() {
+            preview.push_str("\\nChanged files (sample):\\n");
+            for f in changed {
+                preview.push_str(&format!("- `{}`\\n", f));
+            }
+        }
+
+        let mem = self.repo_memory.to_prompt_context(6, 500);
+        if !mem.trim().is_empty() {
+            preview.push_str("\\nRepo memory (sample):\\n");
+            preview.push_str(&mem);
+            preview.push_str("\\n");
+        }
+
+        self.overlay = Overlay::InquiryPreview {
+            question,
+            preview,
+            scroll: 0,
+        };
+    }
+
+    /// Show repo memory overlay
+    pub fn show_repo_memory(&mut self) {
+        self.overlay = Overlay::RepoMemory {
+            mode: RepoMemoryMode::View,
+            selected: 0,
+            scroll: 0,
+            input: String::new(),
+        };
+    }
+
+    /// Push character into repo memory input (when in Add mode)
+    pub fn memory_input_push(&mut self, c: char) {
+        if let Overlay::RepoMemory { input, mode, .. } = &mut self.overlay {
+            if *mode == RepoMemoryMode::Add {
+                input.push(c);
+            }
+        }
+    }
+
+    pub fn memory_input_pop(&mut self) {
+        if let Overlay::RepoMemory { input, mode, .. } = &mut self.overlay {
+            if *mode == RepoMemoryMode::Add {
+                input.pop();
+            }
+        }
+    }
+
+    pub fn memory_start_add(&mut self) {
+        if let Overlay::RepoMemory { mode, input, .. } = &mut self.overlay {
+            *mode = RepoMemoryMode::Add;
+            input.clear();
+        }
+    }
+
+    pub fn memory_cancel_add(&mut self) {
+        if let Overlay::RepoMemory { mode, input, .. } = &mut self.overlay {
+            *mode = RepoMemoryMode::View;
+            input.clear();
+        }
+    }
+
+    pub fn memory_move(&mut self, delta: isize) {
+        if let Overlay::RepoMemory { selected, .. } = &mut self.overlay {
+            let len = self.repo_memory.entries.len() as isize;
+            if len == 0 {
+                *selected = 0;
+                return;
+            }
+            let mut next = *selected as isize + delta;
+            if next < 0 { next = 0; }
+            if next >= len { next = len - 1; }
+            *selected = next as usize;
+        }
+    }
+
+    /// Save current memory input as a new entry (best-effort persistence).
+    pub fn memory_commit_add(&mut self) -> Result<(), String> {
+        let text = match &mut self.overlay {
+            Overlay::RepoMemory { mode, input, .. } if *mode == RepoMemoryMode::Add => {
+                let t = input.trim().to_string();
+                input.clear();
+                *mode = RepoMemoryMode::View;
+                t
+            }
+            _ => return Err("Not in memory add mode".to_string()),
+        };
+
+        if text.is_empty() {
+            return Err("Memory entry is empty".to_string());
+        }
+
+        self.repo_memory.add(text);
+
+        // Persist to `.cosmos/memory.json` (repo-local)
+        let cache = crate::cache::Cache::new(&self.repo_path);
+        cache.save_repo_memory(&self.repo_memory)
+            .map_err(|e| format!("Failed to save memory: {}", e))?;
+
+        Ok(())
+    }
+
     /// Show apply confirmation overlay with generated fix
     pub fn show_apply_confirm(&mut self, suggestion_id: uuid::Uuid, diff_preview: String, file_path: PathBuf, summary: String) {
         self.overlay = Overlay::ApplyConfirm {
@@ -944,7 +1333,11 @@ impl App {
         match &mut self.overlay {
             Overlay::SuggestionDetail { scroll, .. }
             | Overlay::Inquiry { scroll, .. }
-            | Overlay::ApplyConfirm { scroll, .. } => {
+            | Overlay::InquiryPreview { scroll, .. }
+            | Overlay::RepoMemory { scroll, .. }
+            | Overlay::ApplyConfirm { scroll, .. }
+            | Overlay::SafeApplyReport { scroll, .. }
+            | Overlay::Ritual { scroll } => {
                 *scroll += 1;
             }
             _ => {}
@@ -956,7 +1349,11 @@ impl App {
         match &mut self.overlay {
             Overlay::SuggestionDetail { scroll, .. }
             | Overlay::Inquiry { scroll, .. }
-            | Overlay::ApplyConfirm { scroll, .. } => {
+            | Overlay::InquiryPreview { scroll, .. }
+            | Overlay::RepoMemory { scroll, .. }
+            | Overlay::ApplyConfirm { scroll, .. }
+            | Overlay::SafeApplyReport { scroll, .. }
+            | Overlay::Ritual { scroll } => {
                 *scroll = scroll.saturating_sub(1);
             }
             _ => {}
@@ -972,10 +1369,16 @@ impl App {
         }
     }
     
-    /// Show the branch creation dialog
+    /// Show the branch creation dialog (only when NOT on a cosmos branch)
     pub fn show_branch_dialog(&mut self) {
         if self.pending_changes.is_empty() {
             self.show_toast("No pending changes to commit");
+            return;
+        }
+        
+        // If we're already on a cosmos branch, show ship dialog instead
+        if self.cosmos_branch.is_some() {
+            self.show_ship_dialog();
             return;
         }
         
@@ -991,6 +1394,41 @@ impl App {
             commit_message,
             pending_files,
         };
+    }
+    
+    /// Show the streamlined Ship dialog (commit + push + PR in one flow)
+    pub fn show_ship_dialog(&mut self) {
+        if self.pending_changes.is_empty() {
+            self.show_toast("No changes to ship");
+            return;
+        }
+        
+        // Use the cosmos branch if we have one, otherwise generate a new name
+        let branch_name = self.cosmos_branch.clone()
+            .unwrap_or_else(|| self.generate_branch_name());
+        let commit_message = self.generate_commit_message();
+        let files: Vec<PathBuf> = self.pending_changes.iter()
+            .map(|c| c.file_path.clone())
+            .collect();
+        
+        self.overlay = Overlay::ShipDialog {
+            branch_name,
+            commit_message,
+            files,
+            step: ShipStep::Confirm,
+        };
+    }
+    
+    /// Check if we're on a cosmos-managed branch with pending changes
+    pub fn is_ready_to_ship(&self) -> bool {
+        !self.pending_changes.is_empty() && self.cosmos_branch.is_some()
+    }
+    
+    /// Update ship step
+    pub fn update_ship_step(&mut self, step: ShipStep) {
+        if let Overlay::ShipDialog { step: current_step, .. } = &mut self.overlay {
+            *current_step = step;
+        }
     }
     
     /// Generate a descriptive branch name from pending changes
@@ -1405,6 +1843,35 @@ impl App {
             Err(format!("git clean failed: {}", String::from_utf8_lossy(&clean_output.stderr)))
         }
     }
+    
+    /// Switch to main (or master) branch
+    pub fn git_switch_to_main(&mut self) -> Result<(), String> {
+        use crate::git_ops;
+        
+        // Try main first, then master
+        if git_ops::checkout_branch(&self.repo_path, "main").is_ok() {
+            self.context.branch = "main".to_string();
+            self.cosmos_branch = None;
+            self.pending_changes.clear();
+            let _ = self.context.refresh();
+            self.refresh_git_status();
+            Ok(())
+        } else if git_ops::checkout_branch(&self.repo_path, "master").is_ok() {
+            self.context.branch = "master".to_string();
+            self.cosmos_branch = None;
+            self.pending_changes.clear();
+            let _ = self.context.refresh();
+            self.refresh_git_status();
+            Ok(())
+        } else {
+            Err("Could not switch to main or master branch".to_string())
+        }
+    }
+    
+    /// Check if currently on main/master branch
+    pub fn is_on_main_branch(&self) -> bool {
+        self.context.branch == "main" || self.context.branch == "master"
+    }
 }
 
 /// Build a flat file tree for display with sorting
@@ -1587,6 +2054,12 @@ pub fn render(frame: &mut Frame, app: &App) {
         Overlay::Inquiry { response, scroll } => {
             render_inquiry(frame, response, *scroll);
         }
+        Overlay::InquiryPreview { question, preview, scroll } => {
+            render_inquiry_preview(frame, question, preview, *scroll);
+        }
+        Overlay::RepoMemory { mode, selected, scroll, input } => {
+            render_repo_memory(frame, app, *mode, *selected, *scroll, input);
+        }
         Overlay::ApplyConfirm { diff_preview, scroll, mode, edit_buffer, chat_input, file_path, summary, .. } => {
             render_apply_confirm(frame, diff_preview, *scroll, mode, edit_buffer, chat_input, file_path, summary);
         }
@@ -1605,7 +2078,16 @@ pub fn render(frame: &mut Frame, app: &App) {
             render_pr_review(frame, branch_name, files_changed, review_comments, *scroll, *reviewing, pr_url);
         }
         Overlay::GitStatus { staged, modified, untracked, selected, scroll, commit_input } => {
-            render_git_status(frame, staged, modified, untracked, *selected, *scroll, commit_input.as_deref());
+            render_git_status(frame, staged, modified, untracked, *selected, *scroll, commit_input.as_deref(), &app.context.branch);
+        }
+        Overlay::ShipDialog { branch_name, commit_message, files, step } => {
+            render_ship_dialog(frame, branch_name, commit_message, files, *step);
+        }
+        Overlay::SafeApplyReport { description, file_path, branch_name, backup_path: _, checks, scroll } => {
+            render_safe_apply_report(frame, description, file_path, branch_name, checks, *scroll);
+        }
+        Overlay::Ritual { scroll } => {
+            render_ritual(frame, app, *scroll);
         }
         Overlay::None => {}
     }
@@ -1744,6 +2226,28 @@ fn render_project_panel(frame: &mut Frame, area: Rect, app: &App) {
         }
     }
 
+    // Add action hints at the bottom when panel is active
+    if is_active && !is_searching {
+        // Add padding to push hints to bottom
+        let content_lines = lines.len();
+        let available = visible_height.saturating_sub(2);
+        if content_lines < available {
+            for _ in 0..(available - content_lines) {
+                lines.push(Line::from(""));
+            }
+        }
+        // Action hints - badge style
+        lines.push(Line::from(vec![
+            Span::styled(" ", Style::default()),
+            Span::styled(" / ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_500)),
+            Span::styled(" search ", Style::default().fg(Theme::GREY_500)),
+            Span::styled(" g ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_500)),
+            Span::styled(" group ", Style::default().fg(Theme::GREY_500)),
+            Span::styled(" ␣ ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_500)),
+            Span::styled(" expand", Style::default().fg(Theme::GREY_500)),
+        ]));
+    }
+    
     // Build title with view/sort indicator
     let total_items = app.project_tree_len();
     let scroll_indicator = if total_items > visible_height {
@@ -2179,6 +2683,30 @@ fn render_suggestions_panel(frame: &mut Frame, area: Rect, app: &App) {
         }
     }
 
+    // Add action hints at the bottom when panel is active and has suggestions
+    if is_active && !suggestions.is_empty() {
+        // Push hints to bottom
+        let content_lines = lines.len();
+        let available = visible_height.saturating_sub(2);
+        if content_lines < available {
+            for _ in 0..(available - content_lines) {
+                lines.push(Line::from(""));
+            }
+        }
+        // Action hints - badge style
+        lines.push(Line::from(vec![
+            Span::styled(" ", Style::default()),
+            Span::styled(" i ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_500)),
+            Span::styled(" ask ", Style::default().fg(Theme::GREY_500)),
+            Span::styled(" a ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_500)),
+            Span::styled(" fix ", Style::default().fg(Theme::GREY_500)),
+            Span::styled(" d ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_500)),
+            Span::styled(" skip ", Style::default().fg(Theme::GREY_500)),
+            Span::styled(" r ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_500)),
+            Span::styled(" refresh", Style::default().fg(Theme::GREY_500)),
+        ]));
+    }
+
     let counts = app.suggestions.counts();
     let scroll_indicator = if suggestions.len() > 3 {
         let total = suggestions.len();
@@ -2290,7 +2818,27 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
     } else {
         app.context.branch.clone()
     };
-    spans.push(Span::styled(branch_display, Style::default().fg(Theme::GREY_100)));
+    let is_on_main = app.is_on_main_branch();
+    spans.push(Span::styled(branch_display, Style::default().fg(if is_on_main { Theme::GREY_100 } else { Theme::GREEN })));
+    
+    // Show "m → main" hint when on a non-main branch
+    if !is_on_main {
+        spans.push(Span::styled("  ", Style::default()));
+        spans.push(Span::styled(" m ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_400)));
+        spans.push(Span::styled(" main", Style::default().fg(Theme::GREY_400)));
+    }
+
+    // Ritual indicator (subtle, time-boxed maintenance mode)
+    if let Some(remaining) = app.ritual_seconds_remaining() {
+        let mm = remaining / 60;
+        let ss = remaining % 60;
+        spans.push(Span::styled("  │  ", Style::default().fg(Theme::GREY_600)));
+        spans.push(Span::styled(" R ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_300)));
+        spans.push(Span::styled(
+            format!(" ritual {:02}:{:02}", mm, ss),
+            Style::default().fg(Theme::GREY_200),
+        ));
+    }
 
     // Show pending changes count with prominent action hints
     let pending_count = app.pending_change_count();
@@ -2300,10 +2848,16 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
             format!("● {} pending ", pending_count),
             Style::default().fg(Theme::GREEN).add_modifier(Modifier::BOLD),
         ));
-        spans.push(Span::styled(" b ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_300)));
-        spans.push(Span::styled(" branch ", Style::default().fg(Theme::GREY_400)));
-        spans.push(Span::styled(" p ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_300)));
-        spans.push(Span::styled(" PR", Style::default().fg(Theme::GREY_400)));
+        
+        // Show streamlined "Ship" button when ready (on cosmos branch)
+        if app.is_ready_to_ship() {
+            spans.push(Span::styled(" s ", Style::default().fg(Theme::GREY_900).bg(Theme::GREEN).add_modifier(Modifier::BOLD)));
+            spans.push(Span::styled(" Ship ", Style::default().fg(Theme::GREEN)));
+        } else {
+            // Not on a cosmos branch yet - show branch button
+            spans.push(Span::styled(" b ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_300)));
+            spans.push(Span::styled(" commit ", Style::default().fg(Theme::GREY_400)));
+        }
     } else if app.context.has_changes() {
         spans.push(Span::styled("  │  ", Style::default().fg(Theme::GREY_600)));
         spans.push(Span::styled(" c ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_300)));
@@ -2313,39 +2867,46 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
         ));
     }
 
-    // Cost meter (show if any cost has been incurred)
-    if app.session_cost > 0.0 {
+    // Cost + budget indicators
+    if app.session_cost > 0.0 || app.config.max_session_cost_usd.is_some() || app.config.max_tokens_per_day.is_some() {
         spans.push(Span::styled("  ", Style::default()));
-        spans.push(Span::styled(
-            format!("${:.4}", app.session_cost),
-            Style::default().fg(Theme::GREY_400),
-        ));
+
+        if let Some(max) = app.config.max_session_cost_usd {
+            spans.push(Span::styled(
+                format!("${:.4}/${:.4}", app.session_cost, max),
+                Style::default().fg(Theme::GREY_400),
+            ));
+        } else if app.session_cost > 0.0 {
+            spans.push(Span::styled(
+                format!("${:.4}", app.session_cost),
+                Style::default().fg(Theme::GREY_400),
+            ));
+        }
+
+        if let Some(max_tokens) = app.config.max_tokens_per_day {
+            spans.push(Span::styled("  ", Style::default()));
+            spans.push(Span::styled(
+                format!("tok {}/{}", app.config.tokens_used_today, max_tokens),
+                Style::default().fg(Theme::GREY_500),
+            ));
+        }
     }
 
     // Spacer before buttons
     let status_len: usize = spans.iter().map(|s| s.content.chars().count()).sum();
     let available = area.width as usize;
-    let button_area_approx = 50; // Approximate width needed for buttons
+    let button_area_approx = 20; // Reduced - only help and quit now
     let spacer_len = available.saturating_sub(status_len + button_area_approx);
     if spacer_len > 0 {
         spans.push(Span::styled(" ".repeat(spacer_len), Style::default()));
     }
 
-    // Action buttons - badge style
-    spans.push(Span::styled(" i ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_200)));
-    spans.push(Span::styled(" ask ", Style::default().fg(Theme::GREY_300)));
+    // Minimal footer - just help and quit (other actions shown in panels)
+    spans.push(Span::styled(" ? ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_500)));
+    spans.push(Span::styled(" help ", Style::default().fg(Theme::GREY_500)));
     
-    spans.push(Span::styled(" g ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_400)));
-    spans.push(Span::styled(" group ", Style::default().fg(Theme::GREY_400)));
-    
-    spans.push(Span::styled(" / ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_400)));
-    spans.push(Span::styled(" search ", Style::default().fg(Theme::GREY_400)));
-    
-    spans.push(Span::styled(" ? ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_400)));
-    spans.push(Span::styled(" help ", Style::default().fg(Theme::GREY_400)));
-    
-    spans.push(Span::styled(" q ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_500)));
-    spans.push(Span::styled(" quit ", Style::default().fg(Theme::GREY_500)));
+    spans.push(Span::styled(" q ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_600)));
+    spans.push(Span::styled(" quit ", Style::default().fg(Theme::GREY_600)));
     
     spans.push(Span::styled(" ", Style::default()));
 
@@ -2428,7 +2989,22 @@ fn render_help(frame: &mut Frame) {
     help_text.push(key_row("i", "Ask cosmos a question"));
     help_text.push(key_row("a", "Verify & fix suggestion"));
     help_text.push(key_row("d", "Dismiss suggestion"));
+    help_text.push(key_row("R", "Start ritual (10-minute maintenance)"));
+    help_text.push(key_row("M", "Open repo memory (conventions/decisions)"));
+    help_text.push(key_row("P", "Toggle inquiry privacy preview"));
+    help_text.push(key_row("T", "Toggle summarize-changed-only"));
+    help_text.push(key_row("O", "Show config location"));
+    help_text.push(key_row("u", "Undo last applied fix"));
     help_text.push(key_row("r", "Refresh status"));
+    help_text.push(section_spacer());
+    help_text.push(section_end());
+
+    // Git workflow section
+    help_text.extend(section_start("Ship Changes"));
+    help_text.push(section_spacer());
+    help_text.push(key_row("s", "Ship (commit + push + PR)"));
+    help_text.push(key_row("b", "Commit pending changes"));
+    help_text.push(key_row("c", "View git status"));
     help_text.push(section_spacer());
     help_text.push(section_end());
     
@@ -2686,6 +3262,186 @@ fn render_suggestion_detail(
     frame.render_widget(block, area);
 }
 
+fn render_repo_memory(
+    frame: &mut Frame,
+    app: &App,
+    mode: RepoMemoryMode,
+    selected: usize,
+    scroll: usize,
+    input: &str,
+) {
+    let area = centered_rect(70, 75, frame.area());
+    frame.render_widget(Clear, area);
+
+    let inner_width = area.width.saturating_sub(10) as usize;
+    let visible_height = area.height.saturating_sub(10) as usize;
+
+    let mut lines: Vec<Line<'static>> = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("   ", Style::default()),
+            Span::styled(" › ", Style::default().fg(Theme::GREY_900).bg(Theme::WHITE).add_modifier(Modifier::BOLD)),
+            Span::styled(" repo memory ", Style::default().fg(Theme::GREY_200).add_modifier(Modifier::ITALIC)),
+            Span::styled("  ", Style::default()),
+            Span::styled("(decisions, conventions, reminders)", Style::default().fg(Theme::GREY_500)),
+        ]),
+        Line::from(""),
+    ];
+
+    let mut entries = app.repo_memory.entries.clone();
+    entries.sort_by(|a, b| b.created_at.cmp(&a.created_at)); // newest first
+
+    if entries.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled("   No memory yet.", Style::default().fg(Theme::GREY_300)),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("   Press ", Style::default().fg(Theme::GREY_500)),
+            Span::styled("a", Style::default().fg(Theme::WHITE).add_modifier(Modifier::BOLD)),
+            Span::styled(" to add one.", Style::default().fg(Theme::GREY_500)),
+        ]));
+    } else {
+        // Card top
+        lines.push(Line::from(vec![
+            Span::styled("   ╭", Style::default().fg(Theme::GREY_600)),
+            Span::styled("─".repeat(inner_width.saturating_sub(2)), Style::default().fg(Theme::GREY_600)),
+            Span::styled("╮", Style::default().fg(Theme::GREY_600)),
+        ]));
+
+        for (i, entry) in entries.iter().enumerate().skip(scroll).take(visible_height) {
+            let is_sel = i == selected;
+            let cursor = if is_sel { "›" } else { " " };
+            let style = if is_sel {
+                Style::default().fg(Theme::WHITE).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Theme::GREY_200)
+            };
+            let text = truncate(entry.text.trim(), inner_width.saturating_sub(8).max(8));
+            lines.push(Line::from(vec![
+                Span::styled("   │ ", Style::default().fg(Theme::GREY_600)),
+                Span::styled(format!("{} {}", cursor, text), style),
+            ]));
+        }
+
+        // Card bottom
+        lines.push(Line::from(vec![
+            Span::styled("   ╰", Style::default().fg(Theme::GREY_600)),
+            Span::styled("─".repeat(inner_width.saturating_sub(2)), Style::default().fg(Theme::GREY_600)),
+            Span::styled("╯", Style::default().fg(Theme::GREY_600)),
+        ]));
+    }
+
+    lines.push(Line::from(""));
+
+    // Add mode input
+    if mode == RepoMemoryMode::Add {
+        let prompt = "> ";
+        let cursor = "█";
+        let mut input_spans = vec![
+            Span::styled("   ", Style::default()),
+            Span::styled(prompt, Style::default().fg(Theme::GREY_400)),
+            Span::styled(input.to_string(), Style::default().fg(Theme::WHITE)),
+            Span::styled(cursor, Style::default().fg(Theme::WHITE)),
+        ];
+        if input.trim().is_empty() {
+            input_spans.push(Span::styled("  (Enter to save, Esc to cancel)", Style::default().fg(Theme::GREY_500)));
+        }
+        lines.push(Line::from(input_spans));
+        lines.push(Line::from(""));
+    }
+
+    // Actions
+    lines.push(Line::from(vec![
+        Span::styled("   ", Style::default()),
+        Span::styled(" ↑↓ ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_400)),
+        Span::styled(" move ", Style::default().fg(Theme::GREY_400)),
+        Span::styled("  ", Style::default()),
+        Span::styled(" a ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_400)),
+        Span::styled(" add ", Style::default().fg(Theme::GREY_400)),
+        Span::styled("  ", Style::default()),
+        Span::styled(" Esc ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_500)),
+        Span::styled(" close ", Style::default().fg(Theme::GREY_500)),
+    ]));
+    lines.push(Line::from(""));
+
+    let block = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .block(Block::default()
+            .title(" › repo memory ")
+            .title_style(Style::default().fg(Theme::GREY_100))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Theme::GREY_400))
+            .style(Style::default().bg(Theme::GREY_900)));
+
+    frame.render_widget(block, area);
+}
+
+fn render_inquiry_preview(frame: &mut Frame, question: &str, preview: &str, scroll: usize) {
+    let area = centered_rect(80, 80, frame.area());
+    frame.render_widget(Clear, area);
+
+    let inner_width = area.width.saturating_sub(10) as usize;
+    let visible_height = area.height.saturating_sub(12) as usize;
+
+    let header = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("   ", Style::default()),
+            Span::styled(" › ", Style::default().fg(Theme::GREY_900).bg(Theme::WHITE).add_modifier(Modifier::BOLD)),
+            Span::styled(" inquiry preview ", Style::default().fg(Theme::GREY_200).add_modifier(Modifier::ITALIC)),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("   Q: ", Style::default().fg(Theme::GREY_500)),
+            Span::styled(truncate(question, inner_width.saturating_sub(6).max(8)), Style::default().fg(Theme::WHITE)),
+        ]),
+        Line::from(""),
+    ];
+
+    let parsed = markdown::parse_markdown(preview, inner_width.saturating_sub(4));
+    let total = parsed.len();
+    let mut body: Vec<Line<'static>> = Vec::new();
+    for line in parsed.into_iter().skip(scroll).take(visible_height) {
+        body.push(line);
+    }
+
+    let mut lines = header;
+    lines.extend(body);
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("   ", Style::default()),
+        Span::styled(" Enter ", Style::default().fg(Theme::GREY_900).bg(Theme::GREEN).add_modifier(Modifier::BOLD)),
+        Span::styled(" send ", Style::default().fg(Theme::GREEN)),
+        Span::styled("  ", Style::default()),
+        Span::styled(" Esc ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_500)),
+        Span::styled(" cancel ", Style::default().fg(Theme::GREY_500)),
+        Span::styled("  ", Style::default()),
+        Span::styled(" ↑↓ ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_400)),
+        Span::styled(" scroll ", Style::default().fg(Theme::GREY_400)),
+    ]));
+    if total > visible_height {
+        lines.push(Line::from(vec![
+            Span::styled("   ", Style::default()),
+            Span::styled(
+                format!("↕ {}/{}", scroll + 1, total.saturating_sub(visible_height) + 1),
+                Style::default().fg(Theme::GREY_600),
+            ),
+        ]));
+    }
+
+    let block = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .block(Block::default()
+            .title(" › inquiry preview ")
+            .title_style(Style::default().fg(Theme::GREY_100))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Theme::GREY_400))
+            .style(Style::default().bg(Theme::GREY_900)));
+
+    frame.render_widget(block, area);
+}
+
 fn render_inquiry(frame: &mut Frame, response: &str, scroll: usize) {
     let area = centered_rect(80, 85, frame.area());
     frame.render_widget(Clear, area);
@@ -2782,6 +3538,279 @@ fn render_inquiry(frame: &mut Frame, response: &str, scroll: usize) {
     frame.render_widget(block, area);
 }
 
+fn render_safe_apply_report(
+    frame: &mut Frame,
+    description: &str,
+    file_path: &PathBuf,
+    branch_name: &str,
+    checks: &[crate::safe_apply::CheckResult],
+    scroll: usize,
+) {
+    let area = centered_rect(70, 75, frame.area());
+    frame.render_widget(Clear, area);
+
+    let inner_width = area.width.saturating_sub(10) as usize;
+    let visible_height = area.height.saturating_sub(10) as usize;
+
+    let file_name = file_path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
+
+    let mut content: Vec<Line<'static>> = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("   ", Style::default()),
+            Span::styled(" › ", Style::default().fg(Theme::GREY_900).bg(Theme::GREEN).add_modifier(Modifier::BOLD)),
+            Span::styled(" safe apply ", Style::default().fg(Theme::GREEN).add_modifier(Modifier::ITALIC)),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("   ", Style::default()),
+            Span::styled(file_name.to_string(), Style::default().fg(Theme::WHITE).add_modifier(Modifier::BOLD)),
+            Span::styled("  on  ", Style::default().fg(Theme::GREY_500)),
+            Span::styled(branch_name.to_string(), Style::default().fg(Theme::GREY_100)),
+        ]),
+        Line::from(""),
+    ];
+
+    let desc_wrapped = wrap_text(description, inner_width.saturating_sub(6));
+    for line in desc_wrapped {
+        content.push(Line::from(vec![
+            Span::styled("   ", Style::default()),
+            Span::styled(line, Style::default().fg(Theme::GREY_200)),
+        ]));
+    }
+
+    content.push(Line::from(""));
+    content.push(Line::from(vec![
+        Span::styled("   ─".to_string() + &"─".repeat(inner_width.saturating_sub(6)), Style::default().fg(Theme::GREY_600)),
+    ]));
+    content.push(Line::from(""));
+
+    content.push(Line::from(vec![
+        Span::styled("   Checks", Style::default().fg(Theme::GREY_100).add_modifier(Modifier::BOLD)),
+        Span::styled(" (best-effort)", Style::default().fg(Theme::GREY_500)),
+    ]));
+    content.push(Line::from(""));
+
+    if checks.is_empty() {
+        content.push(Line::from(vec![
+            Span::styled("   · No checks were run.", Style::default().fg(Theme::GREY_400)),
+        ]));
+    } else {
+        for check in checks {
+            let (color, label) = match check.status {
+                crate::safe_apply::CheckStatus::Pass => (Theme::GREEN, "PASS"),
+                crate::safe_apply::CheckStatus::Fail => (Theme::BADGE_BUG, "FAIL"),
+                crate::safe_apply::CheckStatus::Skipped => (Theme::GREY_500, "SKIP"),
+            };
+            content.push(Line::from(vec![
+                Span::styled("   ", Style::default()),
+                Span::styled(
+                    format!(" {} {} ", check.status.icon(), label),
+                    Style::default().fg(Theme::GREY_900).bg(color).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(format!(" {}", check.name), Style::default().fg(Theme::GREY_200)),
+            ]));
+
+            // Show a short snippet for failures
+            if check.status == crate::safe_apply::CheckStatus::Fail && !check.output.trim().is_empty() {
+                let snippet = truncate(&check.output, 240);
+                let wrapped = wrap_text(&snippet, inner_width.saturating_sub(8));
+                for w in wrapped.into_iter().take(3) {
+                    content.push(Line::from(vec![
+                        Span::styled("      ", Style::default()),
+                        Span::styled(w, Style::default().fg(Theme::GREY_400)),
+                    ]));
+                }
+            }
+            content.push(Line::from(""));
+        }
+    }
+
+    // Scroll content (simple)
+    let total_lines = content.len();
+    let mut lines: Vec<Line<'static>> = vec![Line::from("")];
+    for line in content.into_iter().skip(scroll).take(visible_height) {
+        lines.push(line);
+    }
+
+    lines.push(Line::from(vec![
+        Span::styled("   ", Style::default()),
+        Span::styled(" u ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_400)),
+        Span::styled(" undo last apply ", Style::default().fg(Theme::GREY_400)),
+        Span::styled("  ", Style::default()),
+        Span::styled(" ↑↓ ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_400)),
+        Span::styled(" scroll ", Style::default().fg(Theme::GREY_400)),
+        Span::styled("  ", Style::default()),
+        Span::styled(" Esc ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_500)),
+        Span::styled(" close ", Style::default().fg(Theme::GREY_500)),
+    ]));
+    if total_lines > visible_height {
+        lines.push(Line::from(vec![
+            Span::styled("   ", Style::default()),
+            Span::styled(
+                format!("↕ {}/{}", scroll + 1, total_lines.saturating_sub(visible_height) + 1),
+                Style::default().fg(Theme::GREY_600),
+            ),
+        ]));
+    }
+
+    let block = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .block(Block::default()
+            .title(" › safe apply ")
+            .title_style(Style::default().fg(Theme::GREY_100))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Theme::GREY_400))
+            .style(Style::default().bg(Theme::GREY_900)));
+
+    frame.render_widget(block, area);
+}
+
+fn render_ritual(frame: &mut Frame, app: &App, _scroll: usize) {
+    let area = centered_rect(70, 70, frame.area());
+    frame.render_widget(Clear, area);
+
+    let inner_width = area.width.saturating_sub(10) as usize;
+
+    let (timer_text, progress_text) = if let Some(state) = app.ritual.as_ref() {
+        let remaining = app.ritual_seconds_remaining().unwrap_or(0);
+        let mm = remaining / 60;
+        let ss = remaining % 60;
+        let done = state.items.iter().filter(|i| i.status != RitualItemStatus::Todo).count();
+        (
+            format!("{:02}:{:02} remaining", mm, ss),
+            format!("{}/{} completed", done, state.items.len().max(1)),
+        )
+    } else {
+        ("--:-- remaining".to_string(), "0/0 completed".to_string())
+    };
+
+    let mut lines: Vec<Line<'static>> = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("   ", Style::default()),
+            Span::styled(" › ", Style::default().fg(Theme::GREY_900).bg(Theme::WHITE).add_modifier(Modifier::BOLD)),
+            Span::styled(" ritual ", Style::default().fg(Theme::GREY_200).add_modifier(Modifier::ITALIC)),
+            Span::styled("  ", Style::default()),
+            Span::styled(timer_text, Style::default().fg(Theme::GREY_400)),
+            Span::styled("  ·  ", Style::default().fg(Theme::GREY_600)),
+            Span::styled(progress_text, Style::default().fg(Theme::GREY_400)),
+        ]),
+        Line::from(""),
+    ];
+
+    let Some(state) = app.ritual.as_ref() else {
+        lines.push(Line::from(vec![
+            Span::styled("   No ritual is active.", Style::default().fg(Theme::GREY_200)),
+        ]));
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled("   Tip: press ", Style::default().fg(Theme::GREY_400)),
+            Span::styled("R", Style::default().fg(Theme::WHITE).add_modifier(Modifier::BOLD)),
+            Span::styled(" to start a 10-minute ritual.", Style::default().fg(Theme::GREY_400)),
+        ]));
+        let block = Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(Block::default()
+                .title(" › ritual ")
+                .title_style(Style::default().fg(Theme::GREY_100))
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Theme::GREY_400))
+                .style(Style::default().bg(Theme::GREY_900)));
+        frame.render_widget(block, area);
+        return;
+    };
+
+    // Content card
+    lines.push(Line::from(vec![
+        Span::styled("   ╭", Style::default().fg(Theme::GREY_600)),
+        Span::styled("─".repeat(inner_width.saturating_sub(2)), Style::default().fg(Theme::GREY_600)),
+        Span::styled("╮", Style::default().fg(Theme::GREY_600)),
+    ]));
+
+    if state.items.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled("   │ ", Style::default().fg(Theme::GREY_600)),
+            Span::styled("Waiting for suggestions…", Style::default().fg(Theme::GREY_200)),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("   │ ", Style::default().fg(Theme::GREY_600)),
+            Span::styled("If this never fills, run ", Style::default().fg(Theme::GREY_400)),
+            Span::styled("cosmos --setup", Style::default().fg(Theme::WHITE).add_modifier(Modifier::BOLD)),
+            Span::styled(".", Style::default().fg(Theme::GREY_400)),
+        ]));
+    } else {
+        for (idx, item) in state.items.iter().enumerate() {
+            let is_selected = idx == state.selected;
+            let style = if is_selected {
+                Style::default().fg(Theme::WHITE).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Theme::GREY_200)
+            };
+            let cursor = if is_selected { "›" } else { " " };
+            let icon = item.status.icon();
+
+            let line = if let Some(s) = app.suggestions.suggestions.iter().find(|s| s.id == item.suggestion_id) {
+                let file = s.file.file_name().and_then(|n| n.to_str()).unwrap_or("file");
+                let text = format!("{} {} {}: {}", cursor, icon, file, truncate(&s.summary, inner_width.saturating_sub(12).max(8)));
+                text
+            } else {
+                format!("{} {} (missing suggestion)", cursor, icon)
+            };
+
+            lines.push(Line::from(vec![
+                Span::styled("   │ ", Style::default().fg(Theme::GREY_600)),
+                Span::styled(line, style),
+            ]));
+        }
+    }
+
+    lines.push(Line::from(vec![
+        Span::styled("   ╰", Style::default().fg(Theme::GREY_600)),
+        Span::styled("─".repeat(inner_width.saturating_sub(2)), Style::default().fg(Theme::GREY_600)),
+        Span::styled("╯", Style::default().fg(Theme::GREY_600)),
+    ]));
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("   ", Style::default()),
+        Span::styled(" ↑↓ ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_400)),
+        Span::styled(" move ", Style::default().fg(Theme::GREY_400)),
+        Span::styled("  ", Style::default()),
+        Span::styled(" Enter ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_400)),
+        Span::styled(" view ", Style::default().fg(Theme::GREY_400)),
+        Span::styled("  ", Style::default()),
+        Span::styled(" a ", Style::default().fg(Theme::GREY_900).bg(Theme::GREEN).add_modifier(Modifier::BOLD)),
+        Span::styled(" verify & fix ", Style::default().fg(Theme::GREEN)),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("   ", Style::default()),
+        Span::styled(" x ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_400)),
+        Span::styled(" done ", Style::default().fg(Theme::GREY_400)),
+        Span::styled("  ", Style::default()),
+        Span::styled(" s ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_400)),
+        Span::styled(" skip ", Style::default().fg(Theme::GREY_400)),
+        Span::styled("  ", Style::default()),
+        Span::styled(" d ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_400)),
+        Span::styled(" dismiss ", Style::default().fg(Theme::GREY_400)),
+        Span::styled("  ", Style::default()),
+        Span::styled(" Esc ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_500)),
+        Span::styled(" close ", Style::default().fg(Theme::GREY_500)),
+    ]));
+    lines.push(Line::from(""));
+
+    let block = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .block(Block::default()
+            .title(" › ritual ")
+            .title_style(Style::default().fg(Theme::GREY_100))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Theme::GREY_400))
+            .style(Style::default().bg(Theme::GREY_900)));
+
+    frame.render_widget(block, area);
+}
+
 fn render_fix_preview(
     frame: &mut Frame,
     file_path: &PathBuf,
@@ -2840,6 +3869,23 @@ fn render_fix_preview(
         lines.push(Line::from(vec![
             Span::styled(format!("   {}", wrapped_line), Style::default().fg(Theme::GREY_200)),
         ]));
+    }
+
+    // Evidence snippet (code proof) with line numbers
+    if let Some(snippet) = &preview.evidence_snippet {
+        lines.push(Line::from(""));
+        let start_line = preview.evidence_line.unwrap_or(1);
+        for (i, snippet_line) in snippet.lines().enumerate() {
+            let line_num = start_line + i as u32;
+            lines.push(Line::from(vec![
+                Span::styled("   ", Style::default()),
+                Span::styled(format!(" {:>3} ", line_num), 
+                    Style::default().fg(Theme::GREY_500).bg(Theme::GREY_800)),
+                Span::styled("│", Style::default().fg(Theme::GREY_600).bg(Theme::GREY_800)),
+                Span::styled(format!(" {} ", snippet_line), 
+                    Style::default().fg(Theme::GREY_100).bg(Theme::GREY_800)),
+            ]));
+        }
     }
 
     // Show fix details
@@ -3277,32 +4323,63 @@ fn render_git_status(
     selected: usize,
     _scroll: usize,
     commit_input: Option<&str>,
+    current_branch: &str,
 ) {
-    let area = centered_rect(70, 80, frame.area());
+    let area = centered_rect(60, 70, frame.area());
     frame.render_widget(Clear, area);
 
     let total_files = staged.len() + modified.len() + untracked.len();
+    let has_staged = !staged.is_empty();
+    let has_changes = !modified.is_empty() || !untracked.is_empty();
+    let is_on_main = current_branch == "main" || current_branch == "master";
     let mut current_idx = 0usize;
     
     let mut lines = vec![
         Line::from(""),
         Line::from(vec![
-            Span::styled("     › ", Style::default().fg(Theme::WHITE)),
-            Span::styled("Git Status", Style::default().fg(Theme::WHITE).add_modifier(Modifier::BOLD)),
+            Span::styled("     ", Style::default()),
+            Span::styled(if has_staged { "📦" } else { "📋" }, Style::default()),
+            Span::styled(" Changes", Style::default().fg(Theme::WHITE).add_modifier(Modifier::BOLD)),
+            Span::styled("  on ", Style::default().fg(Theme::GREY_500)),
+            Span::styled(current_branch, Style::default().fg(if is_on_main { Theme::GREY_300 } else { Theme::GREEN })),
         ]),
         Line::from(""),
     ];
     
+    // Summary line
+    let summary = if has_staged && has_changes {
+        format!("{} ready to commit · {} more to stage", staged.len(), modified.len() + untracked.len())
+    } else if has_staged {
+        format!("{} file{} ready to commit", staged.len(), if staged.len() == 1 { "" } else { "s" })
+    } else if has_changes {
+        format!("{} file{} with changes", modified.len() + untracked.len(), if modified.len() + untracked.len() == 1 { "" } else { "s" })
+    } else {
+        "Working tree clean".to_string()
+    };
+    
+    lines.push(Line::from(vec![
+        Span::styled(format!("     {}", summary), Style::default().fg(Theme::GREY_300)),
+    ]));
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("     ─────────────────────────────────────────", Style::default().fg(Theme::GREY_700))
+    ]));
+    lines.push(Line::from(""));
+    
     // Helper to render a file with selection indicator
     let render_file = |path: &str, icon: &str, icon_color: ratatui::style::Color, idx: usize, selected: usize| -> Line<'static> {
         let is_selected = idx == selected;
-        let cursor = if is_selected { " › " } else { "   " };
+        let cursor = if is_selected { "›" } else { " " };
+        let file_name = std::path::Path::new(path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(path);
         
         Line::from(vec![
-            Span::styled(cursor.to_string(), Style::default().fg(Theme::WHITE)),
-            Span::styled(format!("  {} ", icon), Style::default().fg(icon_color)),
+            Span::styled(format!("     {} ", cursor), Style::default().fg(if is_selected { Theme::WHITE } else { Theme::GREY_600 })),
+            Span::styled(format!("{} ", icon), Style::default().fg(icon_color)),
             Span::styled(
-                path.to_string(),
+                file_name.to_string(),
                 if is_selected {
                     Style::default().fg(Theme::WHITE).add_modifier(Modifier::BOLD)
                 } else {
@@ -3312,133 +4389,131 @@ fn render_git_status(
         ])
     };
     
-    // Staged files section
+    // Staged files (ready to commit)
     if !staged.is_empty() {
         lines.push(Line::from(vec![
-            Span::styled("     ─── ", Style::default().fg(Theme::GREY_600)),
-            Span::styled("Staged", Style::default().fg(Theme::GREEN).add_modifier(Modifier::BOLD)),
-            Span::styled(format!(" ({}) ", staged.len()), Style::default().fg(Theme::GREY_400)),
-            Span::styled("────────────────────────────", Style::default().fg(Theme::GREY_600)),
+            Span::styled("     Ready to commit", Style::default().fg(Theme::GREEN)),
         ]));
-        lines.push(Line::from(""));
-        
-        for file in staged.iter() {
+        for file in staged.iter().take(6) {
             lines.push(render_file(file, "✓", Theme::GREEN, current_idx, selected));
             current_idx += 1;
         }
-        lines.push(Line::from(""));
-    }
-    
-    // Modified files section
-    if !modified.is_empty() {
-        lines.push(Line::from(vec![
-            Span::styled("     ─── ", Style::default().fg(Theme::GREY_600)),
-            Span::styled("Modified", Style::default().fg(Theme::BADGE_DOCS).add_modifier(Modifier::BOLD)),
-            Span::styled(format!(" ({}) ", modified.len()), Style::default().fg(Theme::GREY_400)),
-            Span::styled("──────────────────────────", Style::default().fg(Theme::GREY_600)),
-        ]));
-        lines.push(Line::from(""));
-        
-        for file in modified.iter() {
-            lines.push(render_file(file, "●", Theme::BADGE_DOCS, current_idx, selected));
-            current_idx += 1;
+        if staged.len() > 6 {
+            lines.push(Line::from(vec![
+                Span::styled(format!("       ...and {} more", staged.len() - 6), Style::default().fg(Theme::GREY_500)),
+            ]));
+            current_idx = staged.len(); // Skip to correct index
         }
         lines.push(Line::from(""));
     }
     
-    // Untracked files section
+    // Modified files (need staging)
+    if !modified.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled("     Modified", Style::default().fg(Theme::BADGE_DOCS)),
+        ]));
+        for file in modified.iter().take(5) {
+            lines.push(render_file(file, "●", Theme::BADGE_DOCS, current_idx, selected));
+            current_idx += 1;
+        }
+        if modified.len() > 5 {
+            lines.push(Line::from(vec![
+                Span::styled(format!("       ...and {} more", modified.len() - 5), Style::default().fg(Theme::GREY_500)),
+            ]));
+            current_idx = staged.len() + modified.len();
+        }
+        lines.push(Line::from(""));
+    }
+    
+    // Untracked files
     if !untracked.is_empty() {
         lines.push(Line::from(vec![
-            Span::styled("     ─── ", Style::default().fg(Theme::GREY_600)),
-            Span::styled("Untracked", Style::default().fg(Theme::GREY_300).add_modifier(Modifier::BOLD)),
-            Span::styled(format!(" ({}) ", untracked.len()), Style::default().fg(Theme::GREY_400)),
-            Span::styled("─────────────────────────", Style::default().fg(Theme::GREY_600)),
+            Span::styled("     Untracked", Style::default().fg(Theme::GREY_400)),
         ]));
-        lines.push(Line::from(""));
-        
-        for file in untracked.iter() {
-            lines.push(render_file(file, "?", Theme::GREY_400, current_idx, selected));
+        for file in untracked.iter().take(4) {
+            lines.push(render_file(file, "?", Theme::GREY_500, current_idx, selected));
             current_idx += 1;
+        }
+        if untracked.len() > 4 {
+            lines.push(Line::from(vec![
+                Span::styled(format!("       ...and {} more", untracked.len() - 4), Style::default().fg(Theme::GREY_500)),
+            ]));
         }
         lines.push(Line::from(""));
     }
     
     // Empty state
     if total_files == 0 {
-        lines.push(Line::from(""));
         lines.push(Line::from(vec![
-            Span::styled("     ✓ Working tree clean", Style::default().fg(Theme::GREEN)),
+            Span::styled("     ✓ ", Style::default().fg(Theme::GREEN)),
+            Span::styled("No changes", Style::default().fg(Theme::GREY_300)),
         ]));
         lines.push(Line::from(""));
     }
     
     // Separator before actions
     lines.push(Line::from(vec![
-        Span::styled("     ─────────────────────────────────────────────", Style::default().fg(Theme::GREY_600))
+        Span::styled("     ─────────────────────────────────────────", Style::default().fg(Theme::GREY_700))
     ]));
     lines.push(Line::from(""));
     
     // Commit input mode
     if let Some(input) = commit_input {
         lines.push(Line::from(vec![
-            Span::styled("     Commit message: ", Style::default().fg(Theme::GREY_400)),
-        ]));
-        lines.push(Line::from(vec![
-            Span::styled(format!("     │ {}_", input), Style::default().fg(Theme::WHITE)),
+            Span::styled("     Message: ", Style::default().fg(Theme::GREY_400)),
+            Span::styled(format!("{}_", input), Style::default().fg(Theme::WHITE)),
         ]));
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
             Span::styled("     ", Style::default()),
             Span::styled(" Enter ", Style::default().fg(Theme::GREY_900).bg(Theme::GREEN)),
-            Span::styled(" commit   ", Style::default().fg(Theme::GREY_400)),
-            Span::styled(" Esc ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_400)),
+            Span::styled(" commit  ", Style::default().fg(Theme::GREY_300)),
+            Span::styled(" Esc ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_500)),
             Span::styled(" cancel", Style::default().fg(Theme::GREY_400)),
         ]));
     } else {
-        // Action hints - Row 1: File operations
+        // Row 1: Primary actions (stage/unstage/commit)
         lines.push(Line::from(vec![
             Span::styled("     ", Style::default()),
             Span::styled(" s ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_300)),
-            Span::styled(" stage  ", Style::default().fg(Theme::GREY_400)),
+            Span::styled(" stage ", Style::default().fg(Theme::GREY_400)),
             Span::styled(" u ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_300)),
-            Span::styled(" unstage  ", Style::default().fg(Theme::GREY_400)),
+            Span::styled(" unstage ", Style::default().fg(Theme::GREY_400)),
             Span::styled(" r ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_300)),
-            Span::styled(" restore  ", Style::default().fg(Theme::GREY_400)),
-            Span::styled(" d ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_300)),
-            Span::styled(" delete", Style::default().fg(Theme::GREY_400)),
-        ]));
-        // Row 2: Batch operations
-        lines.push(Line::from(vec![
-            Span::styled("     ", Style::default()),
+            Span::styled(" restore ", Style::default().fg(Theme::GREY_400)),
             Span::styled(" S ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_300)),
-            Span::styled(" stage all  ", Style::default().fg(Theme::GREY_400)),
-            Span::styled(" D ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_300)),
-            Span::styled(" clean untracked  ", Style::default().fg(Theme::GREY_400)),
-            Span::styled(" X ", Style::default().fg(Theme::GREY_900).bg(Theme::RED)),
-            Span::styled(" reset all", Style::default().fg(Theme::GREY_400)),
+            Span::styled(" all", Style::default().fg(Theme::GREY_400)),
         ]));
-        // Row 3: Git operations
-        lines.push(Line::from(vec![
+        // Row 2: Git operations
+        let mut row2 = vec![
             Span::styled("     ", Style::default()),
             Span::styled(" c ", Style::default().fg(Theme::GREY_900).bg(Theme::GREEN)),
-            Span::styled(" commit  ", Style::default().fg(Theme::GREY_400)),
-            Span::styled(" P ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_300)),
-            Span::styled(" push  ", Style::default().fg(Theme::GREY_400)),
-            Span::styled(" R ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_400)),
-            Span::styled(" refresh  ", Style::default().fg(Theme::GREY_400)),
-            Span::styled(" q ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_500)),
-            Span::styled(" close", Style::default().fg(Theme::GREY_500)),
-        ]));
+            Span::styled(" commit ", Style::default().fg(Theme::GREY_300)),
+        ];
+        // Show "m" to switch to main if not on main
+        if !is_on_main {
+            row2.push(Span::styled(" m ", Style::default().fg(Theme::GREY_900).bg(Theme::BADGE_DOCS)));
+            row2.push(Span::styled(" → main ", Style::default().fg(Theme::GREY_400)));
+        } else {
+            row2.push(Span::styled(" P ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_300)));
+            row2.push(Span::styled(" push ", Style::default().fg(Theme::GREY_400)));
+        }
+        row2.push(Span::styled(" X ", Style::default().fg(Theme::GREY_900).bg(Theme::RED)));
+        row2.push(Span::styled(" reset ", Style::default().fg(Theme::GREY_500)));
+        row2.push(Span::styled(" Esc ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_500)));
+        row2.push(Span::styled(" close", Style::default().fg(Theme::GREY_500)));
+        lines.push(Line::from(row2));
     }
     lines.push(Line::from(""));
 
+    let border_color = if has_staged { Theme::GREEN } else { Theme::GREY_500 };
     let block = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
         .block(Block::default()
-            .title(" › 𝘨𝘪𝘵 ")
-            .title_style(Style::default().fg(Theme::GREY_100))
+            .title(" › 𝘤𝘩𝘢𝘯𝘨𝘦𝘴 ")
+            .title_style(Style::default().fg(border_color))
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Theme::GREY_400))
+            .border_style(Style::default().fg(border_color))
             .style(Style::default().bg(Theme::GREY_900)));
 
     frame.render_widget(block, area);
@@ -3528,6 +4603,177 @@ fn render_branch_dialog(
             .title_style(Style::default().fg(Theme::GREY_100))
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Theme::GREY_400))
+            .style(Style::default().bg(Theme::GREY_900)));
+
+    frame.render_widget(block, area);
+}
+
+fn render_ship_dialog(
+    frame: &mut Frame,
+    branch_name: &str,
+    commit_message: &str,
+    files: &[PathBuf],
+    step: ShipStep,
+) {
+    let area = centered_rect(65, 65, frame.area());
+    frame.render_widget(Clear, area);
+
+    let inner_width = area.width.saturating_sub(10) as usize;
+    
+    // Header based on current step
+    let (title, title_icon) = match step {
+        ShipStep::Confirm => ("Ship Changes", "🚀"),
+        ShipStep::Committing => ("Committing...", "●"),
+        ShipStep::Pushing => ("Pushing to origin...", "●"),
+        ShipStep::CreatingPR => ("Creating Pull Request...", "●"),
+        ShipStep::Done => ("Shipped!", "✓"),
+    };
+    
+    let mut lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(format!("     {} ", title_icon), Style::default().fg(Theme::GREEN)),
+            Span::styled(title, Style::default().fg(Theme::WHITE).add_modifier(Modifier::BOLD)),
+        ]),
+        Line::from(""),
+    ];
+    
+    // Progress indicator for multi-step flow
+    let steps = ["commit", "push", "PR"];
+    let current = match step {
+        ShipStep::Confirm => 0,
+        ShipStep::Committing => 1,
+        ShipStep::Pushing => 2,
+        ShipStep::CreatingPR => 3,
+        ShipStep::Done => 4,
+    };
+    
+    let mut step_spans = vec![Span::styled("     ", Style::default())];
+    for (i, s) in steps.iter().enumerate() {
+        let (icon, style) = if i + 1 < current {
+            ("✓", Style::default().fg(Theme::GREEN))
+        } else if i + 1 == current {
+            ("●", Style::default().fg(Theme::WHITE).add_modifier(Modifier::BOLD))
+        } else {
+            ("○", Style::default().fg(Theme::GREY_500))
+        };
+        step_spans.push(Span::styled(format!("{} {} ", icon, s), style));
+        if i < steps.len() - 1 {
+            step_spans.push(Span::styled("→ ", Style::default().fg(Theme::GREY_600)));
+        }
+    }
+    lines.push(Line::from(step_spans));
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("     ─────────────────────────────────────────────────", Style::default().fg(Theme::GREY_600))
+    ]));
+    lines.push(Line::from(""));
+    
+    // Branch info
+    lines.push(Line::from(vec![
+        Span::styled("     Branch: ", Style::default().fg(Theme::GREY_400)),
+        Span::styled(branch_name, Style::default().fg(Theme::GREEN)),
+    ]));
+    lines.push(Line::from(""));
+    
+    // Commit message
+    lines.push(Line::from(vec![
+        Span::styled("     Commit message:", Style::default().fg(Theme::GREY_400)),
+    ]));
+    let msg_wrapped = wrap_text(commit_message, inner_width.saturating_sub(10));
+    for line in msg_wrapped.iter().take(3) {
+        lines.push(Line::from(vec![
+            Span::styled(format!("       {}", line), Style::default().fg(Theme::GREY_100)),
+        ]));
+    }
+    if msg_wrapped.len() > 3 {
+        lines.push(Line::from(vec![
+            Span::styled("       ...", Style::default().fg(Theme::GREY_500)),
+        ]));
+    }
+    lines.push(Line::from(""));
+    
+    // Files
+    lines.push(Line::from(vec![
+        Span::styled(format!("     {} file{} to include:", files.len(), if files.len() == 1 { "" } else { "s" }), Style::default().fg(Theme::GREY_300)),
+    ]));
+    for file in files.iter().take(4) {
+        let name = file.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("?");
+        lines.push(Line::from(vec![
+            Span::styled(format!("       ✓ {}", name), Style::default().fg(Theme::GREEN)),
+        ]));
+    }
+    if files.len() > 4 {
+        lines.push(Line::from(vec![
+            Span::styled(format!("       ...and {} more", files.len() - 4), Style::default().fg(Theme::GREY_400)),
+        ]));
+    }
+    
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("     ─────────────────────────────────────────────────", Style::default().fg(Theme::GREY_600))
+    ]));
+    lines.push(Line::from(""));
+    
+    // Action hints based on step
+    match step {
+        ShipStep::Confirm => {
+            lines.push(Line::from(vec![
+                Span::styled("     This will:", Style::default().fg(Theme::GREY_300)),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("       1. ", Style::default().fg(Theme::GREY_500)),
+                Span::styled("Stage and commit your changes", Style::default().fg(Theme::GREY_200)),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("       2. ", Style::default().fg(Theme::GREY_500)),
+                Span::styled("Push to origin", Style::default().fg(Theme::GREY_200)),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("       3. ", Style::default().fg(Theme::GREY_500)),
+                Span::styled("Create a pull request", Style::default().fg(Theme::GREY_200)),
+            ]));
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::styled("     ", Style::default()),
+                Span::styled(" y ", Style::default().fg(Theme::GREY_900).bg(Theme::GREEN)),
+                Span::styled(" Ship it!  ", Style::default().fg(Theme::GREY_300)),
+                Span::styled(" Esc ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_500)),
+                Span::styled(" cancel", Style::default().fg(Theme::GREY_400)),
+            ]));
+        }
+        ShipStep::Done => {
+            lines.push(Line::from(vec![
+                Span::styled("     ✓ ", Style::default().fg(Theme::GREEN)),
+                Span::styled("PR created successfully!", Style::default().fg(Theme::GREEN)),
+            ]));
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::styled("     ", Style::default()),
+                Span::styled(" Enter ", Style::default().fg(Theme::GREY_900).bg(Theme::GREEN)),
+                Span::styled(" open PR  ", Style::default().fg(Theme::GREY_300)),
+                Span::styled(" Esc ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_500)),
+                Span::styled(" close", Style::default().fg(Theme::GREY_400)),
+            ]));
+        }
+        _ => {
+            // In progress
+            lines.push(Line::from(vec![
+                Span::styled("     Working...", Style::default().fg(Theme::GREY_300)),
+            ]));
+        }
+    }
+    lines.push(Line::from(""));
+
+    let block = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .block(Block::default()
+            .title(" › 𝘴𝘩𝘪𝘱 ")
+            .title_style(Style::default().fg(Theme::GREEN))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Theme::GREEN))
             .style(Style::default().bg(Theme::GREY_900)));
 
     frame.render_widget(block, area);

@@ -266,10 +266,83 @@ impl SuggestionEngine {
         }
     }
 
+    /// Mark a suggestion as not applied (used for undo).
+    pub fn unmark_applied(&mut self, id: Uuid) {
+        if let Some(s) = self.suggestions.iter_mut().find(|s| s.id == id) {
+            s.applied = false;
+        }
+    }
+
     /// Add a suggestion from LLM
     pub fn add_llm_suggestion(&mut self, suggestion: Suggestion) {
         self.suggestions.push(suggestion);
         self.suggestions.sort_by(|a, b| b.priority.cmp(&a.priority));
+    }
+
+    /// Sort suggestions with git context: changed files first, then blast radius, then priority.
+    pub fn sort_with_context(&mut self, context: &crate::context::WorkContext) {
+        let changed: std::collections::HashSet<PathBuf> = context
+            .all_changed_files()
+            .into_iter()
+            .cloned()
+            .collect();
+
+        // “Blast radius” = files that import changed files (and direct deps of changed files).
+        let mut blast: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+        for path in &changed {
+            if let Some(file_index) = self.index.files.get(path) {
+                for u in &file_index.summary.used_by {
+                    blast.insert(u.clone());
+                }
+                for d in &file_index.summary.depends_on {
+                    blast.insert(d.clone());
+                }
+            }
+        }
+        for c in &changed {
+            blast.remove(c);
+        }
+
+        let kind_weight = |k: SuggestionKind| -> i64 {
+            match k {
+                SuggestionKind::BugFix => 40,
+                SuggestionKind::Optimization => 25,
+                SuggestionKind::Testing => 20,
+                SuggestionKind::Quality => 15,
+                SuggestionKind::Documentation => 10,
+                SuggestionKind::Improvement => 10,
+                SuggestionKind::Feature => 0,
+            }
+        };
+
+        self.suggestions.sort_by(|a, b| {
+            let a_changed = changed.contains(&a.file);
+            let b_changed = changed.contains(&b.file);
+            if a_changed != b_changed {
+                return b_changed.cmp(&a_changed);
+            }
+
+            let a_blast = blast.contains(&a.file);
+            let b_blast = blast.contains(&b.file);
+            if a_blast != b_blast {
+                return b_blast.cmp(&a_blast);
+            }
+
+            // Higher priority first
+            let pri = b.priority.cmp(&a.priority);
+            if pri != std::cmp::Ordering::Equal {
+                return pri;
+            }
+
+            // Then kind weight
+            let kw = kind_weight(b.kind).cmp(&kind_weight(a.kind));
+            if kw != std::cmp::Ordering::Equal {
+                return kw;
+            }
+
+            // Finally: newest first
+            b.created_at.cmp(&a.created_at)
+        });
     }
 
     /// Get suggestion count by priority

@@ -1,10 +1,16 @@
 # ☽ C O S M O S ✦
 
-A contemplative vibe coding companion for your codebase.
+A **terminal-first codebase steward** for solo developers.
 
-Uses AST-based indexing and AI (Opus 4.5) to proactively suggest improvements, bug fixes, optimizations, and new features while minimizing LLM spend through smart caching and tiered model usage.
+Cosmos is not an editor. It lives *outside* your editing loop and helps you keep a repo healthy: it reads git context, surfaces high-leverage improvements, and can turn fixes into shippable branches/PRs.
+
+Uses AST-based indexing and AI (via OpenRouter presets) to proactively suggest improvements, bug fixes, optimizations, and new features while minimizing LLM spend through smart caching and tiered model usage.
 
 **Monochromatic. Minimal. Meaningful.**
+
+### Where Cosmos fits (vs Cursor)
+- **Cursor**: your editor and interactive coding environment.
+- **Cosmos**: your calm, git-native steward that helps you *choose the right next changes* and *ship them safely*.
 
 ```
 ╔══════════════════════════════════════════════════════════════╗

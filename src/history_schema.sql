@@ -49,3 +49,5 @@ CREATE TABLE IF NOT EXISTS sessions (
 
 -- Index for session date queries
 CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at);
+
+

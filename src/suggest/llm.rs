@@ -332,6 +332,7 @@ pub async fn ask_question(
     index: &CodebaseIndex,
     context: &WorkContext,
     question: &str,
+    repo_memory: Option<String>,
 ) -> anyhow::Result<(String, Option<Usage>)> {
     let system = r#"You are Cosmos, a contemplative companion for codebases. The developer is asking you a question about their code.
 
@@ -362,6 +363,12 @@ Format your response with markdown for readability:
         .map(|s| format!("{:?}: {}", s.kind, s.name))
         .collect();
 
+    let memory_section = repo_memory
+        .as_deref()
+        .filter(|m| !m.trim().is_empty())
+        .map(|m| format!("\n\nREPO MEMORY (follow these conventions):\n{}", m))
+        .unwrap_or_default();
+
     let user = format!(
         r#"PROJECT CONTEXT:
 - {} files, {} lines of code
@@ -370,6 +377,8 @@ Format your response with markdown for readability:
 - Key files: {}
 
 KEY SYMBOLS:
+{}
+
 {}
 
 QUESTION:
@@ -381,6 +390,7 @@ QUESTION:
         context.modified_count,
         file_list.join(", "),
         symbols.join("\n"),
+        memory_section,
         question
     );
 
@@ -412,6 +422,7 @@ pub async fn generate_fix_content(
     content: &str,
     suggestion: &Suggestion,
     plan: &FixPreview,
+    repo_memory: Option<String>,
 ) -> anyhow::Result<AppliedFix> {
     let system = r#"You are a senior developer implementing a code fix. You've been given a plan - now implement it.
 
@@ -439,11 +450,18 @@ CRITICAL RULES:
         plan.modifier.as_ref().map(|m| format!("\nUser modifications: {}", m)).unwrap_or_default()
     );
 
+    let memory_section = repo_memory
+        .as_deref()
+        .filter(|m| !m.trim().is_empty())
+        .map(|m| format!("\n\nRepo conventions / decisions:\n{}", m))
+        .unwrap_or_default();
+
     let user = format!(
-        "File: {}\n\nOriginal Issue: {}\n{}\n\n{}\n\nCurrent Code:\n```\n{}\n```\n\nImplement the fix according to the plan. Output the complete updated file.",
+        "File: {}\n\nOriginal Issue: {}\n{}\n{}\n\n{}\n\nCurrent Code:\n```\n{}\n```\n\nImplement the fix according to the plan. Output the complete updated file.",
         path.display(),
         suggestion.summary,
         suggestion.detail.as_deref().unwrap_or(""),
+        memory_section,
         plan_text,
         content
     );
@@ -503,6 +521,10 @@ pub struct FixPreview {
     pub verified: bool,
     /// Explanation of verification result
     pub verification_note: String,
+    /// Code snippet that proves the claim (evidence)
+    pub evidence_snippet: Option<String>,
+    /// Starting line number of the evidence snippet
+    pub evidence_line: Option<u32>,
     /// Human-readable description of what will change (1-2 sentences)
     pub description: String,
     /// Which functions/areas are affected
@@ -544,6 +566,7 @@ pub async fn generate_fix_preview(
     path: &PathBuf,
     suggestion: &Suggestion,
     modifier: Option<&str>,
+    repo_memory: Option<String>,
 ) -> anyhow::Result<FixPreview> {
     let system = r#"You are a code assistant. First VERIFY whether this issue actually exists in the code, then describe what changes would fix it.
 
@@ -551,6 +574,8 @@ OUTPUT FORMAT (JSON):
 {
   "verified": true,
   "verification_note": "Brief explanation of whether the issue was found and where",
+  "evidence_snippet": "const BATCH_SIZE = 1000;",
+  "evidence_line": 42,
   "description": "1-2 sentence description of what will change (if verified)",
   "affected_areas": ["function_name", "another_function"],
   "scope": "small"
@@ -559,19 +584,28 @@ OUTPUT FORMAT (JSON):
 RULES:
 - verified: boolean true if issue exists, false if it doesn't exist or was already fixed
 - verification_note: explain what you found
+- evidence_snippet: 1-3 lines of the ACTUAL code from the file that proves your claim. Only include the relevant code, not surrounding context. Omit if no specific code evidence is needed.
+- evidence_line: the line number where the evidence snippet starts
 - scope: one of "small", "medium", or "large"
 
-Be concise. No code, just describe the verification result and planned change in plain English."#;
+Be concise. The verification note should explain the finding in plain English. The evidence snippet shows proof."#;
 
     let modifier_text = modifier
         .map(|m| format!("\n\nUser wants: {}", m))
         .unwrap_or_default();
 
+    let memory_section = repo_memory
+        .as_deref()
+        .filter(|m| !m.trim().is_empty())
+        .map(|m| format!("\n\nRepo conventions / decisions:\n{}", m))
+        .unwrap_or_default();
+
     let user = format!(
-        "File: {}\nIssue: {}\n{}{}",
+        "File: {}\nIssue: {}\n{}{}{}",
         path.display(),
         suggestion.summary,
         suggestion.detail.as_deref().unwrap_or(""),
+        memory_section,
         modifier_text
     );
 
@@ -606,6 +640,15 @@ fn parse_fix_preview(response: &str, modifier: Option<String>) -> anyhow::Result
         .unwrap_or(if verified { "Issue verified" } else { "Issue not found" })
         .to_string();
 
+    let evidence_snippet = parsed.get("evidence_snippet")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.to_string());
+
+    let evidence_line = parsed.get("evidence_line")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as u32);
+
     let description = parsed.get("description")
         .and_then(|v| v.as_str())
         .unwrap_or("Fix the identified issue")
@@ -629,6 +672,8 @@ fn parse_fix_preview(response: &str, modifier: Option<String>) -> anyhow::Result
     Ok(FixPreview {
         verified,
         verification_note,
+        evidence_snippet,
+        evidence_line,
         description,
         affected_areas,
         scope,
@@ -648,6 +693,7 @@ fn parse_fix_preview(response: &str, modifier: Option<String>) -> anyhow::Result
 pub async fn analyze_codebase(
     index: &CodebaseIndex,
     context: &WorkContext,
+    repo_memory: Option<String>,
 ) -> anyhow::Result<(Vec<Suggestion>, Option<Usage>)> {
     let system = r#"You are a senior developer reviewing a codebase. Your job is to find genuinely useful improvements - things that will make the app better, not just cleaner.
 
@@ -685,7 +731,7 @@ PRIORITIZE:
 - Quick wins that provide immediate value
 - Suggestions specific to THIS codebase, not generic best practices"#;
 
-    let user_prompt = build_codebase_context(index, context);
+    let user_prompt = build_codebase_context(index, context, repo_memory.as_deref());
     
     // Use Smart preset for quality reasoning on suggestions
     let response = call_llm_with_usage(system, &user_prompt, Model::Smart, true).await?;
@@ -695,7 +741,7 @@ PRIORITIZE:
 }
 
 /// Build rich context from codebase index for the LLM prompt
-fn build_codebase_context(index: &CodebaseIndex, context: &WorkContext) -> String {
+fn build_codebase_context(index: &CodebaseIndex, context: &WorkContext, repo_memory: Option<&str>) -> String {
     let stats = index.stats();
     let project_name = index.root.file_name()
         .and_then(|n| n.to_str())
@@ -732,6 +778,50 @@ fn build_codebase_context(index: &CodebaseIndex, context: &WorkContext) -> Strin
             }
         }
         sections.push(changes_section);
+    }
+
+    // Blast radius: files affected by the current changes (direct importers + direct deps)
+    if !context.all_changed_files().is_empty() {
+        let changed: std::collections::HashSet<PathBuf> = context
+            .all_changed_files()
+            .into_iter()
+            .cloned()
+            .collect();
+        let mut related: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+
+        for c in &changed {
+            if let Some(file_index) = index.files.get(c) {
+                // Who imports this file?
+                for u in file_index.summary.used_by.iter().take(10) {
+                    related.insert(u.clone());
+                }
+                // What does this file depend on?
+                for d in file_index.summary.depends_on.iter().take(10) {
+                    related.insert(d.clone());
+                }
+            }
+        }
+        for c in &changed {
+            related.remove(c);
+        }
+
+        if !related.is_empty() {
+            let mut list: Vec<_> = related.into_iter().collect();
+            list.sort();
+            let mut blast = String::from("\n\nBLAST RADIUS (related to [CHANGED]):");
+            for path in list.into_iter().take(15) {
+                blast.push_str(&format!("\n- {}", path.display()));
+            }
+            sections.push(blast);
+        }
+    }
+
+    // Repo memory / conventions (solo dev “second brain”)
+    if let Some(mem) = repo_memory {
+        let mem = mem.trim();
+        if !mem.is_empty() {
+            sections.push(format!("\n\nREPO MEMORY (follow these conventions):\n{}", mem));
+        }
     }
     
     // Recent commits for understanding what's being worked on
@@ -799,7 +889,7 @@ fn build_codebase_context(index: &CodebaseIndex, context: &WorkContext) -> Strin
     // Final instruction - open-ended
     sections.push(String::from(
         "\n\nLook for bugs, security issues, performance problems, missing error handling, \
-         UX improvements, and feature opportunities. Prioritize the [CHANGED] files. \
+         UX improvements, and feature opportunities. Prioritize the [CHANGED] files (and BLAST RADIUS). \
          Give me varied, specific suggestions - not just code organization advice."
     ));
     

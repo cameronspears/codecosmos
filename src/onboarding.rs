@@ -60,12 +60,15 @@ fn print_welcome() {
     println!("  ║                                                                ║");
     println!("  ║     ☽ C O S M O S ✦                                           ║");
     println!("  ║                                                                ║");
-    println!("  ║     A contemplative companion for your codebase               ║");
+    println!("  ║     A terminal-first steward for your codebase                ║");
     println!("  ║                                                                ║");
     println!("  ╚════════════════════════════════════════════════════════════════╝");
     println!();
-    println!("  Welcome! Cosmos uses AI to suggest improvements, find bugs,");
-    println!("  and help you write better code. Let's get you set up.");
+    println!("  Welcome! Cosmos sits *outside* your editor and helps you ship:");
+    println!("  it reads git context, suggests high-leverage improvements,");
+    println!("  and can turn fixes into clean branches/PRs.");
+    println!();
+    println!("  (Keep Cursor as your editor. Let Cosmos be your steward.)");
     println!();
     println!("  ─────────────────────────────────────────────────────────────────");
     println!();
@@ -255,3 +258,5 @@ mod tests {
         let _ = is_first_run();
     }
 }
+
+
