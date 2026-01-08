@@ -6,7 +6,7 @@ Cosmos lives *outside* your editing loop. It reads git context, surfaces high-le
 
 **Monochromatic. Minimal. Meaningful.**
 
-![Cosmos Main Interface](assets/image-1cd94e09-8039-41ea-bce0-95a5767cdb9b.png)
+![Cosmos Main Interface](assets/main-interface.png)
 
 ## What It Does
 
@@ -14,8 +14,6 @@ Cosmos lives *outside* your editing loop. It reads git context, surfaces high-le
 - **Suggests improvements** via AI with smart tiering (Opus 4.5 for depth, fast models for speed)
 - **Ships fixes safely** — preview changes, apply to a branch, create PRs
 - **Remembers context** — caches summaries, tracks your decisions
-
-![Suggestions View](assets/image-591aa864-7d98-4437-9128-02a3744679bc.png)
 
 ## Installation
 
@@ -85,7 +83,7 @@ cosmos --setup
 | `M` | Repo memory (store decisions) |
 | `1-8` | Jump to architectural layer |
 
-![Ship Workflow](assets/image-ceb802d7-fbe0-429c-ad69-5d867da46bb6.png)
+![Apply Workflow](assets/apply-workflow.png)
 
 ## Workflows
 
@@ -126,7 +124,7 @@ Cosmos caches aggressively to minimize LLM costs:
 
 On subsequent runs, unchanged files load instantly from cache.
 
-![Codebase View](assets/image-d056b5fc-6545-4aac-a0a3-e5eaaeb3b83a.png)
+![Codebase View](assets/codebase-view.png)
 
 ## Suggestion Types
 
