@@ -415,7 +415,17 @@ pub struct AppliedFix {
     pub usage: Option<Usage>,
 }
 
-/// Generate the actual fixed code content based on a human-language plan
+/// A single search/replace edit operation
+#[derive(Debug, Clone, Deserialize)]
+struct EditOp {
+    /// The exact text to find (must match exactly once in the file)
+    old_string: String,
+    /// The replacement text
+    new_string: String,
+}
+
+/// Generate the actual fixed code content based on a human-language plan.
+/// Uses a search/replace approach for precise, validated edits.
 /// This is Phase 2 of the two-phase fix flow - Smart preset generates the actual changes
 pub async fn generate_fix_content(
     path: &PathBuf,
@@ -430,15 +440,33 @@ OUTPUT FORMAT (JSON):
 {
   "description": "1-2 sentence summary of what you changed",
   "modified_areas": ["function_name", "another_function"],
-  "new_content": "THE COMPLETE UPDATED FILE CONTENT"
+  "edits": [
+    {
+      "old_string": "exact text to find and replace",
+      "new_string": "replacement text"
+    }
+  ]
 }
 
-CRITICAL RULES:
-- new_content must be the COMPLETE file, not a snippet
-- Preserve all existing functionality that isn't being changed
-- Maintain the exact same coding style and conventions
-- Only change what the plan describes
-- Keep imports, comments, and structure intact"#;
+CRITICAL RULES FOR EDITS:
+- old_string must be EXACT text from the file (copy-paste precision)
+- old_string must be UNIQUE in the file - include enough context (3-5 lines before/after the change)
+- new_string is what replaces it (can be same length, longer, or shorter)
+- Multiple edits are applied in order - each must be unique in the file at application time
+- Preserve indentation exactly - spaces and tabs matter
+- Do NOT include line numbers in old_string or new_string
+
+EXAMPLE - Adding a null check:
+{
+  "description": "Added null check before accessing user.name",
+  "modified_areas": ["getUserName"],
+  "edits": [
+    {
+      "old_string": "function getUserName(user) {\n  return user.name;",
+      "new_string": "function getUserName(user) {\n  if (!user) return null;\n  return user.name;"
+    }
+  ]
+}"#;
 
     let plan_text = format!(
         "Verification: {} - {}\nPlan: {}\nScope: {}\nAffected areas: {}{}",
@@ -457,7 +485,7 @@ CRITICAL RULES:
         .unwrap_or_default();
 
     let user = format!(
-        "File: {}\n\nOriginal Issue: {}\n{}\n{}\n\n{}\n\nCurrent Code:\n```\n{}\n```\n\nImplement the fix according to the plan. Output the complete updated file.",
+        "File: {}\n\nOriginal Issue: {}\n{}\n{}\n\n{}\n\nCurrent Code:\n```\n{}\n```\n\nImplement the fix using search/replace edits. Be precise with old_string - it must match exactly.",
         path.display(),
         suggestion.summary,
         suggestion.detail.as_deref().unwrap_or(""),
@@ -485,21 +513,55 @@ CRITICAL RULES:
         .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
         .unwrap_or_default();
     
-    let new_content = parsed.get("new_content")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow::anyhow!("Missing new_content in response"))?
-        .to_string();
+    // Parse and apply edits
+    let edits: Vec<EditOp> = parsed.get("edits")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .ok_or_else(|| anyhow::anyhow!("Missing or invalid 'edits' array in response"))?;
     
-    // Validate the new content isn't empty or too short
-    if new_content.trim().is_empty() {
-        return Err(anyhow::anyhow!("Generated content is empty"));
+    if edits.is_empty() {
+        return Err(anyhow::anyhow!("No edits provided in response"));
     }
     
-    // Basic sanity check - new content should be similar length to original
-    let length_ratio = new_content.len() as f64 / content.len() as f64;
-    if length_ratio < 0.3 || length_ratio > 3.0 {
-        // Allow but warn - the change might be legitimate
-        eprintln!("Warning: Generated content length differs significantly (ratio: {:.2})", length_ratio);
+    // Apply edits sequentially with validation
+    let mut new_content = content.to_string();
+    for (i, edit) in edits.iter().enumerate() {
+        // Validate old_string exists exactly once
+        let matches: Vec<_> = new_content.match_indices(&edit.old_string).collect();
+        
+        if matches.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Edit {}: old_string not found in file. The LLM may have made an error.\nSearched for: {:?}",
+                i + 1,
+                truncate_for_error(&edit.old_string)
+            ));
+        }
+        
+        if matches.len() > 1 {
+            return Err(anyhow::anyhow!(
+                "Edit {}: old_string matches {} times (must be unique). Need more context.\nSearched for: {:?}",
+                i + 1,
+                matches.len(),
+                truncate_for_error(&edit.old_string)
+            ));
+        }
+        
+        // Apply the replacement
+        new_content = new_content.replacen(&edit.old_string, &edit.new_string, 1);
+    }
+    
+    // Strip trailing whitespace from each line and ensure file ends with newline
+    let mut new_content: String = new_content
+        .lines()
+        .map(|line| line.trim_end())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if !new_content.ends_with('\n') {
+        new_content.push('\n');
+    }
+    
+    // Validate the new content isn't empty
+    if new_content.trim().is_empty() {
+        return Err(anyhow::anyhow!("Generated content is empty"));
     }
     
     Ok(AppliedFix {
@@ -508,6 +570,18 @@ CRITICAL RULES:
         modified_areas,
         usage: response.usage,
     })
+}
+
+/// Truncate a string for error messages (UTF-8 safe)
+fn truncate_for_error(s: &str) -> String {
+    const MAX_CHARS: usize = 100;
+    // Use char iteration to avoid panicking on multi-byte UTF-8 boundaries
+    // (same pattern as hash_summary in history.rs)
+    if s.chars().count() <= MAX_CHARS {
+        s.to_string()
+    } else {
+        format!("{}...", s.chars().take(MAX_CHARS).collect::<String>())
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

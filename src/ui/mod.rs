@@ -245,6 +245,7 @@ pub enum Overlay {
         commit_message: String,
         files: Vec<PathBuf>,
         step: ShipStep,
+        scroll: usize,
     },
     /// Safe Apply report - what changed, why safe, how to undo
     SafeApplyReport {
@@ -1337,6 +1338,7 @@ impl App {
             | Overlay::RepoMemory { scroll, .. }
             | Overlay::ApplyConfirm { scroll, .. }
             | Overlay::SafeApplyReport { scroll, .. }
+            | Overlay::ShipDialog { scroll, .. }
             | Overlay::Ritual { scroll } => {
                 *scroll += 1;
             }
@@ -1353,6 +1355,7 @@ impl App {
             | Overlay::RepoMemory { scroll, .. }
             | Overlay::ApplyConfirm { scroll, .. }
             | Overlay::SafeApplyReport { scroll, .. }
+            | Overlay::ShipDialog { scroll, .. }
             | Overlay::Ritual { scroll } => {
                 *scroll = scroll.saturating_sub(1);
             }
@@ -1416,6 +1419,7 @@ impl App {
             commit_message,
             files,
             step: ShipStep::Confirm,
+            scroll: 0,
         };
     }
     
@@ -1961,7 +1965,7 @@ fn build_grouped_tree(
                         let pri_a = index.files.get(*a).map(|f| f.priority_indicator()).unwrap_or(' ');
                         let pri_b = index.files.get(*b).map(|f| f.priority_indicator()).unwrap_or(' ');
                         // Priority files (●) come first
-                        match (pri_a == '●' || pri_a == '\u{25CF}', pri_b == '●' || pri_b == '\u{25CF}') {
+                        match (pri_a == '●', pri_b == '●') {
                             (true, false) => std::cmp::Ordering::Less,
                             (false, true) => std::cmp::Ordering::Greater,
                             _ => a.cmp(b),
@@ -1986,7 +1990,7 @@ fn build_grouped_tree(
                 sorted_ungrouped.sort_by(|a, b| {
                     let pri_a = index.files.get(*a).map(|f| f.priority_indicator()).unwrap_or(' ');
                     let pri_b = index.files.get(*b).map(|f| f.priority_indicator()).unwrap_or(' ');
-                    match (pri_a == '●' || pri_a == '\u{25CF}', pri_b == '●' || pri_b == '\u{25CF}') {
+                    match (pri_a == '●', pri_b == '●') {
                         (true, false) => std::cmp::Ordering::Less,
                         (false, true) => std::cmp::Ordering::Greater,
                         _ => a.cmp(b),
@@ -2080,8 +2084,8 @@ pub fn render(frame: &mut Frame, app: &App) {
         Overlay::GitStatus { staged, modified, untracked, selected, scroll, commit_input } => {
             render_git_status(frame, staged, modified, untracked, *selected, *scroll, commit_input.as_deref(), &app.context.branch);
         }
-        Overlay::ShipDialog { branch_name, commit_message, files, step } => {
-            render_ship_dialog(frame, branch_name, commit_message, files, *step);
+        Overlay::ShipDialog { branch_name, commit_message, files, step, scroll } => {
+            render_ship_dialog(frame, branch_name, commit_message, files, *step, *scroll);
         }
         Overlay::SafeApplyReport { description, file_path, branch_name, backup_path: _, checks, scroll } => {
             render_safe_apply_report(frame, description, file_path, branch_name, checks, *scroll);
@@ -4614,19 +4618,21 @@ fn render_ship_dialog(
     commit_message: &str,
     files: &[PathBuf],
     step: ShipStep,
+    scroll: usize,
 ) {
     let area = centered_rect(65, 65, frame.area());
     frame.render_widget(Clear, area);
 
     let inner_width = area.width.saturating_sub(10) as usize;
+    let visible_height = area.height.saturating_sub(4) as usize;
     
     // Header based on current step
     let (title, title_icon) = match step {
-        ShipStep::Confirm => ("Ship Changes", "🚀"),
-        ShipStep::Committing => ("Committing...", "●"),
-        ShipStep::Pushing => ("Pushing to origin...", "●"),
-        ShipStep::CreatingPR => ("Creating Pull Request...", "●"),
-        ShipStep::Done => ("Shipped!", "✓"),
+        ShipStep::Confirm => ("Ship Changes", ">"),
+        ShipStep::Committing => ("Committing...", "*"),
+        ShipStep::Pushing => ("Pushing to origin...", "*"),
+        ShipStep::CreatingPR => ("Creating Pull Request...", "*"),
+        ShipStep::Done => ("Shipped!", "*"),
     };
     
     let mut lines = vec![
@@ -4651,15 +4657,15 @@ fn render_ship_dialog(
     let mut step_spans = vec![Span::styled("     ", Style::default())];
     for (i, s) in steps.iter().enumerate() {
         let (icon, style) = if i + 1 < current {
-            ("✓", Style::default().fg(Theme::GREEN))
+            ("*", Style::default().fg(Theme::GREEN))
         } else if i + 1 == current {
-            ("●", Style::default().fg(Theme::WHITE).add_modifier(Modifier::BOLD))
+            ("o", Style::default().fg(Theme::WHITE).add_modifier(Modifier::BOLD))
         } else {
-            ("○", Style::default().fg(Theme::GREY_500))
+            ("o", Style::default().fg(Theme::GREY_500))
         };
         step_spans.push(Span::styled(format!("{} {} ", icon, s), style));
         if i < steps.len() - 1 {
-            step_spans.push(Span::styled("→ ", Style::default().fg(Theme::GREY_600)));
+            step_spans.push(Span::styled("-> ", Style::default().fg(Theme::GREY_600)));
         }
     }
     lines.push(Line::from(step_spans));
@@ -4702,7 +4708,7 @@ fn render_ship_dialog(
             .and_then(|n| n.to_str())
             .unwrap_or("?");
         lines.push(Line::from(vec![
-            Span::styled(format!("       ✓ {}", name), Style::default().fg(Theme::GREEN)),
+            Span::styled(format!("       + {}", name), Style::default().fg(Theme::GREEN)),
         ]));
     }
     if files.len() > 4 {
@@ -4746,7 +4752,7 @@ fn render_ship_dialog(
         }
         ShipStep::Done => {
             lines.push(Line::from(vec![
-                Span::styled("     ✓ ", Style::default().fg(Theme::GREEN)),
+                Span::styled("     ", Style::default()),
                 Span::styled("PR created successfully!", Style::default().fg(Theme::GREEN)),
             ]));
             lines.push(Line::from(""));
@@ -4766,11 +4772,25 @@ fn render_ship_dialog(
         }
     }
     lines.push(Line::from(""));
+    
+    // Add scroll indicator if content overflows
+    let total_lines = lines.len();
+    let needs_scroll = total_lines > visible_height;
+    if needs_scroll {
+        lines.push(Line::from(vec![
+            Span::styled("     ", Style::default()),
+            Span::styled(
+                format!("(j/k to scroll {}/{})", scroll + 1, total_lines.saturating_sub(visible_height) + 1),
+                Style::default().fg(Theme::GREY_500)
+            ),
+        ]));
+    }
 
     let block = Paragraph::new(lines)
+        .scroll((scroll as u16, 0))
         .wrap(Wrap { trim: false })
         .block(Block::default()
-            .title(" › 𝘴𝘩𝘪𝘱 ")
+            .title(" ship ")
             .title_style(Style::default().fg(Theme::GREEN))
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Theme::GREEN))

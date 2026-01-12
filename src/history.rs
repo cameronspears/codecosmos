@@ -6,6 +6,10 @@
 //! - "Previously seen" badges for recurring issues
 //! - Learning from user preferences
 
+// Allow dead code - this module is a complete implementation that will be
+// integrated into the main flow in a future version. The tests validate it works.
+#![allow(dead_code)]
+
 use crate::suggest::{Priority, Suggestion, SuggestionKind, SuggestionSource};
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, Result as SqlResult};
