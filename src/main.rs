@@ -1268,7 +1268,7 @@ fn run_loop<B: Backend>(
                     }
                     
                     // Handle ShipDialog overlay - streamlined commit + push + PR flow
-                    if let Overlay::ShipDialog { branch_name, commit_message, files, step } = &app.overlay {
+                    if let Overlay::ShipDialog { branch_name, commit_message, files, step, .. } = &app.overlay {
                         let step = *step;
                         match key.code {
                             KeyCode::Esc | KeyCode::Char('q') => {
@@ -1277,6 +1277,8 @@ fn run_loop<B: Backend>(
                                 }
                                 // Don't allow cancel during in-progress steps
                             }
+                            KeyCode::Down | KeyCode::Char('j') => app.overlay_scroll_down(),
+                            KeyCode::Up | KeyCode::Char('k') => app.overlay_scroll_up(),
                             KeyCode::Char('y') if step == ui::ShipStep::Confirm => {
                                 // Execute the full ship workflow: stage → commit → push → PR
                                 let repo_path = app.repo_path.clone();

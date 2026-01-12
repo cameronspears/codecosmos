@@ -209,16 +209,29 @@ fn detect_by_directory(path: &Path) -> Option<Layer> {
 
 /// Detect layer based on file naming patterns
 fn detect_by_file_pattern(path: &Path) -> Option<Layer> {
-    let filename = path.file_name()
+    let original_filename = path.file_name()
         .and_then(|n| n.to_str())
-        .unwrap_or("")
-        .to_lowercase();
+        .unwrap_or("");
+    let filename = original_filename.to_lowercase();
+
+    // React hooks pattern - "use" followed by uppercase letter (e.g., useAuth, useState)
+    // Check on original filename (before lowercasing) to detect camelCase hooks
+    // This avoids matching "user.service.ts" which starts with "use" but isn't a hook
+    if original_filename.len() > 3 {
+        let chars: Vec<char> = original_filename.chars().collect();
+        if chars[0] == 'u' && chars[1] == 's' && chars[2] == 'e' && chars[3].is_ascii_uppercase() {
+            let lower = filename.as_str();
+            if lower.ends_with(".ts") || lower.ends_with(".tsx") || lower.ends_with(".js") || lower.ends_with(".jsx") {
+                return Some(Layer::Frontend);
+            }
+        }
+    }
 
     // Frontend patterns
     let frontend_patterns = [
         ".tsx", ".jsx", ".vue", ".svelte", ".astro",
         ".css", ".scss", ".sass", ".less", ".styled.",
-        "component.", ".component.", "hook.", "use",
+        "component.", ".component.", "hook.",
         "page.", ".page.", "layout.", ".layout.",
     ];
     
@@ -415,7 +428,6 @@ impl StringExt for &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     #[test]
     fn test_is_test_file() {

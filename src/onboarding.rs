@@ -5,6 +5,9 @@
 //! - Activate a Pro license
 //! - Skip setup (limited functionality)
 
+// Allow dead code - quick_setup is for non-interactive/CI use cases
+#![allow(dead_code)]
+
 use crate::config::Config;
 use crate::license::LicenseManager;
 use std::io::{self, Write};

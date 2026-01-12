@@ -5,6 +5,10 @@
 //! - Pro: Managed AI credits + history + analytics
 //! - Team: Everything + sync + SSO (future)
 
+// Allow dead code - some methods are part of the public API for future features
+// (e.g., badge display, history feature gating, team sync checks).
+#![allow(dead_code)]
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fs;
