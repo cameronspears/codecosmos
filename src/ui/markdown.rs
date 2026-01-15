@@ -15,17 +15,12 @@ use super::theme::Theme;
 pub fn parse_markdown(text: &str, max_width: usize) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut in_code_block = false;
-    let mut code_block_content: Vec<String> = Vec::new();
     
     for line in text.lines() {
         // Handle code blocks
         if line.starts_with("```") {
             if in_code_block {
-                // End of code block - render accumulated content
-                for code_line in &code_block_content {
-                    lines.push(render_code_block_line(code_line, max_width));
-                }
-                code_block_content.clear();
+                // End of code block - drop accumulated content
                 in_code_block = false;
             } else {
                 // Start of code block
@@ -35,7 +30,6 @@ pub fn parse_markdown(text: &str, max_width: usize) -> Vec<Line<'static>> {
         }
         
         if in_code_block {
-            code_block_content.push(line.to_string());
             continue;
         }
         
@@ -89,13 +83,6 @@ pub fn parse_markdown(text: &str, max_width: usize) -> Vec<Line<'static>> {
         }
     }
     
-    // Handle unclosed code block
-    if in_code_block {
-        for code_line in &code_block_content {
-            lines.push(render_code_block_line(code_line, max_width));
-        }
-    }
-    
     lines
 }
 
@@ -131,19 +118,6 @@ fn render_h3(text: &str, _max_width: usize) -> Line<'static> {
             Style::default()
                 .fg(Theme::GREY_200)
                 .add_modifier(Modifier::BOLD)
-        ),
-    ])
-}
-
-/// Render a line in a code block
-fn render_code_block_line(text: &str, _max_width: usize) -> Line<'static> {
-    Line::from(vec![
-        Span::styled("  ", Style::default()),
-        Span::styled(
-            text.to_string(),
-            Style::default()
-                .fg(Theme::GREY_200)
-                .bg(Theme::GREY_700)
         ),
     ])
 }
@@ -189,6 +163,7 @@ fn wrap_text_simple(text: &str, max_width: usize) -> Vec<String> {
     lines
 }
 
+
 /// Parse inline markdown elements (bold, italic, code)
 fn parse_inline_markdown(text: &str) -> Line<'static> {
     let mut spans = Vec::new();
@@ -197,33 +172,6 @@ fn parse_inline_markdown(text: &str) -> Line<'static> {
     let mut current_text = String::new();
     
     while i < chars.len() {
-        // Check for inline code: `code`
-        if chars[i] == '`' {
-            // Flush current text
-            if !current_text.is_empty() {
-                spans.push(Span::styled(current_text.clone(), Style::default().fg(Theme::GREY_100)));
-                current_text.clear();
-            }
-            
-            // Find closing backtick
-            let start = i + 1;
-            i += 1;
-            while i < chars.len() && chars[i] != '`' {
-                i += 1;
-            }
-            
-            if i < chars.len() {
-                let code: String = chars[start..i].iter().collect();
-                spans.push(Span::styled(
-                    code,
-                    Style::default()
-                        .fg(Theme::WHITE)
-                        .bg(Theme::GREY_700)
-                ));
-                i += 1;
-            }
-            continue;
-        }
         
         // Check for bold: **text** or __text__
         if i + 1 < chars.len() && 
@@ -287,7 +235,7 @@ fn parse_inline_markdown(text: &str) -> Line<'static> {
             }
         }
         
-        // Regular character
+        // Regular character (no inline code styling)
         current_text.push(chars[i]);
         i += 1;
     }

@@ -3,7 +3,7 @@
 //! Provides branch, stage, commit, and push operations.
 
 use anyhow::{Context, Result};
-use git2::{Repository, Signature, IndexAddOption};
+use git2::{IndexAddOption, Repository, Signature};
 use std::path::Path;
 use std::process::Command;
 
@@ -202,20 +202,112 @@ pub fn commit(repo_path: &Path, message: &str) -> Result<String> {
 
 /// Push current branch to remote (shells out to git)
 pub fn push_branch(repo_path: &Path, branch: &str) -> Result<String> {
-    let output = Command::new("git")
-        .current_dir(repo_path)
-        .args(["push", "-u", "origin", branch])
-        .output()
+    let repo = Repository::open(repo_path)?;
+    ensure_local_branch(&repo, branch)?;
+    let remote = resolve_push_remote(&repo, branch).unwrap_or_else(|_| "origin".to_string());
+    let needs_upstream = !has_upstream(&repo, branch);
+
+    let output = run_git_push(repo_path, &remote, branch, needs_upstream)
         .context("Failed to execute git push")?;
-    
+
     if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
-    } else {
-        Err(anyhow::anyhow!(
-            "git push failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ))
+        return Ok(String::from_utf8_lossy(&output.stdout).to_string());
     }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    // Only retry with -u if the first attempt didn't include it.
+    // If needs_upstream was already true, retrying with -u is pointless.
+    if !needs_upstream
+        && (stderr.contains("no upstream")
+            || stderr.contains("set-upstream")
+            || stderr.contains("set upstream"))
+    {
+        let retry = run_git_push(repo_path, &remote, branch, true)
+            .context("Failed to retry git push with upstream")?;
+        if retry.status.success() {
+            return Ok(String::from_utf8_lossy(&retry.stdout).to_string());
+        }
+        let retry_err = String::from_utf8_lossy(&retry.stderr);
+        return Err(anyhow::anyhow!(
+            "git push failed after retrying with upstream (remote: {}, branch: {}): {}",
+            remote,
+            branch,
+            retry_err
+        ));
+    }
+
+    Err(anyhow::anyhow!(
+        "git push failed (remote: {}, branch: {}): {}",
+        remote,
+        branch,
+        stderr
+    ))
+}
+
+fn run_git_push(
+    repo_path: &Path,
+    remote: &str,
+    branch: &str,
+    set_upstream: bool,
+) -> Result<std::process::Output> {
+    let mut args = vec!["push".to_string()];
+    if set_upstream {
+        args.push("-u".to_string());
+    }
+    args.push(remote.to_string());
+    args.push(branch.to_string());
+
+    Command::new("git")
+        .current_dir(repo_path)
+        .args(args)
+        .output()
+        .context("Failed to run git push command")
+}
+
+fn has_upstream(repo: &Repository, branch: &str) -> bool {
+    repo.find_branch(branch, git2::BranchType::Local)
+        .and_then(|b| b.upstream())
+        .is_ok()
+}
+
+fn ensure_local_branch(repo: &Repository, branch: &str) -> Result<()> {
+    if repo
+        .find_branch(branch, git2::BranchType::Local)
+        .is_ok()
+    {
+        return Ok(());
+    }
+
+    let head = repo.head().context("Failed to read HEAD")?;
+    let commit = head
+        .peel_to_commit()
+        .context("Failed to resolve HEAD commit")?;
+    repo.branch(branch, &commit, false)
+        .context(format!("Failed to create local branch '{}'", branch))?;
+    Ok(())
+}
+
+fn resolve_push_remote(repo: &Repository, branch: &str) -> Result<String> {
+    let config = repo.config()?;
+    if let Ok(remote) = config.get_string(&format!("branch.{}.remote", branch)) {
+        if !remote.trim().is_empty() {
+            return Ok(remote);
+        }
+    }
+    if let Ok(remote) = config.get_string("remote.pushDefault") {
+        if !remote.trim().is_empty() {
+            return Ok(remote);
+        }
+    }
+
+    let remotes = repo.remotes()?;
+    if remotes.len() == 1 {
+        if let Some(name) = remotes.get(0) {
+            return Ok(name.to_string());
+        }
+    }
+
+    Ok("origin".to_string())
 }
 
 /// Reset a file to HEAD (discard changes)

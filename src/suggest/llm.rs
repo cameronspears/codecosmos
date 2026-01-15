@@ -1,8 +1,6 @@
 //! LLM-powered suggestions via OpenRouter
 //!
-//! Supports two modes:
-//! - BYOK (Bring Your Own Key): User provides OpenRouter API key, billed directly
-//! - Managed (Pro): Cosmos proxy handles API calls, billed through license
+//! BYOK only: user provides an OpenRouter API key, billed directly.
 //!
 //! Uses @preset/speed for ultra-fast analysis/summaries, @preset/smart for quality code generation.
 //! Uses smart context building to maximize insight per token.
@@ -13,74 +11,16 @@ use super::{Priority, Suggestion, SuggestionKind, SuggestionSource};
 use crate::config::Config;
 use crate::context::WorkContext;
 use crate::index::{CodebaseIndex, PatternKind, SymbolKind};
-use crate::license::LicenseManager;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// OpenRouter direct API URL (BYOK mode)
 const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
 
-/// Cosmos managed API URL (Pro mode) - proxies to OpenRouter with usage tracking
-/// TODO: Set this to your hosted endpoint when ready
-/// For now, Pro users still use OpenRouter directly (with usage tracking locally)
-const COSMOS_API_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
-
-/// API mode for LLM calls
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ApiMode {
-    /// User's own OpenRouter API key (free tier)
-    Byok,
-    /// Cosmos managed API (Pro/Team tier)
-    Managed,
-}
-
-impl ApiMode {
-    /// Determine the API mode based on license and config
-    pub fn detect() -> (Self, Option<String>) {
-        let license_manager = LicenseManager::load();
-        let config = Config::load();
-        
-        // Check if user has an OpenRouter API key configured (BYOK)
-        let byok_key = config.get_api_key();
-        
-        // Pro/Team users: 
-        // - If managed API is ready (COSMOS_API_URL != OpenRouter), use managed mode
-        // - Otherwise, fall back to BYOK if they have a key configured
-        // - Track usage locally either way
-        if license_manager.tier().has_managed_ai() {
-            // For now, managed mode uses OpenRouter directly (until we have a proxy)
-            // Pro users must also have BYOK configured until managed API is live
-            if let Some(key) = byok_key {
-                return (ApiMode::Managed, Some(key));
-            }
-            // Pro license but no API key - can't make calls yet
-            // Return None so we show a helpful error
-            return (ApiMode::Managed, None);
-        }
-        
-        // Free tier: use BYOK if configured
-        if let Some(key) = byok_key {
-            return (ApiMode::Byok, Some(key));
-        }
-        
-        // No API access available
-        (ApiMode::Byok, None)
-    }
-    
-    /// Get the API URL for this mode
-    pub fn url(&self) -> &'static str {
-        // Both modes use OpenRouter for now until managed proxy is live
-        OPENROUTER_URL
-    }
-    
-    /// Get the appropriate header name for the API key
-    pub fn auth_header(&self) -> &'static str {
-        match self {
-            ApiMode::Byok => "Authorization",
-            ApiMode::Managed => "Authorization", // Same for now, will change when proxy is live
-        }
-    }
+/// Get the configured OpenRouter API key, if any.
+fn api_key() -> Option<String> {
+    Config::load().get_api_key()
 }
 
 // Model pricing per million tokens (as of 2024)
@@ -90,6 +30,9 @@ const SPEED_OUTPUT_COST: f64 = 0.69;  // $0.69 per 1M output tokens
 // Smart preset: quality routing for code generation (cheaper than raw Opus)
 const SMART_INPUT_COST: f64 = 3.0;    // ~$3 per 1M input tokens (estimated)
 const SMART_OUTPUT_COST: f64 = 15.0;  // ~$15 per 1M output tokens (estimated)
+// Reviewer preset: adversarial code review (different model family for cognitive diversity)
+const REVIEWER_INPUT_COST: f64 = 2.0;  // ~$2 per 1M input tokens (estimated)
+const REVIEWER_OUTPUT_COST: f64 = 8.0; // ~$8 per 1M output tokens (estimated)
 
 /// Models available for suggestions
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,6 +41,8 @@ pub enum Model {
     Speed,
     /// Smart preset - quality routing for code generation (replaces Opus)
     Smart,
+    /// Reviewer preset - adversarial code review (different model for cognitive diversity)
+    Reviewer,
 }
 
 impl Model {
@@ -105,6 +50,7 @@ impl Model {
         match self {
             Model::Speed => "@preset/speed",
             Model::Smart => "@preset/smart",
+            Model::Reviewer => "@preset/reviewer",
         }
     }
 
@@ -112,6 +58,7 @@ impl Model {
         match self {
             Model::Speed => 8192,
             Model::Smart => 8192,
+            Model::Reviewer => 8192,
         }
     }
     
@@ -119,6 +66,7 @@ impl Model {
         match self {
             Model::Speed => "speed",
             Model::Smart => "smart",
+            Model::Reviewer => "reviewer",
         }
     }
     
@@ -127,6 +75,7 @@ impl Model {
         let (input_rate, output_rate) = match self {
             Model::Speed => (SPEED_INPUT_COST, SPEED_OUTPUT_COST),
             Model::Smart => (SMART_INPUT_COST, SMART_OUTPUT_COST),
+            Model::Reviewer => (REVIEWER_INPUT_COST, REVIEWER_OUTPUT_COST),
         };
         
         let input_cost = (prompt_tokens as f64 / 1_000_000.0) * input_rate;
@@ -199,14 +148,7 @@ struct MessageContent {
 
 /// Check if LLM is available (either BYOK or managed)
 pub fn is_available() -> bool {
-    let (_, api_key) = ApiMode::detect();
-    api_key.is_some()
-}
-
-/// Get current API mode (for display/debugging)
-pub fn current_mode() -> ApiMode {
-    let (mode, _) = ApiMode::detect();
-    mode
+    api_key().is_some()
 }
 
 /// Call LLM API (returns content only, for backwards compatibility)
@@ -215,31 +157,44 @@ async fn call_llm(system: &str, user: &str, model: Model) -> anyhow::Result<Stri
     Ok(response.content)
 }
 
+/// Rate limit retry configuration
+const MAX_RETRIES: u32 = 3;
+const INITIAL_BACKOFF_MS: u64 = 2000;  // 2 seconds
+const BACKOFF_MULTIPLIER: u64 = 2;     // Exponential backoff
+
+/// Extract retry-after hint from OpenRouter response (if present)
+fn parse_retry_after(text: &str) -> Option<u64> {
+    // OpenRouter may include retry-after in response body or we estimate
+    // Look for patterns like "retry after X seconds" or "wait X seconds"
+    let text_lower = text.to_lowercase();
+    if let Some(pos) = text_lower.find("retry") {
+        // Try to extract a number after "retry"
+        let after_retry = &text_lower[pos..];
+        for word in after_retry.split_whitespace().skip(1).take(5) {
+            if let Ok(secs) = word.trim_matches(|c: char| !c.is_numeric()).parse::<u64>() {
+                if secs > 0 && secs < 300 {
+                    return Some(secs);
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Call LLM API with full response including usage stats
-/// Automatically routes to BYOK (OpenRouter) or Managed (Cosmos API) based on license
+/// Includes automatic retry with exponential backoff for rate limits
 async fn call_llm_with_usage(
     system: &str, 
     user: &str, 
     model: Model,
     json_mode: bool,
 ) -> anyhow::Result<LlmResponse> {
-    let (mode, api_key) = ApiMode::detect();
-    let api_key = api_key.ok_or_else(|| {
-        match mode {
-            ApiMode::Managed => {
-                // Pro user but no API key - managed proxy not live yet
-                anyhow::anyhow!(
-                    "Cosmos Pro managed API coming soon! For now, please also run 'cosmos --setup' to configure your OpenRouter key."
-                )
-            }
-            ApiMode::Byok => {
-                anyhow::anyhow!("No API key configured. Run 'cosmos --setup' to get started.")
-            }
-        }
+    let api_key = api_key().ok_or_else(|| {
+        anyhow::anyhow!("No API key configured. Run 'cosmos --setup' to get started.")
     })?;
 
     let client = reqwest::Client::new();
-    let url = mode.url();
+    let url = OPENROUTER_URL;
 
     let response_format = if json_mode {
         Some(ResponseFormat {
@@ -266,65 +221,82 @@ async fn call_llm_with_usage(
         response_format,
     };
 
-    // Build request with appropriate headers for the API mode
-    let mut request_builder = client
-        .post(url)
-        .header("Content-Type", "application/json")
-        .header("HTTP-Referer", "https://cosmos.dev")
-        .header("X-Title", "Cosmos");
+    let mut last_error = String::new();
+    let mut retry_count = 0;
+    
+    while retry_count <= MAX_RETRIES {
+        // Build request with OpenRouter headers
+        let response = client
+            .post(url)
+            .header("Content-Type", "application/json")
+            .header("HTTP-Referer", "https://cosmos.dev")
+            .header("X-Title", "Cosmos")
+            .header("Authorization", format!("Bearer {}", api_key))
+            .json(&request)
+            .send()
+            .await?;
 
-    // Add auth header (both modes use OpenRouter directly for now)
-    request_builder = request_builder.header("Authorization", format!("Bearer {}", api_key));
+        if response.status().is_success() {
+            let chat_response: ChatResponse = response.json().await?;
 
-    let response = request_builder
-        .json(&request)
-        .send()
-        .await?;
+            let content = chat_response
+                .choices
+                .first()
+                .map(|c| c.message.content.clone())
+                .ok_or_else(|| anyhow::anyhow!("No response from AI"))?;
+            
+            return Ok(LlmResponse {
+                content,
+                usage: chat_response.usage,
+                model: chat_response.model.unwrap_or_else(|| model.id().to_string()),
+            });
+        }
 
-    if !response.status().is_success() {
         let status = response.status();
         let text = response.text().await.unwrap_or_default();
         
-        // Provide helpful error messages based on status
+        // Handle rate limiting with retry
+        if status.as_u16() == 429 && retry_count < MAX_RETRIES {
+            retry_count += 1;
+            
+            // Calculate backoff delay
+            let retry_after = parse_retry_after(&text);
+            let backoff_secs = retry_after.unwrap_or_else(|| {
+                INITIAL_BACKOFF_MS * BACKOFF_MULTIPLIER.pow(retry_count - 1) / 1000
+            });
+            
+            // Log the retry attempt (this will be visible in error log if it ultimately fails)
+            last_error = format!(
+                "Rate limited by OpenRouter (attempt {}/{}). Retrying in {}s...",
+                retry_count, MAX_RETRIES + 1, backoff_secs
+            );
+            
+            // Wait before retrying
+            tokio::time::sleep(tokio::time::Duration::from_secs(backoff_secs)).await;
+            continue;
+        }
+        
+        // Non-retryable error or max retries exceeded
         let error_msg = match status.as_u16() {
             401 => {
-                match mode {
-                    ApiMode::Byok => "Invalid API key. Run 'cosmos --setup' to update it.".to_string(),
-                    ApiMode::Managed => "License invalid or expired. Check 'cosmos --status'.".to_string(),
-                }
+                "Invalid API key. Run 'cosmos --setup' to update it.".to_string()
             }
             429 => {
-                match mode {
-                    ApiMode::Byok => "Rate limited by OpenRouter. Try again in a moment.".to_string(),
-                    ApiMode::Managed => "Token quota exceeded. Upgrade at cosmos.dev/pro".to_string(),
-                }
+                format!(
+                    "Rate limited by OpenRouter after {} retries. Try again in a few minutes. (Press 'e' to view error log)",
+                    retry_count
+                )
             }
-            _ => format!("API error {}: {}", status, text),
+            500..=599 => {
+                format!("OpenRouter server error ({}). The service may be temporarily unavailable.", status)
+            }
+            _ => format!("API error {}: {}", status, truncate_str(&text, 200)),
         };
         return Err(anyhow::anyhow!("{}", error_msg));
     }
-
-    let chat_response: ChatResponse = response.json().await?;
-
-    let content = chat_response
-        .choices
-        .first()
-        .map(|c| c.message.content.clone())
-        .ok_or_else(|| anyhow::anyhow!("No response from AI"))?;
     
-    // Record usage for Pro users (managed mode)
-    if mode == ApiMode::Managed {
-        if let Some(ref usage) = chat_response.usage {
-            let mut license_manager = LicenseManager::load();
-            license_manager.record_usage(usage.total_tokens as u64);
-        }
-    }
-    
-    Ok(LlmResponse {
-        content,
-        usage: chat_response.usage,
-        model: chat_response.model.unwrap_or_else(|| model.id().to_string()),
-    })
+    // Should not reach here, but handle it gracefully
+    Err(anyhow::anyhow!("{}", last_error))
 }
 
 /// Ask cosmos a general question about the codebase
@@ -634,8 +606,8 @@ impl FixScope {
     }
 }
 
-/// Generate a quick preview of what the fix will do (uses Grok Fast for speed)
-/// This is Phase 1 of the two-phase fix flow - verifies the issue and lets users approve before waiting for full diff
+/// Generate a preview of what the fix will do with smart verification
+/// This is Phase 1 of the two-phase fix flow - uses Smart model to thoroughly verify the issue exists before users approve
 pub async fn generate_fix_preview(
     path: &PathBuf,
     suggestion: &Suggestion,
@@ -683,7 +655,7 @@ Be concise. The verification note should explain the finding in plain English. T
         modifier_text
     );
 
-    let response = call_llm(system, &user, Model::Speed).await?;
+    let response = call_llm(system, &user, Model::Smart).await?;
     parse_fix_preview(&response, modifier.map(String::from))
 }
 
@@ -1677,7 +1649,7 @@ OUTPUT: A JSON object mapping file paths to summary strings. Example:
     
     let response = call_llm_with_usage(system, &user_prompt, Model::Speed, true).await?;
     
-    let summaries = parse_summaries_response(&response.content)?;
+    let summaries = parse_summaries_response(&response.content, &index.root)?;
     
     Ok(SummaryBatchResult {
         summaries,
@@ -1796,7 +1768,25 @@ fn extract_json_object(response: &str) -> Option<&str> {
 }
 
 /// Parse the summaries JSON response with robust error handling
-fn parse_summaries_response(response: &str) -> anyhow::Result<HashMap<PathBuf, String>> {
+fn normalize_summary_path(raw: &str, root: &Path) -> PathBuf {
+    let mut cleaned = raw.trim().replace('\\', "/");
+    while cleaned.starts_with("./") {
+        cleaned = cleaned.trim_start_matches("./").to_string();
+    }
+
+    let mut path = PathBuf::from(cleaned);
+    if path.is_absolute() {
+        if let Ok(stripped) = path.strip_prefix(root) {
+            if !stripped.as_os_str().is_empty() {
+                path = stripped.to_path_buf();
+            }
+        }
+    }
+
+    path
+}
+
+fn parse_summaries_response(response: &str, root: &Path) -> anyhow::Result<HashMap<PathBuf, String>> {
     let json_str = extract_json_object(response)
         .ok_or_else(|| anyhow::anyhow!("No JSON object found in response"))?;
 
@@ -1804,7 +1794,7 @@ fn parse_summaries_response(response: &str) -> anyhow::Result<HashMap<PathBuf, S
     if let Ok(parsed) = serde_json::from_str::<HashMap<String, String>>(json_str) {
         let summaries = parsed
             .into_iter()
-            .map(|(path, summary)| (PathBuf::from(path), summary))
+            .map(|(path, summary)| (normalize_summary_path(&path, root), summary))
             .collect();
         return Ok(summaries);
     }
@@ -1817,7 +1807,7 @@ fn parse_summaries_response(response: &str) -> anyhow::Result<HashMap<PathBuf, S
                 if let Ok(parsed) = serde_json::from_value::<HashMap<String, String>>(inner.clone()) {
                     let summaries = parsed
                         .into_iter()
-                        .map(|(path, summary)| (PathBuf::from(path), summary))
+                        .map(|(path, summary)| (normalize_summary_path(&path, root), summary))
                         .collect();
                     return Ok(summaries);
                 }
@@ -1834,7 +1824,7 @@ fn parse_summaries_response(response: &str) -> anyhow::Result<HashMap<PathBuf, S
                     continue;
                 }
                 if let Some(summary) = value.as_str() {
-                    summaries.insert(PathBuf::from(key), summary.to_string());
+                    summaries.insert(normalize_summary_path(key, root), summary.to_string());
                 }
             }
             if !summaries.is_empty() {
@@ -1969,6 +1959,412 @@ fn parse_review_response(
     }
     
     Ok(comments)
+}
+
+// ============================================================================
+// Deep Verification Review (Sweet Spot Flow)
+// ============================================================================
+// Flow: Reviewer reviews → User sees findings → User selects → Smart fixes → Done
+
+/// A finding from the adversarial code reviewer
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReviewFinding {
+    pub file: String,
+    pub line: Option<u32>,
+    pub severity: String,       // "critical", "warning", "suggestion", "nitpick"
+    pub category: String,       // "bug", "security", "performance", "logic", "error-handling", "style"
+    pub title: String,          // Short title
+    pub description: String,    // Detailed explanation in plain language
+    pub recommended: bool,      // Reviewer recommends fixing this (true = should fix, false = optional)
+}
+
+/// Result of a deep verification review
+#[derive(Debug, Clone)]
+pub struct VerificationReview {
+    pub findings: Vec<ReviewFinding>,
+    pub summary: String,        // Overall assessment
+    pub pass: bool,             // True if no critical/warning issues
+    pub usage: Option<Usage>,
+}
+
+/// Perform deep adversarial review of code changes using the Reviewer model
+/// 
+/// This uses a different model (cognitive diversity) with adversarial prompting
+/// to find issues that the implementing model might have missed.
+/// 
+/// On re-reviews (iteration > 1), the prompt is adjusted to focus on verifying fixes
+/// rather than finding entirely new issues.
+pub async fn verify_changes(
+    files_with_content: &[(PathBuf, String, String)], // (path, old_content, new_content)
+    iteration: u32,
+    fixed_titles: &[String],
+) -> anyhow::Result<VerificationReview> {
+    // First review: full adversarial mode
+    // Re-reviews: focus on verifying fixes were correct, not finding new issues
+    let system = if iteration <= 1 {
+        r#"You are a skeptical senior code reviewer. Your job is to find bugs, security issues, and problems that the implementing developer might have missed.
+
+BE ADVERSARIAL: Assume the code has bugs until proven otherwise. Look for:
+- Logic errors and edge cases
+- Off-by-one errors, null/None handling, empty collections
+- Race conditions, deadlocks, resource leaks
+- Security vulnerabilities (injection, XSS, path traversal, secrets)
+- Error handling gaps (swallowed errors, missing validation)
+- Performance issues (N+1 queries, unbounded loops, memory leaks)
+- Type confusion, incorrect casts, precision loss
+- Incorrect assumptions about input data
+
+DO NOT praise good code. Your only job is to find problems.
+
+OUTPUT FORMAT (JSON):
+{
+  "summary": "Brief overall assessment in plain language",
+  "pass": false,
+  "findings": [
+    {
+      "file": "path/to/file.rs",
+      "line": 42,
+      "severity": "critical",
+      "category": "bug",
+      "title": "Short description",
+      "description": "Plain language explanation of what's wrong and why it matters. No code snippets.",
+      "recommended": true
+    }
+  ]
+}
+
+SEVERITY LEVELS:
+- critical: Must fix before shipping. Bugs, security issues, data loss risks.
+- warning: Should fix. Logic issues, poor error handling, reliability concerns.
+- suggestion: Consider fixing. Performance, maintainability, edge cases.
+- nitpick: Minor. Style, naming, documentation. (Use sparingly)
+
+RECOMMENDED FIELD - BE THOUGHTFUL:
+- Set "recommended": true ONLY for issues that:
+  * Are objectively bugs (logic errors, crashes, data corruption)
+  * Can be fixed with CODE CHANGES to this file
+  * The developer can reasonably fix right now
+
+- Set "recommended": false for:
+  * Architectural concerns ("should use Redis", "should use external queue")
+  * Infrastructure requirements ("needs rate limiting at CDN/proxy level")
+  * Issues requiring new dependencies or services
+  * Security hardening that's nice-to-have but not a vulnerability
+  * Concerns about deployment environments the code can't control
+  * Theoretical edge cases that are unlikely in practice
+
+RULES:
+- Write descriptions in plain human language, no code snippets or technical jargon
+- Explain WHY it's a problem and what could go wrong
+- Focus on the CHANGES, not pre-existing code
+- If an issue requires infrastructure changes, mention it but mark recommended: false
+- Don't pile on - 2-3 high-quality findings are better than 10 marginal ones
+- Return empty findings array if the code is genuinely solid"#.to_string()
+    } else {
+        // Re-review mode: ONLY verify fixes were correct, do not expand scope
+        format!(r#"You are verifying that previously reported issues were fixed correctly.
+
+This is RE-REVIEW #{iteration}. Your ONLY job is to verify the fixes work correctly.
+
+PREVIOUSLY FIXED ISSUES:
+{fixed_list}
+
+VERIFY ONLY:
+1. Were the specific issues above actually fixed?
+2. Did the fix itself introduce a regression or new bug?
+
+STRICT RULES - DO NOT REPORT:
+- Architectural concerns (e.g., "should use Redis", "should use external service")
+- Issues requiring infrastructure changes
+- Security hardening that wasn't part of the original scope
+- Edge cases in code that WASN'T changed by the fix
+- Improvements to pre-existing code
+- Theoretical concerns about deployment environments
+- Style, naming, or documentation
+
+SET recommended: false FOR:
+- Any issue requiring significant refactoring
+- Concerns about infrastructure or architecture
+- Issues that are "nice to have" rather than bugs
+
+SET recommended: true ONLY FOR:
+- The fix is objectively broken (doesn't solve the stated problem)
+- The fix introduced a clear bug (null pointer, infinite loop, data corruption)
+
+IMPORTANT: If you already reported an issue and it was fixed, do NOT report a "deeper" version of the same issue. The developer addressed it; move on.
+
+After {iteration} rounds, if fixes are reasonable, PASS. Perfect is the enemy of good.
+
+OUTPUT FORMAT (JSON):
+{{
+  "summary": "Brief assessment - be concise",
+  "pass": true,
+  "findings": []
+}}"#,
+            fixed_list = if fixed_titles.is_empty() {
+                "(none recorded)".to_string()
+            } else {
+                fixed_titles.iter().map(|t| format!("- {}", t)).collect::<Vec<_>>().join("\n")
+            }
+        )
+    };
+
+    // Build the diff context
+    let mut changes_text = String::new();
+    for (path, old_content, new_content) in files_with_content {
+        let file_name = path.display().to_string();
+        
+        // Create a simple diff view
+        changes_text.push_str(&format!("\n=== {} ===\n", file_name));
+        
+        if old_content.is_empty() {
+            // New file
+            changes_text.push_str("(NEW FILE)\n");
+            changes_text.push_str(&add_line_numbers(new_content));
+        } else {
+            // Show old and new with line numbers
+            changes_text.push_str("--- BEFORE ---\n");
+            changes_text.push_str(&add_line_numbers(old_content));
+            changes_text.push_str("\n--- AFTER ---\n");
+            changes_text.push_str(&add_line_numbers(new_content));
+        }
+        changes_text.push('\n');
+    }
+
+    let user = format!("Review these code changes for bugs and issues:\n{}", changes_text);
+
+    let response = call_llm_with_usage(&system, &user, Model::Reviewer, true).await?;
+    
+    // Parse the response
+    let json_str = extract_json_object(&response.content)
+        .ok_or_else(|| anyhow::anyhow!("No JSON found in review response"))?;
+    
+    #[derive(Deserialize)]
+    struct ReviewResponse {
+        summary: String,
+        pass: Option<bool>,
+        findings: Vec<ReviewFinding>,
+    }
+    
+    let parsed: ReviewResponse = serde_json::from_str(json_str)
+        .map_err(|e| anyhow::anyhow!("Failed to parse review JSON: {}", e))?;
+    
+    // Determine pass based on findings if not explicitly set
+    let pass = parsed.pass.unwrap_or_else(|| {
+        !parsed.findings.iter().any(|f| 
+            f.severity == "critical" || f.severity == "warning"
+        )
+    });
+    
+    Ok(VerificationReview {
+        findings: parsed.findings,
+        summary: parsed.summary,
+        pass,
+        usage: response.usage,
+    })
+}
+
+/// Add line numbers to code for review context
+fn add_line_numbers(content: &str) -> String {
+    content
+        .lines()
+        .enumerate()
+        .map(|(i, line)| format!("{:4}| {}", i + 1, line))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Fix selected review findings
+/// 
+/// Takes the content and findings to address, returns fixed content.
+/// On later iterations, includes original content and fix history for better context.
+pub async fn fix_review_findings(
+    path: &PathBuf,
+    content: &str,
+    original_content: Option<&str>,
+    findings: &[ReviewFinding],
+    repo_memory: Option<String>,
+    iteration: u32,
+    fixed_titles: &[String],
+) -> anyhow::Result<AppliedFix> {
+    if findings.is_empty() {
+        return Err(anyhow::anyhow!("No findings to fix"));
+    }
+
+    // For later iterations, use a more detailed prompt that acknowledges the history
+    let system = if iteration <= 1 {
+        r#"You are a senior developer fixing issues found during code review.
+
+For each finding, implement a fix using search/replace edits.
+
+OUTPUT FORMAT (JSON):
+{
+  "description": "Brief summary of all fixes applied",
+  "modified_areas": ["function_name", "another_function"],
+  "edits": [
+    {
+      "old_string": "exact text to find and replace",
+      "new_string": "replacement text"
+    }
+  ]
+}
+
+CRITICAL RULES FOR EDITS:
+- old_string must be EXACT text from the file (copy-paste precision)
+- old_string must be UNIQUE in the file - include enough context
+- Preserve indentation exactly
+- Fix the ROOT CAUSE, not just the symptom
+- Don't introduce new issues while fixing old ones
+- If a finding seems incorrect, still make a reasonable improvement"#.to_string()
+    } else {
+        format!(r#"You are a senior developer fixing issues found during code review.
+
+IMPORTANT CONTEXT: This is fix attempt #{iteration}. Previous fix attempts have not fully resolved all issues.
+
+Previously fixed issues:
+{fixed_list}
+
+The reviewer keeps finding problems because fixes are addressing symptoms, not root causes.
+This time, think more carefully:
+1. Look at the ORIGINAL code to understand what the change was trying to do
+2. Consider the ENTIRE flow, not just the specific line mentioned
+3. Fix the UNDERLYING DESIGN ISSUE if the same area keeps getting flagged
+4. Think about edge cases: initialization order, race conditions, error states
+
+For each finding, implement a COMPLETE fix using search/replace edits.
+
+OUTPUT FORMAT (JSON):
+{{
+  "description": "Brief summary of all fixes applied",
+  "modified_areas": ["function_name", "another_function"],
+  "edits": [
+    {{
+      "old_string": "exact text to find and replace",
+      "new_string": "replacement text"
+    }}
+  ]
+}}
+
+CRITICAL RULES FOR EDITS:
+- old_string must be EXACT text from the file (copy-paste precision)
+- old_string must be UNIQUE in the file - include enough context
+- Preserve indentation exactly  
+- Fix the ROOT CAUSE this time, not just the symptom
+- Consider all edge cases the reviewer might check"#,
+            fixed_list = if fixed_titles.is_empty() {
+                "(none recorded)".to_string()
+            } else {
+                fixed_titles.iter().map(|t| format!("- {}", t)).collect::<Vec<_>>().join("\n")
+            }
+        )
+    };
+
+    // Format findings for the prompt
+    let findings_text: Vec<String> = findings.iter().enumerate().map(|(i, f)| {
+        let line_info = f.line.map(|l| format!(" (line {})", l)).unwrap_or_default();
+        format!(
+            "{}. [{}] {}{}\n   {}\n   Category: {}",
+            i + 1, f.severity.to_uppercase(), f.title, line_info,
+            f.description, f.category
+        )
+    }).collect();
+
+    let memory_section = repo_memory
+        .as_deref()
+        .filter(|m| !m.trim().is_empty())
+        .map(|m| format!("\n\nRepo conventions:\n{}", m))
+        .unwrap_or_default();
+
+    // For iterations > 1, include original content so model can see the full evolution
+    let original_section = if iteration > 1 {
+        original_content
+            .filter(|o| !o.is_empty())
+            .map(|o| format!("\n\nORIGINAL CODE (before any fixes):\n```\n{}\n```", o))
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+
+    let user = format!(
+        "File: {}\n\nFINDINGS TO FIX:\n{}\n{}{}\n\nCURRENT CODE:\n```\n{}\n```\n\nFix all listed findings. Think carefully about edge cases.",
+        path.display(),
+        findings_text.join("\n\n"),
+        memory_section,
+        original_section,
+        content
+    );
+
+    // Always use Smart model for fixes - getting it right the first time saves iterations
+    let response = call_llm_with_usage(&system, &user, Model::Smart, true).await?;
+    
+    // Parse the JSON response
+    let json_str = extract_json_object(&response.content)
+        .ok_or_else(|| anyhow::anyhow!("No JSON found in fix response"))?;
+    
+    let parsed: serde_json::Value = serde_json::from_str(json_str)
+        .map_err(|e| anyhow::anyhow!("Failed to parse fix JSON: {}", e))?;
+    
+    let description = parsed.get("description")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Fixed review findings")
+        .to_string();
+    
+    let modified_areas = parsed.get("modified_areas")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    
+    // Parse and apply edits
+    let edits: Vec<EditOp> = parsed.get("edits")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .ok_or_else(|| anyhow::anyhow!("Missing or invalid 'edits' array in response"))?;
+    
+    if edits.is_empty() {
+        return Err(anyhow::anyhow!("No edits provided in response"));
+    }
+    
+    // Apply edits sequentially with validation
+    let mut new_content = content.to_string();
+    for (i, edit) in edits.iter().enumerate() {
+        let matches: Vec<_> = new_content.match_indices(&edit.old_string).collect();
+        
+        if matches.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Edit {}: old_string not found in file.\nSearched for: {:?}",
+                i + 1, truncate_for_error(&edit.old_string)
+            ));
+        }
+        
+        if matches.len() > 1 {
+            return Err(anyhow::anyhow!(
+                "Edit {}: old_string matches {} times (must be unique).\nSearched for: {:?}",
+                i + 1, matches.len(), truncate_for_error(&edit.old_string)
+            ));
+        }
+        
+        new_content = new_content.replacen(&edit.old_string, &edit.new_string, 1);
+    }
+    
+    // Normalize whitespace
+    let mut new_content: String = new_content
+        .lines()
+        .map(|line| line.trim_end())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if !new_content.ends_with('\n') {
+        new_content.push('\n');
+    }
+    
+    if new_content.trim().is_empty() {
+        return Err(anyhow::anyhow!("Generated content is empty"));
+    }
+    
+    Ok(AppliedFix {
+        description,
+        new_content,
+        modified_areas,
+        usage: response.usage,
+    })
 }
 
 #[cfg(test)]

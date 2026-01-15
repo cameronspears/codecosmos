@@ -171,6 +171,26 @@ pub struct LlmSummaryCache {
     pub cached_at: DateTime<Utc>,
 }
 
+/// Normalize summary cache keys to repo-relative paths.
+pub fn normalize_summary_path(path: &Path, root: &Path) -> PathBuf {
+    let raw = path.to_string_lossy();
+    let mut cleaned = raw.replace('\\', "/");
+    while cleaned.starts_with("./") {
+        cleaned = cleaned.trim_start_matches("./").to_string();
+    }
+
+    let mut out = PathBuf::from(cleaned);
+    if out.is_absolute() {
+        if let Ok(stripped) = out.strip_prefix(root) {
+            if !stripped.as_os_str().is_empty() {
+                out = stripped.to_path_buf();
+            }
+        }
+    }
+
+    out
+}
+
 impl LlmSummaryCache {
     /// Create a new empty cache
     pub fn new() -> Self {
@@ -252,6 +272,37 @@ impl LlmSummaryCache {
             })
             .count();
         (total, valid)
+    }
+
+    /// Normalize cached paths to match current index keys.
+    pub fn normalize_paths(&mut self, root: &Path) -> bool {
+        if self.summaries.is_empty() {
+            return false;
+        }
+
+        let mut normalized: HashMap<PathBuf, LlmSummaryEntry> = HashMap::new();
+        let mut changed = false;
+
+        for (path, entry) in self.summaries.iter() {
+            let key = normalize_summary_path(path, root);
+            if &key != path {
+                changed = true;
+            }
+
+            match normalized.get(&key) {
+                Some(existing) if existing.generated_at >= entry.generated_at => {}
+                _ => {
+                    normalized.insert(key, entry.clone());
+                }
+            }
+        }
+
+        if changed {
+            self.summaries = normalized;
+            self.cached_at = Utc::now();
+        }
+
+        changed
     }
 }
 

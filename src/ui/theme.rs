@@ -77,6 +77,12 @@ impl Theme {
     /// Red for removals - brighter for contrast  
     pub const RED: Color = Color::Rgb(230, 120, 120);
 
+    /// Yellow/orange for warnings - visible but not alarming
+    pub const YELLOW: Color = Color::Rgb(255, 200, 100);
+
+    /// Accent color for highlighting selections
+    pub const ACCENT: Color = Color::Rgb(140, 180, 255);
+
     // ─────────────────────────────────────────────────────────────────────
     // Badge colors for categorization
     // ─────────────────────────────────────────────────────────────────────
@@ -250,10 +256,10 @@ impl Theme {
     pub const BLOCKS: [char; 4] = ['░', '▒', '▓', '█'];
 
     /// Success/status indicators
-    pub const CHECK_MARK: char = '✓';
-    pub const CROSS_MARK: char = '✗';
-    pub const WARNING_MARK: char = '⚠';
-    pub const INFO_MARK: char = 'ℹ';
+    pub const CHECK_MARK: char = '+';
+    pub const CROSS_MARK: char = 'x';
+    pub const WARNING_MARK: char = '!';
+    pub const INFO_MARK: char = 'i';
 
     /// Action key hints
     pub const KEY_PROMPT: char = '▸';
@@ -328,6 +334,12 @@ impl Theme {
     pub const SECTION_PROJECT: &'static str = "𝘱𝘳𝘰𝘫𝘦𝘤𝘵";
     pub const SECTION_SUGGESTIONS: &'static str = "𝘴𝘶𝘨𝘨𝘦𝘴𝘵𝘪𝘰𝘯𝘴";
     pub const SECTION_CONTEXT: &'static str = "𝘤𝘰𝘯𝘵𝘦𝘹𝘵";
+    
+    /// Workflow step labels - italic style
+    pub const WORKFLOW_SUGGESTIONS: &'static str = "𝘴𝘶𝘨𝘨𝘦𝘴𝘵𝘪𝘰𝘯𝘴";
+    pub const WORKFLOW_VERIFY: &'static str = "𝘷𝘦𝘳𝘪𝘧𝘺";
+    pub const WORKFLOW_REVIEW: &'static str = "𝘳𝘦𝘷𝘪𝘦𝘸";
+    pub const WORKFLOW_SHIP: &'static str = "𝘴𝘩𝘪𝘱";
 
     /// Tree drawing characters
     pub const TREE_BRANCH: &'static str = "├── ";

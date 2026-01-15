@@ -16,7 +16,7 @@ pub enum CheckStatus {
 impl CheckStatus {
     pub fn icon(&self) -> &'static str {
         match self {
-            CheckStatus::Pass => "✓",
+            CheckStatus::Pass => "+",
             CheckStatus::Fail => "●",
             CheckStatus::Skipped => "·",
         }

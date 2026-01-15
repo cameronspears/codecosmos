@@ -2,28 +2,31 @@
 //!
 //! Shows a welcome screen on first run with options to:
 //! - Try free with BYOK (Bring Your Own Key)
-//! - Activate a Pro license
 //! - Skip setup (limited functionality)
 
 // Allow dead code - quick_setup is for non-interactive/CI use cases
 #![allow(dead_code)]
 
 use crate::config::Config;
-use crate::license::LicenseManager;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 
-/// Check if this is a first run (no config or license exists)
+/// Check if this is a first run (no config exists)
 pub fn is_first_run() -> bool {
     let config = Config::load();
-    let license = LicenseManager::load();
     
-    // First run if no API key AND no license
-    !config.has_api_key() && license.tier() == crate::license::Tier::Free
+    // First run if no API key
+    !config.has_api_key()
 }
 
 /// Run the onboarding flow
 /// Returns true if setup was completed, false if skipped
 pub fn run_onboarding() -> Result<bool, String> {
+    if !io::stdin().is_terminal() {
+        eprintln!("  Skipping onboarding (non-interactive session).");
+        eprintln!("  Tip: set OPENROUTER_API_KEY or run `cosmos --setup` later.");
+        return Ok(false);
+    }
+
     clear_screen();
     print_welcome();
     
@@ -32,10 +35,6 @@ pub fn run_onboarding() -> Result<bool, String> {
     match choice {
         OnboardingChoice::Byok => {
             setup_byok()?;
-            Ok(true)
-        }
-        OnboardingChoice::Pro => {
-            setup_pro()?;
             Ok(true)
         }
         OnboardingChoice::Skip => {
@@ -48,7 +47,6 @@ pub fn run_onboarding() -> Result<bool, String> {
 #[derive(Debug, Clone, Copy)]
 enum OnboardingChoice {
     Byok,
-    Pro,
     Skip,
 }
 
@@ -77,21 +75,17 @@ fn print_welcome() {
     println!();
     println!("  How would you like to use Cosmos?");
     println!();
-    println!("    [1] Free (BYOK) - Bring your own OpenRouter API key");
+    println!("    [1] BYOK - Bring your own OpenRouter API key");
     println!("        You pay OpenRouter directly. Typically <$0.10/session.");
     println!();
-    println!("    [2] Pro - $12/month with managed AI credits");
-    println!("        No API key needed. 50K tokens/month included.");
-    println!("        Get a license at: https://cosmos.dev/pro");
-    println!();
-    println!("    [3] Skip - Continue without AI features");
-    println!("        You can set up later with --setup or --activate.");
+    println!("    [2] Skip - Continue without AI features");
+    println!("        You can set up later with --setup.");
     println!();
 }
 
 fn prompt_choice() -> Result<OnboardingChoice, String> {
     loop {
-        print!("  Enter your choice [1/2/3]: ");
+        print!("  Enter your choice [1/2]: ");
         io::stdout().flush().map_err(|e| e.to_string())?;
         
         let mut input = String::new();
@@ -99,10 +93,9 @@ fn prompt_choice() -> Result<OnboardingChoice, String> {
         
         match input.trim() {
             "1" => return Ok(OnboardingChoice::Byok),
-            "2" => return Ok(OnboardingChoice::Pro),
-            "3" | "q" | "" => return Ok(OnboardingChoice::Skip),
+            "2" | "q" | "" => return Ok(OnboardingChoice::Skip),
             _ => {
-                println!("  Please enter 1, 2, or 3.");
+                println!("  Please enter 1 or 2.");
                 continue;
             }
         }
@@ -157,8 +150,8 @@ fn setup_byok() -> Result<(), String> {
     config.set_api_key(key)?;
     
     println!();
-    println!("  ✓ API key saved!");
-    println!("  ✓ Config location: {}", Config::config_location());
+    println!("  + API key saved!");
+    println!("  + Config location: {}", Config::config_location());
     println!();
     println!("  You're all set! Cosmos will now analyze your codebase.");
     println!();
@@ -168,56 +161,6 @@ fn setup_byok() -> Result<(), String> {
     let _ = io::stdin().read_line(&mut _input);
     
     Ok(())
-}
-
-fn setup_pro() -> Result<(), String> {
-    println!();
-    println!("  ─────────────────────────────────────────────────────────────────");
-    println!("  Activating Cosmos Pro");
-    println!("  ─────────────────────────────────────────────────────────────────");
-    println!();
-    println!("  If you have a license key, enter it below.");
-    println!("  Otherwise, get one at: https://cosmos.dev/pro");
-    println!();
-    
-    print!("  License Key (COSMOS-...): ");
-    io::stdout().flush().map_err(|e| e.to_string())?;
-    
-    let mut key = String::new();
-    io::stdin().read_line(&mut key).map_err(|e| e.to_string())?;
-    let key = key.trim();
-    
-    if key.is_empty() {
-        println!();
-        println!("  No key entered. You can activate later with: cosmos --activate <key>");
-        return Ok(());
-    }
-    
-    // Try to activate
-    let mut manager = LicenseManager::load();
-    match manager.activate(key) {
-        Ok(tier) => {
-            println!();
-            println!("  ✓ License activated!");
-            println!("  ✓ Tier: {}", tier.label().to_uppercase());
-            println!();
-            println!("  You're all set! Cosmos Pro features are now unlocked.");
-            println!();
-            print!("  Press Enter to continue...");
-            io::stdout().flush().map_err(|e| e.to_string())?;
-            let mut _input = String::new();
-            let _ = io::stdin().read_line(&mut _input);
-            Ok(())
-        }
-        Err(e) => {
-            println!();
-            println!("  ✗ Activation failed: {}", e);
-            println!();
-            println!("  You can try again with: cosmos --activate <key>");
-            println!("  Or set up BYOK mode with: cosmos --setup");
-            Ok(())
-        }
-    }
 }
 
 fn print_skip_message() {
@@ -230,8 +173,8 @@ fn print_skip_message() {
     println!("  but AI-powered suggestions won't be available.");
     println!();
     println!("  To enable AI features later:");
-    println!("    cosmos --setup     (BYOK mode - bring your own API key)");
-    println!("    cosmos --activate  (Pro mode - managed AI credits)");
+    println!("    cosmos --setup     (bring your own API key)");
+    println!("    OPENROUTER_API_KEY=... cosmos");
     println!();
     print!("  Press Enter to continue...");
     let _ = io::stdout().flush();

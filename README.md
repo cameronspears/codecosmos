@@ -18,11 +18,27 @@ Cosmos lives *outside* your editing loop. It reads git context, surfaces high-le
 ## Installation
 
 ```bash
+# Prereqs: Rust toolchain (https://rustup.rs), git
+# Optional: GitHub CLI for PR creation (https://cli.github.com)
+git clone <your-repo-url>
+cd cosmos
+
 # From source
-cargo install --path .
+cargo install --path . --locked
 
 # Or run directly
 cargo run --release
+```
+
+## Optional AI Setup (Fastest Path)
+
+```bash
+# Option A: one-liner (non-interactive)
+export OPENROUTER_API_KEY=sk-...
+cosmos
+
+# Option B: guided setup
+cosmos --setup
 ```
 
 ## Quick Start
@@ -144,27 +160,6 @@ cosmos --setup
 
 Guides you through getting an [OpenRouter API key](https://openrouter.ai/keys). Your key is saved locally.
 
-## License Management
-
-```bash
-# Activate a license
-cosmos --activate <KEY>
-
-# Check status
-cosmos --status
-
-# View usage
-cosmos --usage
-
-# Deactivate
-cosmos --deactivate
-```
-
-**Tiers:**
-- **Free** — BYOK mode, billed to your OpenRouter account
-- **Pro** — Bundled tokens, monthly allowance
-- **Team** — Higher limits, priority support
-
 ## Configuration
 
 Press `O` to see your config file location. Config options:
@@ -185,7 +180,6 @@ cosmos/
 │   ├── grouping/        # Architectural layer detection
 │   ├── history.rs       # Suggestion history (SQLite)
 │   ├── index/           # AST-based codebase indexing
-│   ├── license.rs       # License management
 │   ├── onboarding.rs    # First-run experience
 │   ├── safe_apply.rs    # Safety checks before applying
 │   ├── suggest/         # Suggestion engine (LLM + static rules)
@@ -222,10 +216,6 @@ Arguments:
 Options:
       --setup             Set up OpenRouter API key
       --stats             Show stats and exit (no TUI)
-      --activate <KEY>    Activate a Cosmos Pro license
-      --deactivate        Deactivate current license
-      --status            Show license and usage status
-      --usage             Show token usage statistics
   -h, --help              Print help
   -V, --version           Print version
 

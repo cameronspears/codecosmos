@@ -7,10 +7,14 @@
 
 pub mod heuristics;
 pub mod features;
+pub mod llm_enhance;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+
+// Re-export confidence for use by other modules
+pub use heuristics::Confidence;
 
 /// Generic filenames that need parent directory context
 const GENERIC_FILENAMES: &[&str] = &[
@@ -104,7 +108,7 @@ impl Layer {
             Layer::API => "⬡",       // Hexagon - Routes
             Layer::Database => "◈",  // Diamond with dot - Data
             Layer::Shared => "○",    // Circle - Shared
-            Layer::Config => "⚙",    // Gear - Settings
+            Layer::Config => "@",    // At sign - Settings
             Layer::Tests => "◎",     // Target - Tests
             Layer::Infra => "▣",     // Square with fill - Infra
             Layer::Unknown => "·",   // Dot - Unknown
@@ -241,13 +245,31 @@ impl FileGroup {
     }
 }
 
+/// File assignment with confidence tracking
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileAssignment {
+    pub layer: Layer,
+    pub feature: Option<String>,
+    pub confidence: Confidence,
+}
+
+impl Default for FileAssignment {
+    fn default() -> Self {
+        Self {
+            layer: Layer::Unknown,
+            feature: None,
+            confidence: Confidence::Low,
+        }
+    }
+}
+
 /// Complete file grouping for a codebase
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CodebaseGrouping {
     /// Groups organized by layer
     pub groups: HashMap<Layer, FileGroup>,
-    /// File -> (Layer, Option<Feature>) mapping for quick lookup
-    pub file_assignments: HashMap<PathBuf, (Layer, Option<String>)>,
+    /// File -> assignment mapping for quick lookup (with confidence)
+    pub file_assignments: HashMap<PathBuf, FileAssignment>,
     /// Whether LLM enhancement has been applied
     pub llm_enhanced: bool,
 }
@@ -261,9 +283,18 @@ impl CodebaseGrouping {
         }
     }
 
-    /// Assign a file to a layer (without feature)
+    /// Assign a file to a layer (without feature, default confidence)
     pub fn assign_file(&mut self, path: PathBuf, layer: Layer) {
-        self.file_assignments.insert(path.clone(), (layer, None));
+        self.assign_file_with_confidence(path, layer, Confidence::Medium);
+    }
+
+    /// Assign a file to a layer with explicit confidence
+    pub fn assign_file_with_confidence(&mut self, path: PathBuf, layer: Layer, confidence: Confidence) {
+        self.file_assignments.insert(path.clone(), FileAssignment {
+            layer,
+            feature: None,
+            confidence,
+        });
         self.groups
             .entry(layer)
             .or_insert_with(|| FileGroup::new(layer))
@@ -272,7 +303,16 @@ impl CodebaseGrouping {
 
     /// Assign a file to a layer and feature
     pub fn assign_file_to_feature(&mut self, path: PathBuf, layer: Layer, feature_name: &str) {
-        self.file_assignments.insert(path.clone(), (layer, Some(feature_name.to_string())));
+        // Preserve existing confidence if available
+        let confidence = self.file_assignments.get(&path)
+            .map(|a| a.confidence)
+            .unwrap_or(Confidence::Medium);
+            
+        self.file_assignments.insert(path.clone(), FileAssignment {
+            layer,
+            feature: Some(feature_name.to_string()),
+            confidence,
+        });
         
         let group = self.groups
             .entry(layer)
@@ -289,7 +329,20 @@ impl CodebaseGrouping {
 
     /// Get the layer for a file
     pub fn get_layer(&self, path: &PathBuf) -> Option<Layer> {
-        self.file_assignments.get(path).map(|(layer, _)| *layer)
+        self.file_assignments.get(path).map(|a| a.layer)
+    }
+
+    /// Get the confidence for a file's layer assignment
+    pub fn get_confidence(&self, path: &PathBuf) -> Option<Confidence> {
+        self.file_assignments.get(path).map(|a| a.confidence)
+    }
+
+    /// Get files with low confidence (candidates for LLM enhancement)
+    pub fn low_confidence_files(&self) -> Vec<&PathBuf> {
+        self.file_assignments.iter()
+            .filter(|(_, a)| a.confidence == Confidence::Low)
+            .map(|(p, _)| p)
+            .collect()
     }
 
     /// Get groups in display order
@@ -309,6 +362,37 @@ impl CodebaseGrouping {
     /// Total file count
     pub fn total_files(&self) -> usize {
         self.file_assignments.len()
+    }
+    
+    /// Reassign a file to a different layer (for LLM corrections)
+    pub fn reassign_file(&mut self, path: &PathBuf, new_layer: Layer, confidence: Confidence) {
+        // Remove from old group
+        if let Some(old_assignment) = self.file_assignments.get(path) {
+            let old_layer = old_assignment.layer;
+            if old_layer != new_layer {
+                if let Some(group) = self.groups.get_mut(&old_layer) {
+                    // Remove from ungrouped files
+                    group.ungrouped_files.retain(|p| p != path);
+                    // Remove from any features
+                    for feature in &mut group.features {
+                        feature.files.retain(|p| p != path);
+                    }
+                }
+            }
+        }
+        
+        // Update assignment
+        self.file_assignments.insert(path.clone(), FileAssignment {
+            layer: new_layer,
+            feature: None,
+            confidence,
+        });
+        
+        // Add to new group
+        self.groups
+            .entry(new_layer)
+            .or_insert_with(|| FileGroup::new(new_layer))
+            .add_file(path.clone());
     }
 }
 

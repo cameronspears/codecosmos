@@ -863,10 +863,10 @@ impl CodebaseIndex {
 
     /// Apply grouping information to file indexes
     pub fn apply_grouping(&mut self, grouping: &crate::grouping::CodebaseGrouping) {
-        for (path, (layer, feature)) in &grouping.file_assignments {
+        for (path, assignment) in &grouping.file_assignments {
             if let Some(file_index) = self.files.get_mut(path) {
-                file_index.layer = Some(*layer);
-                file_index.feature = feature.clone();
+                file_index.layer = Some(assignment.layer);
+                file_index.feature = assignment.feature.clone();
             }
         }
     }

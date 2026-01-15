@@ -138,7 +138,7 @@ pub fn setup_api_key_interactive() -> Result<String, String> {
 
     println!();
     println!("  ┌─────────────────────────────────────────────────────────┐");
-    println!("  │  🔑 OPENROUTER SETUP                                    │");
+    println!("  │  OPENROUTER SETUP                                       │");
     println!("  └─────────────────────────────────────────────────────────┘");
     println!();
     println!("  codecosmos uses OpenRouter for AI-powered suggestions.");
@@ -170,7 +170,7 @@ pub fn setup_api_key_interactive() -> Result<String, String> {
     config.set_api_key(&key)?;
 
     println!();
-    println!("  ✓ API key saved to {}", Config::config_location());
+    println!("  + API key saved to {}", Config::config_location());
     println!();
 
     Ok(key)
