@@ -19,6 +19,78 @@ const SUGGESTIONS_CACHE_FILE: &str = "suggestions.json";
 const SUMMARIES_CACHE_FILE: &str = "summaries.json";
 const SETTINGS_FILE: &str = "settings.json";
 const MEMORY_FILE: &str = "memory.json";
+const GLOSSARY_FILE: &str = "glossary.json";
+const HISTORY_DB_FILE: &str = "history.db";
+
+/// Options for selective cache reset
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResetOption {
+    /// Clear index.json - codebase structure, symbols, patterns
+    Index,
+    /// Clear suggestions.json - generated suggestions
+    Suggestions,
+    /// Clear summaries.json + llm_summaries.json - file summaries
+    Summaries,
+    /// Clear glossary.json - domain terminology
+    Glossary,
+    /// Clear history.db - suggestion history/analytics
+    History,
+    /// Clear settings.json - dismissed/applied suggestions
+    Settings,
+    /// Clear memory.json - repo decisions/conventions
+    Memory,
+}
+
+impl ResetOption {
+    /// Get human-readable label for the option
+    pub fn label(&self) -> &'static str {
+        match self {
+            ResetOption::Index => "Index & Symbols",
+            ResetOption::Suggestions => "Suggestions",
+            ResetOption::Summaries => "File Summaries",
+            ResetOption::Glossary => "Domain Glossary",
+            ResetOption::History => "Suggestion History",
+            ResetOption::Settings => "User Settings",
+            ResetOption::Memory => "Repo Memory",
+        }
+    }
+
+    /// Get description for the option
+    pub fn description(&self) -> &'static str {
+        match self {
+            ResetOption::Index => "rebuild file tree",
+            ResetOption::Suggestions => "regenerate with AI",
+            ResetOption::Summaries => "regenerate with AI",
+            ResetOption::Glossary => "extract terminology",
+            ResetOption::History => "clear analytics",
+            ResetOption::Settings => "dismissed/applied",
+            ResetOption::Memory => "decisions/conventions",
+        }
+    }
+
+    /// Get all options in display order
+    pub fn all() -> Vec<ResetOption> {
+        vec![
+            ResetOption::Index,
+            ResetOption::Suggestions,
+            ResetOption::Summaries,
+            ResetOption::Glossary,
+            ResetOption::History,
+            ResetOption::Settings,
+            ResetOption::Memory,
+        ]
+    }
+
+    /// Get default options (safe to reset without losing user data)
+    pub fn defaults() -> Vec<ResetOption> {
+        vec![
+            ResetOption::Index,
+            ResetOption::Suggestions,
+            ResetOption::Summaries,
+            ResetOption::Glossary,
+        ]
+    }
+}
 
 /// Cache validity duration (24 hours for index, 7 days for suggestions)
 const INDEX_CACHE_HOURS: i64 = 24;
@@ -379,6 +451,111 @@ impl RepoMemory {
     }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+//  DOMAIN GLOSSARY - Auto-extracted terminology from codebase
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// A single domain term with its definition and source files
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GlossaryEntry {
+    /// Plain-language definition of this term
+    pub definition: String,
+    /// Files where this term is used/defined
+    pub files: Vec<PathBuf>,
+}
+
+/// Auto-generated domain glossary extracted during summarization
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DomainGlossary {
+    /// Map of term name to its entry
+    pub terms: HashMap<String, GlossaryEntry>,
+    /// When this glossary was generated
+    pub generated_at: DateTime<Utc>,
+}
+
+impl DomainGlossary {
+    /// Create a new empty glossary
+    pub fn new() -> Self {
+        Self {
+            terms: HashMap::new(),
+            generated_at: Utc::now(),
+        }
+    }
+
+    /// Add or update a term
+    pub fn add_term(&mut self, name: String, definition: String, file: PathBuf) {
+        if let Some(entry) = self.terms.get_mut(&name) {
+            // Update existing: add file if not already present
+            if !entry.files.contains(&file) {
+                entry.files.push(file);
+            }
+        } else {
+            // New term
+            self.terms.insert(name, GlossaryEntry {
+                definition,
+                files: vec![file],
+            });
+        }
+        self.generated_at = Utc::now();
+    }
+
+    /// Merge terms from another glossary (used when processing batches)
+    pub fn merge(&mut self, other: &DomainGlossary) {
+        for (name, entry) in &other.terms {
+            if let Some(existing) = self.terms.get_mut(name) {
+                // Merge files
+                for file in &entry.files {
+                    if !existing.files.contains(file) {
+                        existing.files.push(file.clone());
+                    }
+                }
+            } else {
+                self.terms.insert(name.clone(), entry.clone());
+            }
+        }
+        self.generated_at = Utc::now();
+    }
+
+    /// Format glossary for inclusion in LLM prompts
+    pub fn to_prompt_context(&self, max_terms: usize) -> String {
+        if self.terms.is_empty() {
+            return String::new();
+        }
+
+        let mut lines = Vec::new();
+        
+        // Sort by number of files (most used terms first)
+        let mut sorted: Vec<_> = self.terms.iter().collect();
+        sorted.sort_by(|a, b| b.1.files.len().cmp(&a.1.files.len()));
+
+        for (name, entry) in sorted.into_iter().take(max_terms) {
+            lines.push(format!("- {}: {}", name, entry.definition));
+        }
+
+        if lines.is_empty() {
+            String::new()
+        } else {
+            format!("DOMAIN TERMINOLOGY (use these terms, not generic descriptions):\n{}", lines.join("\n"))
+        }
+    }
+
+    /// Check if glossary is empty
+    pub fn is_empty(&self) -> bool {
+        self.terms.is_empty()
+    }
+
+    /// Get term count
+    pub fn len(&self) -> usize {
+        self.terms.len()
+    }
+}
+
+impl Default for DomainGlossary {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// The cache manager
 pub struct Cache {
     cache_dir: PathBuf,
@@ -556,6 +733,26 @@ impl Cache {
         Ok(())
     }
 
+    /// Load domain glossary from `.cosmos/glossary.json`
+    pub fn load_glossary(&self) -> Option<DomainGlossary> {
+        let path = self.cache_dir.join(GLOSSARY_FILE);
+        if !path.exists() {
+            return None;
+        }
+        fs::read_to_string(&path)
+            .ok()
+            .and_then(|content| serde_json::from_str(&content).ok())
+    }
+
+    /// Save domain glossary to `.cosmos/glossary.json`
+    pub fn save_glossary(&self, glossary: &DomainGlossary) -> anyhow::Result<()> {
+        self.ensure_dir()?;
+        let path = self.cache_dir.join(GLOSSARY_FILE);
+        let content = serde_json::to_string_pretty(glossary)?;
+        fs::write(path, content)?;
+        Ok(())
+    }
+
     /// Add a dismissed suggestion ID
     pub fn dismiss_suggestion(&self, id: uuid::Uuid) -> anyhow::Result<()> {
         let mut settings = self.load_settings();
@@ -582,6 +779,33 @@ impl Cache {
             fs::remove_dir_all(&self.cache_dir)?;
         }
         Ok(())
+    }
+
+    /// Clear selected cache files only
+    pub fn clear_selective(&self, options: &[ResetOption]) -> anyhow::Result<Vec<String>> {
+        let mut cleared = Vec::new();
+
+        for option in options {
+            let files_to_remove: Vec<&str> = match option {
+                ResetOption::Index => vec![INDEX_CACHE_FILE],
+                ResetOption::Suggestions => vec![SUGGESTIONS_CACHE_FILE],
+                ResetOption::Summaries => vec![SUMMARIES_CACHE_FILE, LLM_SUMMARIES_CACHE_FILE],
+                ResetOption::Glossary => vec![GLOSSARY_FILE],
+                ResetOption::History => vec![HISTORY_DB_FILE],
+                ResetOption::Settings => vec![SETTINGS_FILE],
+                ResetOption::Memory => vec![MEMORY_FILE],
+            };
+
+            for file in files_to_remove {
+                let path = self.cache_dir.join(file);
+                if path.exists() {
+                    fs::remove_file(&path)?;
+                    cleared.push(file.to_string());
+                }
+            }
+        }
+
+        Ok(cleared)
     }
 
     /// Get cache stats

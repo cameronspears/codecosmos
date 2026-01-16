@@ -295,6 +295,8 @@ async fn run_tui(
     let mut app = App::new(index.clone(), suggestions, context.clone());
     // Load repo-local “memory” (decisions/conventions) from .cosmos/
     app.repo_memory = cache_manager.load_repo_memory();
+    // Load cached domain glossary (auto-extracted terminology)
+    app.glossary = cache_manager.load_glossary().unwrap_or_default();
     
     // Check if we have API access (and budgets allow it)
     let mut ai_enabled = suggest::llm::is_available();
@@ -367,50 +369,22 @@ async fn run_tui(
         eprintln!("  All {} summaries loaded from cache", cached_count);
     }
     
-    if ai_enabled {
-        app.loading = LoadingState::GeneratingSuggestions;
-    }
-    
     eprintln!();
 
     // Create channel for background tasks
     let (tx, rx) = mpsc::channel::<BackgroundMessage>();
 
-    // Spawn background task for suggestions if AI enabled
+    // ═══════════════════════════════════════════════════════════════════════
+    //  SEQUENTIAL INIT: Summaries first (builds glossary), then suggestions
+    // ═══════════════════════════════════════════════════════════════════════
+    
     if ai_enabled {
-        let index_clone = index.clone();
-        let context_clone = context.clone();
-        let tx_suggestions = tx.clone();
-        let cache_clone_path = repo_path.clone();
-        let repo_memory_context = app.repo_memory.to_prompt_context(12, 900);
-        
-        tokio::spawn(async move {
-            let mem = if repo_memory_context.trim().is_empty() {
-                None
-            } else {
-                Some(repo_memory_context)
-            };
-            match suggest::llm::analyze_codebase(&index_clone, &context_clone, mem).await {
-                Ok((suggestions, usage)) => {
-                    // Cache the suggestions
-                    let cache = cache::Cache::new(&cache_clone_path);
-                    let cache_data = cache::SuggestionsCache::from_suggestions(&suggestions);
-                    let _ = cache.save_suggestions_cache(&cache_data);
-                    
-                    let _ = tx_suggestions.send(BackgroundMessage::SuggestionsReady {
-                        suggestions,
-                        usage,
-                        model: "smart".to_string(),
-                    });
-                }
-                Err(e) => {
-                    let _ = tx_suggestions.send(BackgroundMessage::SuggestionsError(e.to_string()));
-                }
-            }
-        });
-        
-        // Only generate summaries for files that need them (smart caching!)
         if !files_needing_summary.is_empty() {
+            // Phase 1: Summaries needed - generate them first, suggestions come after
+            app.loading = LoadingState::GeneratingSummaries;
+            app.pending_suggestions_on_init = true;
+            app.summary_progress = Some((0, needs_summary_count));
+            
             let index_clone2 = index.clone();
             let context_clone2 = context.clone();
             let tx_summaries = tx.clone();
@@ -423,7 +397,7 @@ async fn run_tui(
             
             // Show initial cached count
             if cached_count > 0 {
-                app.show_toast(&format!("{}/{} cached · generating {}", cached_count, total_files, needs_summary_count));
+                app.show_toast(&format!("{}/{} cached · summarizing {}", cached_count, total_files, needs_summary_count));
             }
             
             // Calculate total file count for progress
@@ -435,6 +409,10 @@ async fn run_tui(
                 // Load existing cache to update incrementally
                 let mut llm_cache = cache.load_llm_summaries_cache()
                     .unwrap_or_else(cache::LlmSummaryCache::new);
+                
+                // Load existing glossary to merge new terms into
+                let mut glossary = cache.load_glossary()
+                    .unwrap_or_else(cache::DomainGlossary::new);
                 
                 let mut all_summaries = HashMap::new();
                 let mut total_usage = suggest::llm::Usage::default();
@@ -458,7 +436,7 @@ async fn run_tui(
                     
                     // Process batches sequentially (llm.rs handles internal parallelism)
                     for batch in batches {
-                        if let Ok((summaries, usage)) = suggest::llm::generate_summaries_for_files(
+                        if let Ok((summaries, batch_glossary, usage)) = suggest::llm::generate_summaries_for_files(
                             &index_clone2, batch, &project_context
                         ).await {
                             // Update cache with new summaries
@@ -467,8 +445,12 @@ async fn run_tui(
                                     llm_cache.set_summary(path.clone(), summary.clone(), hash.clone());
                                 }
                             }
+                            // Merge new terms into glossary
+                            glossary.merge(&batch_glossary);
+                            
                             // Save cache incrementally after each batch
                             let _ = cache.save_llm_summaries_cache(&llm_cache);
+                            let _ = cache.save_glossary(&glossary);
                             
                             completed_count += summaries.len();
                             
@@ -502,9 +484,45 @@ async fn run_tui(
                 });
             });
         } else {
-            // All summaries are cached, no need to generate anything
-            // Note: loading state will be set to None when suggestions finish
-            // since needs_summary_generation is false
+            // Phase 2 only: All summaries cached - generate suggestions directly with cached glossary
+            app.loading = LoadingState::GeneratingSuggestions;
+            
+            let index_clone = index.clone();
+            let context_clone = context.clone();
+            let tx_suggestions = tx.clone();
+            let cache_clone_path = repo_path.clone();
+            let repo_memory_context = app.repo_memory.to_prompt_context(12, 900);
+            let glossary_clone = app.glossary.clone();
+            
+            if !glossary_clone.is_empty() {
+                app.show_toast(&format!("{} glossary terms · generating suggestions", glossary_clone.len()));
+            }
+            
+            tokio::spawn(async move {
+                let mem = if repo_memory_context.trim().is_empty() {
+                    None
+                } else {
+                    Some(repo_memory_context)
+                };
+                let glossary_ref = if glossary_clone.is_empty() { None } else { Some(&glossary_clone) };
+                match suggest::llm::analyze_codebase(&index_clone, &context_clone, mem, glossary_ref).await {
+                    Ok((suggestions, usage)) => {
+                        // Cache the suggestions
+                        let cache = cache::Cache::new(&cache_clone_path);
+                        let cache_data = cache::SuggestionsCache::from_suggestions(&suggestions);
+                        let _ = cache.save_suggestions_cache(&cache_data);
+                        
+                        let _ = tx_suggestions.send(BackgroundMessage::SuggestionsReady {
+                            suggestions,
+                            usage,
+                            model: "smart".to_string(),
+                        });
+                    }
+                    Err(e) => {
+                        let _ = tx_suggestions.send(BackgroundMessage::SuggestionsError(e.to_string()));
+                    }
+                }
+            });
         }
     }
 
@@ -570,16 +588,25 @@ app.suggestions.sort_with_context(&app.context);
                         let _ = app.config.allow_ai(app.session_cost).map_err(|e| app.show_toast(&e));
                     }
                     
-                    // Summaries generate silently in background - no blocking overlay
-                    app.loading = LoadingState::None;
+                    // If summaries are still generating, switch to that loading state
+                    // Otherwise, clear loading
+                    if app.needs_summary_generation && app.summary_progress.is_some() {
+                        app.loading = LoadingState::GeneratingSummaries;
+                    } else {
+                        app.loading = LoadingState::None;
+                    }
                     
                     // More prominent toast for suggestions
                     app.show_toast(&format!("{} suggestions ready ({})", count, &model));
                     app.active_model = Some(model);
                 }
                 BackgroundMessage::SuggestionsError(e) => {
-                    // Summaries generate silently in background - no blocking overlay
-                    app.loading = LoadingState::None;
+                    // If summaries are still generating, switch to that loading state
+                    if app.needs_summary_generation && app.summary_progress.is_some() {
+                        app.loading = LoadingState::GeneratingSummaries;
+                    } else {
+                        app.loading = LoadingState::None;
+                    }
                     app.show_toast(&format!("Error: {}", truncate(&e, 80)));
                 }
                 BackgroundMessage::SummariesReady { summaries, usage } => {
@@ -595,23 +622,81 @@ app.suggestions.sort_with_context(&app.context);
                         let _ = app.config.allow_ai(app.session_cost).map_err(|e| app.show_toast(&e));
                     }
                     
-                    // Only clear loading if we're not still waiting for suggestions
-                    // (suggestions set GeneratingSuggestions; only they should clear it)
-                    if !matches!(app.loading, LoadingState::GeneratingSuggestions) {
-                        app.loading = LoadingState::None;
+                    // Reload glossary from cache (it was built during summary generation)
+                    let cache = cache::Cache::new(&repo_path);
+                    if let Some(new_glossary) = cache.load_glossary() {
+                        app.glossary = new_glossary;
                     }
+                    
                     app.summary_progress = None;
-                    if new_count > 0 {
-                        app.show_toast(&format!("{} new summaries · ${:.4}", new_count, app.session_cost));
+                    app.needs_summary_generation = false;
+                    
+                    // If we're waiting to generate suggestions after reset, do it now
+                    if app.pending_suggestions_on_init {
+                        app.pending_suggestions_on_init = false;
+                        
+                        // Check if AI is still available
+                        let ai_enabled = suggest::llm::is_available() && app.config.allow_ai(app.session_cost).is_ok();
+                        
+                        if ai_enabled {
+                            let index_clone = app.index.clone();
+                            let context_clone = app.context.clone();
+                            let tx_suggestions = tx.clone();
+                            let cache_clone_path = repo_path.clone();
+                            let repo_memory_context = app.repo_memory.to_prompt_context(12, 900);
+                            let glossary_clone = app.glossary.clone();
+                            
+                            app.loading = LoadingState::GeneratingSuggestions;
+                            app.show_toast(&format!("{} terms in glossary · generating suggestions...", glossary_clone.len()));
+                            
+                            tokio::spawn(async move {
+                                let mem = if repo_memory_context.trim().is_empty() {
+                                    None
+                                } else {
+                                    Some(repo_memory_context)
+                                };
+                                let glossary_ref = if glossary_clone.is_empty() { None } else { Some(&glossary_clone) };
+                                match suggest::llm::analyze_codebase(&index_clone, &context_clone, mem, glossary_ref).await {
+                                    Ok((suggestions, usage)) => {
+                                        // Cache the suggestions
+                                        let cache = cache::Cache::new(&cache_clone_path);
+                                        let cache_data = cache::SuggestionsCache::from_suggestions(&suggestions);
+                                        let _ = cache.save_suggestions_cache(&cache_data);
+                                        
+                                        let _ = tx_suggestions.send(BackgroundMessage::SuggestionsReady {
+                                            suggestions,
+                                            usage,
+                                            model: "smart".to_string(),
+                                        });
+                                    }
+                                    Err(e) => {
+                                        let _ = tx_suggestions.send(BackgroundMessage::SuggestionsError(e.to_string()));
+                                    }
+                                }
+                            });
+                        } else {
+                            app.loading = LoadingState::None;
+                            if new_count > 0 {
+                                app.show_toast(&format!("{} summaries · {} glossary terms", new_count, app.glossary.len()));
+                            }
+                        }
                     } else {
-                        app.show_toast("All summaries loaded from cache");
+                        // Not waiting for suggestions, just finish up
+                        if !matches!(app.loading, LoadingState::GeneratingSuggestions) {
+                            app.loading = LoadingState::None;
+                        }
+                        if new_count > 0 {
+                            app.show_toast(&format!("{} summaries · {} glossary terms", new_count, app.glossary.len()));
+                        } else {
+                            app.show_toast(&format!("Summaries ready · {} glossary terms", app.glossary.len()));
+                        }
                     }
                 }
-                BackgroundMessage::SummaryProgress { completed, total: _, summaries } => {
-                    // Silently merge new summaries as they arrive (no progress UI)
+                BackgroundMessage::SummaryProgress { completed, total, summaries } => {
+                    // Merge new summaries as they arrive
                     app.update_summaries(summaries);
-                    // Track progress internally but don't display it
-                    app.summary_progress = Some((completed, 0)); // Keep for internal tracking only
+                    // Track progress for display
+                    app.summary_progress = Some((completed, total));
                 }
                 BackgroundMessage::SummariesError(e) => {
                     // Only clear loading if we're not still waiting for suggestions
@@ -1767,6 +1852,244 @@ app.suggestions.sort_with_context(&app.context);
                         }
                         continue;
                     }
+
+                    // Handle Reset cosmos overlay
+                    if let ui::Overlay::Reset { .. } = &app.overlay {
+                        match key.code {
+                            KeyCode::Esc | KeyCode::Char('q') => {
+                                app.close_overlay();
+                            }
+                            KeyCode::Down => {
+                                app.reset_navigate(1);
+                            }
+                            KeyCode::Up => {
+                                app.reset_navigate(-1);
+                            }
+                            KeyCode::Char(' ') => {
+                                app.reset_toggle_selected();
+                            }
+                            KeyCode::Enter => {
+                                // Execute reset with selected options
+                                let selections = app.get_reset_selections();
+                                if selections.is_empty() {
+                                    app.show_toast("No options selected");
+                                } else {
+                                    // Clear selected caches
+                                    let cache = crate::cache::Cache::new(&app.repo_path);
+                                    match cache.clear_selective(&selections) {
+                                        Ok(cleared) => {
+                                            app.close_overlay();
+                                            
+                                            // Check if we need to regenerate things
+                                            let needs_reindex = selections.contains(&crate::cache::ResetOption::Index);
+                                            let needs_suggestions = selections.contains(&crate::cache::ResetOption::Suggestions);
+                                            let needs_summaries = selections.contains(&crate::cache::ResetOption::Summaries);
+                                            let needs_glossary = selections.contains(&crate::cache::ResetOption::Glossary);
+                                            
+                                            // Perform reindex if needed
+                                            if needs_reindex {
+                                                match index::CodebaseIndex::new(&app.repo_path) {
+                                                    Ok(new_index) => {
+                                                        // Apply grouping
+                                                        let mut idx = new_index;
+                                                        let grouping = idx.generate_grouping();
+                                                        idx.apply_grouping(&grouping);
+                                                        app.index = idx;
+                                                        app.grouping = grouping;
+                                                    }
+                                                    Err(e) => {
+                                                        app.show_toast(&format!("Reindex failed: {}", e));
+                                                    }
+                                                }
+                                            }
+                                            
+                                            // Clear in-memory suggestions if needed
+                                            if needs_suggestions {
+                                                app.suggestions = suggest::SuggestionEngine::new_empty(app.index.clone());
+                                            }
+                                            
+                                            // Clear in-memory summaries if needed
+                                            if needs_summaries {
+                                                app.llm_summaries.clear();
+                                                app.needs_summary_generation = true;
+                                                app.summary_progress = None;
+                                            }
+                                            
+                                            // Clear in-memory glossary if needed
+                                            if needs_glossary {
+                                                app.glossary = crate::cache::DomainGlossary::default();
+                                            }
+                                            
+                                            // Refresh context
+                                            let _ = app.context.refresh();
+                                            
+                                            // Check if AI is available for regeneration
+                                            let ai_enabled = suggest::llm::is_available() && app.config.allow_ai(app.session_cost).is_ok();
+                                            
+                                            // IMPORTANT: Summaries must generate FIRST (they build the glossary),
+                                            // THEN suggestions can use the rebuilt glossary.
+                                            // We track pending_suggestions_on_init to trigger suggestions after summaries complete.
+                                            
+                                            // Trigger regeneration of summaries first (builds glossary)
+                                            if needs_summaries && ai_enabled {
+                                                let index_clone2 = app.index.clone();
+                                                let context_clone2 = app.context.clone();
+                                                let tx_summaries = tx.clone();
+                                                let cache_path = repo_path.clone();
+                                                
+                                                // Compute file hashes for change detection
+                                                let file_hashes = cache::compute_file_hashes(&index_clone2);
+                                                let file_hashes_clone = file_hashes.clone();
+                                                
+                                                // All files need summaries after reset
+                                                let files_needing_summary: Vec<PathBuf> = file_hashes.keys().cloned().collect();
+                                                
+                                                // Discover project context
+                                                let project_context = suggest::llm::discover_project_context(&index_clone2);
+                                                
+                                                // Prioritize files for generation
+                                                let (high_priority, medium_priority, low_priority) = 
+                                                    suggest::llm::prioritize_files_for_summary(&index_clone2, &context_clone2, &files_needing_summary);
+                                                
+                                                let total_to_process = high_priority.len() + medium_priority.len() + low_priority.len();
+                                                
+                                                if total_to_process > 0 {
+                                                    app.loading = LoadingState::GeneratingSummaries;
+                                                    app.summary_progress = Some((0, total_to_process));
+                                                    
+                                                    // Flag that suggestions should generate after summaries complete
+                                                    if needs_suggestions {
+                                                        app.pending_suggestions_on_init = true;
+                                                    }
+                                                    
+                                                    tokio::spawn(async move {
+                                                        let cache = cache::Cache::new(&cache_path);
+                                                        
+                                                        // Start with fresh cache after reset
+                                                        let mut llm_cache = cache::LlmSummaryCache::new();
+                                                        let mut glossary = cache::DomainGlossary::new();
+                                                        
+                                                        let mut all_summaries = HashMap::new();
+                                                        let mut total_usage = suggest::llm::Usage::default();
+                                                        let mut completed_count = 0usize;
+                                                        
+                                                        let priority_tiers = [
+                                                            ("high", high_priority),
+                                                            ("medium", medium_priority), 
+                                                            ("low", low_priority),
+                                                        ];
+                                                        
+                                                        for (_tier_name, files) in priority_tiers {
+                                                            if files.is_empty() {
+                                                                continue;
+                                                            }
+                                                            
+                                                            let batch_size = 16;
+                                                            let batches: Vec<_> = files.chunks(batch_size).collect();
+                                                            
+                                                            for batch in batches {
+                                                                if let Ok((summaries, batch_glossary, usage)) = suggest::llm::generate_summaries_for_files(
+                                                                    &index_clone2, batch, &project_context
+                                                                ).await {
+                                                                    for (path, summary) in &summaries {
+                                                                        if let Some(hash) = file_hashes_clone.get(path) {
+                                                                            llm_cache.set_summary(path.clone(), summary.clone(), hash.clone());
+                                                                        }
+                                                                    }
+                                                                    glossary.merge(&batch_glossary);
+                                                                    
+                                                                    let _ = cache.save_llm_summaries_cache(&llm_cache);
+                                                                    let _ = cache.save_glossary(&glossary);
+                                                                    
+                                                                    completed_count += summaries.len();
+                                                                    
+                                                                    let _ = tx_summaries.send(BackgroundMessage::SummaryProgress {
+                                                                        completed: completed_count,
+                                                                        total: total_to_process,
+                                                                        summaries: summaries.clone(),
+                                                                    });
+                                                                    
+                                                                    all_summaries.extend(summaries);
+                                                                    if let Some(u) = usage {
+                                                                        total_usage.prompt_tokens += u.prompt_tokens;
+                                                                        total_usage.completion_tokens += u.completion_tokens;
+                                                                        total_usage.total_tokens += u.total_tokens;
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                        
+                                                        let final_usage = if total_usage.total_tokens > 0 {
+                                                            Some(total_usage)
+                                                        } else {
+                                                            None
+                                                        };
+                                                        
+                                                        let _ = tx_summaries.send(BackgroundMessage::SummariesReady { 
+                                                            summaries: HashMap::new(), 
+                                                            usage: final_usage 
+                                                        });
+                                                    });
+                                                }
+                                            } else if needs_suggestions && ai_enabled {
+                                                // No summaries to generate, so generate suggestions directly
+                                                let index_clone = app.index.clone();
+                                                let context_clone = app.context.clone();
+                                                let tx_suggestions = tx.clone();
+                                                let cache_clone_path = repo_path.clone();
+                                                let repo_memory_context = app.repo_memory.to_prompt_context(12, 900);
+                                                let glossary_clone = app.glossary.clone();
+                                                
+                                                app.loading = LoadingState::GeneratingSuggestions;
+                                                
+                                                tokio::spawn(async move {
+                                                    let mem = if repo_memory_context.trim().is_empty() {
+                                                        None
+                                                    } else {
+                                                        Some(repo_memory_context)
+                                                    };
+                                                    let glossary_ref = if glossary_clone.is_empty() { None } else { Some(&glossary_clone) };
+                                                    match suggest::llm::analyze_codebase(&index_clone, &context_clone, mem, glossary_ref).await {
+                                                        Ok((suggestions, usage)) => {
+                                                            // Cache the suggestions
+                                                            let cache = cache::Cache::new(&cache_clone_path);
+                                                            let cache_data = cache::SuggestionsCache::from_suggestions(&suggestions);
+                                                            let _ = cache.save_suggestions_cache(&cache_data);
+                                                            
+                                                            let _ = tx_suggestions.send(BackgroundMessage::SuggestionsReady {
+                                                                suggestions,
+                                                                usage,
+                                                                model: "smart".to_string(),
+                                                            });
+                                                        }
+                                                        Err(e) => {
+                                                            let _ = tx_suggestions.send(BackgroundMessage::SuggestionsError(e.to_string()));
+                                                        }
+                                                    }
+                                                });
+                                            }
+                                            
+                                            // Show what was cleared
+                                            let count = cleared.len();
+                                            if count > 0 {
+                                                if !needs_suggestions && !needs_summaries {
+                                                    app.show_toast(&format!("Reset complete: {} files cleared", count));
+                                                }
+                                                // If regenerating, toast was already shown above
+                                            } else {
+                                                app.show_toast("Reset complete (caches were already empty)");
+                                            }
+                                        }
+                                        Err(e) => {
+                                            app.show_toast(&format!("Reset failed: {}", e));
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
                     
                     // Handle other overlays
                     match key.code {
@@ -1876,13 +2199,11 @@ app.suggestions.sort_with_context(&app.context);
                         }
                     }
                     KeyCode::Char(' ') => {
-                        // Handle space based on context
+                        // Space toggles finding selection in Review step
                         if app.active_panel == ActivePanel::Suggestions && app.workflow_step == WorkflowStep::Review {
                             if !app.review_state.reviewing && !app.review_state.fixing {
                                 app.review_toggle_finding();
                             }
-                        } else {
-                            app.toggle_group_expand();
                         }
                     }
                     KeyCode::Char('f') => {
@@ -1937,7 +2258,7 @@ app.suggestions.sort_with_context(&app.context);
                             let _ = git_ops::open_url(&url);
                         } else {
                             match app.active_panel {
-                                ActivePanel::Project => app.show_file_detail(),
+                                ActivePanel::Project => app.toggle_group_expand(),
                                 ActivePanel::Suggestions => {
                                     // Handle based on workflow step
                                     match app.workflow_step {
@@ -2227,12 +2548,9 @@ app.suggestions.sort_with_context(&app.context);
                         // Repo memory (decisions/conventions)
                         app.show_repo_memory();
                     }
-                    KeyCode::Char('r') => {
-                        if let Err(e) = app.context.refresh() {
-                            app.show_toast(&format!("Refresh failed: {}", e));
-                        } else {
-                            app.show_toast("Refreshed");
-                        }
+                    KeyCode::Char('R') => {
+                        // Open reset cosmos overlay
+                        app.open_reset_overlay();
                     }
                     KeyCode::Char('e') => {
                         // Show error log overlay

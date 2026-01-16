@@ -84,26 +84,26 @@ impl Theme {
     pub const ACCENT: Color = Color::Rgb(140, 180, 255);
 
     // ─────────────────────────────────────────────────────────────────────
-    // Badge colors for categorization
+    // Badge colors for categorization (monochromatic)
     // ─────────────────────────────────────────────────────────────────────
 
     /// Refactor badge color
-    pub const BADGE_REFACTOR: Color = Color::Rgb(180, 140, 255);  // Soft purple
+    pub const BADGE_REFACTOR: Color = Self::GREY_200;
     
     /// Quality badge color
-    pub const BADGE_QUALITY: Color = Color::Rgb(100, 180, 255);   // Soft blue
+    pub const BADGE_QUALITY: Color = Self::GREY_300;
     
     /// Security badge color
-    pub const BADGE_SECURITY: Color = Color::Rgb(255, 160, 100);  // Soft orange
+    pub const BADGE_SECURITY: Color = Self::GREY_100;
     
     /// Performance badge color
-    pub const BADGE_PERF: Color = Color::Rgb(130, 220, 180);      // Soft teal
+    pub const BADGE_PERF: Color = Self::GREY_300;
     
     /// Documentation badge color
-    pub const BADGE_DOCS: Color = Color::Rgb(255, 200, 100);      // Soft yellow
+    pub const BADGE_DOCS: Color = Self::GREY_400;
     
     /// Bug badge color
-    pub const BADGE_BUG: Color = Color::Rgb(255, 130, 130);       // Soft red
+    pub const BADGE_BUG: Color = Self::GREY_100;
 
     // ─────────────────────────────────────────────────────────────────────
     // Pre-built styles for common UI elements
@@ -340,6 +340,10 @@ impl Theme {
     pub const WORKFLOW_VERIFY: &'static str = "𝘷𝘦𝘳𝘪𝘧𝘺";
     pub const WORKFLOW_REVIEW: &'static str = "𝘳𝘦𝘷𝘪𝘦𝘸";
     pub const WORKFLOW_SHIP: &'static str = "𝘴𝘩𝘪𝘱";
+    
+    /// View mode labels - italic style
+    pub const VIEW_FLAT: &'static str = "𝘧𝘭𝘢𝘵";
+    pub const VIEW_GROUPED: &'static str = "𝘨𝘳𝘰𝘶𝘱𝘦𝘥";
 
     /// Tree drawing characters
     pub const TREE_BRANCH: &'static str = "├── ";

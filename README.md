@@ -66,7 +66,7 @@ cosmos --setup
 |-----|--------|
 | `↑/k` `↓/j` | Navigate |
 | `Tab` | Switch panels |
-| `Enter` | View detail |
+| `Enter` | Expand/collapse groups, view details |
 | `/` | Search |
 | `?` | Toggle help |
 

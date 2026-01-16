@@ -54,8 +54,8 @@ pub enum ViewMode {
 impl ViewMode {
     pub fn label(&self) -> &'static str {
         match self {
-            ViewMode::Flat => "flat",
-            ViewMode::Grouped => "grouped",
+            ViewMode::Flat => Theme::VIEW_FLAT,
+            ViewMode::Grouped => Theme::VIEW_GROUPED,
         }
     }
 
@@ -281,6 +281,13 @@ pub enum Overlay {
     /// Error log - view all recent errors
     ErrorLog {
         scroll: usize,
+        selected: usize,
+    },
+    /// Reset cosmos - selective cache/data reset
+    Reset {
+        /// List of (option, is_selected) pairs
+        options: Vec<(crate::cache::ResetOption, bool)>,
+        /// Currently focused option index
         selected: usize,
     },
 }
@@ -577,6 +584,9 @@ pub struct App {
 
     // Personal repo memory (local)
     pub repo_memory: crate::cache::RepoMemory,
+
+    // Domain glossary (auto-extracted terminology)
+    pub glossary: crate::cache::DomainGlossary,
     
     // Cost tracking
     pub session_cost: f64,          // Total USD spent this session
@@ -617,6 +627,9 @@ pub struct App {
     
     // Error log for persistent error viewing
     pub error_log: Vec<ErrorEntry>,
+    
+    // Flag: generate suggestions once summaries complete (used at init and after reset)
+    pub pending_suggestions_on_init: bool,
 }
 
 impl App {
@@ -657,6 +670,7 @@ impl App {
             loading_frame: 0,
             llm_summaries: std::collections::HashMap::new(),
             repo_memory: crate::cache::RepoMemory::default(),
+            glossary: crate::cache::DomainGlossary::default(),
             session_cost: 0.0,
             session_tokens: 0,
             active_model: None,
@@ -677,6 +691,7 @@ impl App {
             review_state: ReviewState::default(),
             ship_state: ShipState::default(),
             error_log: Vec::new(),
+            pending_suggestions_on_init: false,
         }
     }
 
@@ -1549,6 +1564,66 @@ impl App {
     /// Check if we're in a rate-limited state (multiple recent rate limits)
     pub fn is_rate_limited(&self) -> bool {
         self.recent_rate_limit_count() >= 2
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    //  RESET COSMOS OVERLAY
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    /// Open the reset cosmos overlay with default options selected
+    pub fn open_reset_overlay(&mut self) {
+        use crate::cache::ResetOption;
+        
+        let defaults = ResetOption::defaults();
+        let options: Vec<(ResetOption, bool)> = ResetOption::all()
+            .into_iter()
+            .map(|opt| {
+                let selected = defaults.contains(&opt);
+                (opt, selected)
+            })
+            .collect();
+
+        self.overlay = Overlay::Reset {
+            options,
+            selected: 0,
+        };
+    }
+
+    /// Navigate in reset overlay
+    pub fn reset_navigate(&mut self, delta: isize) {
+        if let Overlay::Reset { options, selected } = &mut self.overlay {
+            let len = options.len();
+            if len == 0 {
+                return;
+            }
+            *selected = if delta > 0 {
+                (*selected + delta as usize) % len
+            } else {
+                (*selected + len - ((-delta) as usize % len)) % len
+            };
+        }
+    }
+
+    /// Toggle selection of the currently focused reset option
+    pub fn reset_toggle_selected(&mut self) {
+        if let Overlay::Reset { options, selected } = &mut self.overlay {
+            if let Some((_, is_selected)) = options.get_mut(*selected) {
+                *is_selected = !*is_selected;
+            }
+        }
+    }
+
+    /// Get the selected reset options (returns empty vec if not in reset overlay)
+    pub fn get_reset_selections(&self) -> Vec<crate::cache::ResetOption> {
+        if let Overlay::Reset { options, .. } = &self.overlay {
+            options
+                .iter()
+                .filter(|(_, selected)| *selected)
+                .map(|(opt, _)| *opt)
+                .collect()
+        } else {
+            Vec::new()
+        }
     }
 
     /// Scroll overlay down
@@ -2912,6 +2987,9 @@ pub fn render(frame: &mut Frame, app: &App) {
         Overlay::ErrorLog { scroll, selected } => {
             render_error_log(frame, &app.error_log, *scroll, *selected);
         }
+        Overlay::Reset { options, selected } => {
+            render_reset_overlay(frame, options, *selected);
+        }
         Overlay::None => {}
     }
 
@@ -3032,28 +3110,6 @@ fn render_project_panel(frame: &mut Frame, area: Rect, app: &App) {
         }
     }
 
-    // Add action hints at the bottom when panel is active
-    if is_active && !is_searching {
-        // Add padding to push hints to bottom
-        let content_lines = lines.len();
-        let available = visible_height.saturating_sub(2);
-        if content_lines < available {
-            for _ in 0..(available - content_lines) {
-                lines.push(Line::from(""));
-            }
-        }
-        // Action hints - badge style
-        lines.push(Line::from(vec![
-            Span::styled(" ", Style::default()),
-            Span::styled(" / ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_500)),
-            Span::styled(" search ", Style::default().fg(Theme::GREY_500)),
-            Span::styled(" g ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_500)),
-            Span::styled(" group ", Style::default().fg(Theme::GREY_500)),
-            Span::styled(" ␣ ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_500)),
-            Span::styled(" expand", Style::default().fg(Theme::GREY_500)),
-        ]));
-    }
-    
     // Build title with view/sort indicator
     let total_items = app.project_tree_len();
     let scroll_indicator = if total_items > visible_height {
@@ -3113,8 +3169,9 @@ fn render_flat_tree<'a>(lines: &mut Vec<Line<'a>>, app: &'a App, is_active: bool
             file_icon(&entry.name)
         };
         
+        // Selection indicated by styling only (no cursor)
         let name_style = if is_selected {
-            Style::default().fg(Theme::WHITE)
+            Style::default().fg(Theme::WHITE).add_modifier(Modifier::BOLD)
         } else if entry.is_dir {
             Style::default().fg(Theme::GREY_300)
         } else if entry.priority == Theme::PRIORITY_HIGH {
@@ -3123,26 +3180,32 @@ fn render_flat_tree<'a>(lines: &mut Vec<Line<'a>>, app: &'a App, is_active: bool
             Style::default().fg(Theme::GREY_500)
         };
         
-        let cursor = if is_selected { "›" } else { " " };
         let priority_indicator = if entry.priority == Theme::PRIORITY_HIGH {
             Span::styled(" ●", Style::default().fg(Theme::GREY_300))
         } else {
             Span::styled("", Style::default())
         };
         
+        // Icon styling also reflects selection
+        let icon_style = if is_selected {
+            Style::default().fg(Theme::WHITE)
+        } else {
+            Style::default().fg(icon_color)
+        };
+        
         if entry.depth == 0 {
             // Root level - no connector
             lines.push(Line::from(vec![
-                Span::styled(format!(" {} ", cursor), Style::default().fg(if is_selected { Theme::WHITE } else { Theme::GREY_600 })),
-                Span::styled(format!("{} ", file_icon_str), Style::default().fg(icon_color)),
+                Span::styled("   ", Style::default()),
+                Span::styled(format!("{} ", file_icon_str), icon_style),
                 Span::styled(entry.name.clone(), name_style),
                 priority_indicator,
             ]));
         } else {
             lines.push(Line::from(vec![
-                Span::styled(format!(" {} ", cursor), Style::default().fg(if is_selected { Theme::WHITE } else { Theme::GREY_600 })),
+                Span::styled("   ", Style::default()),
                 Span::styled(format!("{}{}", indent_str, connector), Style::default().fg(Theme::GREY_700)),
-                Span::styled(format!(" {} ", file_icon_str), Style::default().fg(icon_color)),
+                Span::styled(format!(" {} ", file_icon_str), icon_style),
                 Span::styled(entry.name.clone(), name_style),
                 priority_indicator,
             ]));
@@ -3193,7 +3256,6 @@ fn render_grouped_tree<'a>(lines: &mut Vec<Line<'a>>, app: &'a App, is_active: b
         .take(visible_height)
     {
         let is_selected = i == app.project_selected && is_active;
-        let cursor = if is_selected { "›" } else { " " };
         
         match &entry.kind {
             GroupedEntryKind::Layer(_layer) => {
@@ -3209,33 +3271,35 @@ fn render_grouped_tree<'a>(lines: &mut Vec<Line<'a>>, app: &'a App, is_active: b
                     }
                 }
                 
-                // Layer header - clean and minimal
+                // Layer header - selection via styling only, expand icon shows state
                 let expand_icon = if entry.expanded { "▾" } else { "▸" };
                 let count_str = format!(" {}", entry.file_count);
                 
-                let (name_style, count_style) = if is_selected {
+                let (expand_style, name_style, count_style) = if is_selected {
                     (
+                        Style::default().fg(Theme::WHITE),
                         Style::default().fg(Theme::WHITE).add_modifier(Modifier::BOLD),
                         Style::default().fg(Theme::GREY_200),
                     )
                 } else {
                     (
+                        Style::default().fg(Theme::GREY_500),
                         Style::default().fg(Theme::GREY_100),
                         Style::default().fg(Theme::GREY_600),
                     )
                 };
                 
                 lines.push(Line::from(vec![
-                    Span::styled(format!(" {} ", cursor), Style::default().fg(if is_selected { Theme::WHITE } else { Theme::GREY_600 })),
-                    Span::styled(expand_icon.to_string(), Style::default().fg(Theme::GREY_500)),
+                    Span::styled("   ", Style::default()),
+                    Span::styled(expand_icon.to_string(), expand_style),
                     Span::styled(format!(" {}", entry.name), name_style),
                     Span::styled(count_str, count_style),
                 ]));
             }
             GroupedEntryKind::Feature => {
-                // Feature header - subtle folder-like grouping
+                // Feature header - selection via styling only
                 let style = if is_selected {
-                    Style::default().fg(Theme::WHITE)
+                    Style::default().fg(Theme::WHITE).add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(Theme::GREY_300)
                 };
@@ -3243,22 +3307,28 @@ fn render_grouped_tree<'a>(lines: &mut Vec<Line<'a>>, app: &'a App, is_active: b
                 let count_str = format!(" {}", entry.file_count);
                 
                 lines.push(Line::from(vec![
-                    Span::styled(format!(" {} ", cursor), Style::default().fg(if is_selected { Theme::WHITE } else { Theme::GREY_700 })),
+                    Span::styled("   ", Style::default()),
                     Span::styled("   ├─ ", Style::default().fg(Theme::GREY_700)),
                     Span::styled(entry.name.clone(), style),
                     Span::styled(count_str, Style::default().fg(Theme::GREY_600)),
                 ]));
             }
             GroupedEntryKind::File => {
-                // Simple clean file display with subtle guide
+                // File display - selection via styling only
                 let (file_icon_str, icon_color) = file_icon(&entry.name);
                 
                 let name_style = if is_selected {
-                    Style::default().fg(Theme::WHITE)
+                    Style::default().fg(Theme::WHITE).add_modifier(Modifier::BOLD)
                 } else if entry.priority == Theme::PRIORITY_HIGH {
                     Style::default().fg(Theme::GREY_200)
                 } else {
                     Style::default().fg(Theme::GREY_500)
+                };
+                
+                let icon_style = if is_selected {
+                    Style::default().fg(Theme::WHITE)
+                } else {
+                    Style::default().fg(icon_color)
                 };
                 
                 let priority_indicator = if entry.priority == Theme::PRIORITY_HIGH {
@@ -3271,9 +3341,9 @@ fn render_grouped_tree<'a>(lines: &mut Vec<Line<'a>>, app: &'a App, is_active: b
                 let indent = "     │  ";
                 
                 lines.push(Line::from(vec![
-                    Span::styled(format!(" {} ", cursor), Style::default().fg(if is_selected { Theme::WHITE } else { Theme::GREY_700 })),
+                    Span::styled("   ", Style::default()),
                     Span::styled(indent.to_string(), Style::default().fg(Theme::GREY_800)),
-                    Span::styled(format!("{} ", file_icon_str), Style::default().fg(icon_color)),
+                    Span::styled(format!("{} ", file_icon_str), icon_style),
                     Span::styled(entry.name.clone(), name_style),
                     priority_indicator,
                 ]));
@@ -3389,73 +3459,105 @@ fn render_suggestions_content<'a>(
     visible_height: usize,
     inner_width: usize,
 ) {
+    use crate::suggest::Priority;
+    
     let suggestions = app.suggestions.active_suggestions();
     
+    // Top padding for breathing room (matching project panel)
+    lines.push(Line::from(""));
+    
+    // Check for loading states relevant to suggestions panel
+    let loading_message: Option<String> = match app.loading {
+        LoadingState::GeneratingSuggestions => {
+            if let Some((completed, total)) = app.summary_progress {
+                Some(format!("Generating suggestions... (summaries: {}/{})", completed, total))
+            } else {
+                Some("Generating suggestions...".to_string())
+            }
+        }
+        LoadingState::GeneratingSummaries => {
+            if let Some((completed, total)) = app.summary_progress {
+                Some(format!("Summarizing files... ({}/{})", completed, total))
+            } else {
+                Some("Summarizing files...".to_string())
+            }
+        }
+        LoadingState::Answering => Some("Thinking...".to_string()),
+        _ => None,
+    };
+
+    if let Some(message) = loading_message {
+        let spinner = SPINNER_FRAMES[app.loading_frame % SPINNER_FRAMES.len()];
+        lines.push(Line::from(vec![
+            Span::styled("    ", Style::default()),
+            Span::styled(format!("{} ", spinner), Style::default().fg(Theme::WHITE)),
+            Span::styled(message, Style::default().fg(Theme::GREY_300)),
+        ]));
+        return;
+    }
+    
     if suggestions.is_empty() {
-        let is_loading = matches!(app.loading, LoadingState::GeneratingSuggestions);
         let has_ai = crate::suggest::llm::is_available();
         
-        if !is_loading {
-            lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled("    ╭", Style::default().fg(Theme::GREY_700)),
+            Span::styled("──────────────────────────────────", Style::default().fg(Theme::GREY_700)),
+            Span::styled("╮", Style::default().fg(Theme::GREY_700)),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("    │", Style::default().fg(Theme::GREY_700)),
+            Span::styled("                                  ", Style::default()),
+            Span::styled("│", Style::default().fg(Theme::GREY_700)),
+        ]));
+        
+        if has_ai {
             lines.push(Line::from(vec![
-                Span::styled("    ╭", Style::default().fg(Theme::GREY_700)),
-                Span::styled("──────────────────────────────────", Style::default().fg(Theme::GREY_700)),
-                Span::styled("╮", Style::default().fg(Theme::GREY_700)),
+                Span::styled("    │", Style::default().fg(Theme::GREY_700)),
+                Span::styled("       + ", Style::default().fg(Theme::GREEN)),
+                Span::styled("No issues found", Style::default().fg(Theme::GREY_300)),
+                Span::styled("          │", Style::default().fg(Theme::GREY_700)),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("    │", Style::default().fg(Theme::GREY_700)),
+                Span::styled("         Nothing to suggest", Style::default().fg(Theme::GREY_500)),
+                Span::styled("       │", Style::default().fg(Theme::GREY_700)),
+            ]));
+        } else {
+            lines.push(Line::from(vec![
+                Span::styled("    │", Style::default().fg(Theme::GREY_700)),
+                Span::styled("       ☽ ", Style::default().fg(Theme::GREY_400)),
+                Span::styled("AI not configured", Style::default().fg(Theme::GREY_300)),
+                Span::styled("        │", Style::default().fg(Theme::GREY_700)),
             ]));
             lines.push(Line::from(vec![
                 Span::styled("    │", Style::default().fg(Theme::GREY_700)),
                 Span::styled("                                  ", Style::default()),
                 Span::styled("│", Style::default().fg(Theme::GREY_700)),
             ]));
-            
-            if has_ai {
-                lines.push(Line::from(vec![
-                    Span::styled("    │", Style::default().fg(Theme::GREY_700)),
-                    Span::styled("       + ", Style::default().fg(Theme::GREEN)),
-                    Span::styled("No issues found", Style::default().fg(Theme::GREY_300)),
-                    Span::styled("          │", Style::default().fg(Theme::GREY_700)),
-                ]));
-                lines.push(Line::from(vec![
-                    Span::styled("    │", Style::default().fg(Theme::GREY_700)),
-                    Span::styled("         Nothing to suggest", Style::default().fg(Theme::GREY_500)),
-                    Span::styled("       │", Style::default().fg(Theme::GREY_700)),
-                ]));
-            } else {
-                lines.push(Line::from(vec![
-                    Span::styled("    │", Style::default().fg(Theme::GREY_700)),
-                    Span::styled("       ☽ ", Style::default().fg(Theme::GREY_400)),
-                    Span::styled("AI not configured", Style::default().fg(Theme::GREY_300)),
-                    Span::styled("        │", Style::default().fg(Theme::GREY_700)),
-                ]));
-                lines.push(Line::from(vec![
-                    Span::styled("    │", Style::default().fg(Theme::GREY_700)),
-                    Span::styled("                                  ", Style::default()),
-                    Span::styled("│", Style::default().fg(Theme::GREY_700)),
-                ]));
-                lines.push(Line::from(vec![
-                    Span::styled("    │", Style::default().fg(Theme::GREY_700)),
-                    Span::styled("   cosmos --setup    ", Style::default().fg(Theme::GREY_500)),
-                    Span::styled("(BYOK)", Style::default().fg(Theme::GREY_600)),
-                    Span::styled("   │", Style::default().fg(Theme::GREY_700)),
-                ]));
-            }
-            
             lines.push(Line::from(vec![
                 Span::styled("    │", Style::default().fg(Theme::GREY_700)),
-                Span::styled("                                  ", Style::default()),
-                Span::styled("│", Style::default().fg(Theme::GREY_700)),
-            ]));
-            lines.push(Line::from(vec![
-                Span::styled("    ╰", Style::default().fg(Theme::GREY_700)),
-                Span::styled("──────────────────────────────────", Style::default().fg(Theme::GREY_700)),
-                Span::styled("╯", Style::default().fg(Theme::GREY_700)),
+                Span::styled("   cosmos --setup    ", Style::default().fg(Theme::GREY_500)),
+                Span::styled("(BYOK)", Style::default().fg(Theme::GREY_600)),
+                Span::styled("   │", Style::default().fg(Theme::GREY_700)),
             ]));
         }
+        
+        lines.push(Line::from(vec![
+            Span::styled("    │", Style::default().fg(Theme::GREY_700)),
+            Span::styled("                                  ", Style::default()),
+            Span::styled("│", Style::default().fg(Theme::GREY_700)),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("    ╰", Style::default().fg(Theme::GREY_700)),
+            Span::styled("──────────────────────────────────", Style::default().fg(Theme::GREY_700)),
+            Span::styled("╯", Style::default().fg(Theme::GREY_700)),
+        ]));
         return;
     }
     
     let mut line_count = 0;
-    let text_width = inner_width.saturating_sub(6);
+    // Use nearly full width - just leave small margin
+    let text_width = inner_width.saturating_sub(4);
     
     for (i, suggestion) in suggestions.iter().enumerate().skip(app.suggestion_scroll) {
         if line_count >= visible_height.saturating_sub(4) {
@@ -3464,71 +3566,62 @@ fn render_suggestions_content<'a>(
         
         let is_selected = i == app.suggestion_selected && is_active;
         
-        let badge_color = match suggestion.kind {
-            crate::suggest::SuggestionKind::Improvement => Theme::BADGE_REFACTOR,
-            crate::suggest::SuggestionKind::Quality => Theme::BADGE_QUALITY,
-            crate::suggest::SuggestionKind::BugFix => Theme::BADGE_BUG,
-            crate::suggest::SuggestionKind::Optimization => Theme::BADGE_PERF,
-            crate::suggest::SuggestionKind::Documentation => Theme::BADGE_DOCS,
-            crate::suggest::SuggestionKind::Feature => Theme::BADGE_QUALITY,
-            crate::suggest::SuggestionKind::Testing => Theme::BADGE_QUALITY,
+        // Build priority indicator with red exclamation points for critical items
+        let priority_indicator = match suggestion.priority {
+            Priority::High => Span::styled("!! ", Style::default().fg(Theme::RED).add_modifier(Modifier::BOLD)),
+            Priority::Medium => Span::styled("!  ", Style::default().fg(Theme::YELLOW)),
+            Priority::Low => Span::styled("   ", Style::default()),
         };
         
-        let file_name = suggestion.file.file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("?");
+        // Kind label with subtle styling - brighter when selected
         let kind_label = suggestion.kind.label();
-        
-        let (prefix, file_style, summary_style) = if is_selected {
-            ("› ", 
-             Style::default().fg(Theme::WHITE).add_modifier(Modifier::BOLD),
-             Style::default().fg(Theme::GREY_100))
+        let kind_style = if is_selected {
+            Style::default().fg(Theme::GREY_100)
         } else {
-            ("  ", 
-             Style::default().fg(Theme::GREY_200),
-             Style::default().fg(Theme::GREY_400))
+            Style::default().fg(Theme::GREY_500)
         };
         
-        lines.push(Line::from(vec![
-            Span::styled(prefix, Style::default().fg(Theme::WHITE)),
-            Span::styled(format!(" {} ", kind_label), Style::default().fg(Theme::GREY_900).bg(badge_color)),
-            Span::styled(" ", Style::default()),
-            Span::styled(file_name.to_string(), file_style),
-            Span::styled(" ", Style::default()),
-            Span::styled(format!("{}", suggestion.priority.icon()), 
-                Style::default().fg(match suggestion.priority {
-                    Priority::High => Theme::WHITE,
-                    Priority::Medium => Theme::GREY_400,
-                    Priority::Low => Theme::GREY_600,
-                })),
-        ]));
-        line_count += 1;
+        // Summary text style - selection via styling only (bold + bright)
+        let summary_style = if is_selected {
+            Style::default().fg(Theme::WHITE).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Theme::GREY_300)
+        };
         
-        let summary = &suggestion.summary;
-        let wrapped = wrap_text(summary, text_width);
-        for wrapped_line in wrapped.iter().take(2) {
+        // First line has: padding (2) + priority (3) + kind + ": " 
+        let first_prefix_len = 2 + 3 + kind_label.len() + 2;
+        let first_line_width = text_width.saturating_sub(first_prefix_len);
+        // Continuation lines just have small indent (5 chars)
+        let cont_indent = "     ";
+        let cont_line_width = text_width.saturating_sub(5);
+        
+        // Use variable width wrapping: first line is shorter due to prefix
+        let wrapped = wrap_text_variable_width(&suggestion.summary, first_line_width, cont_line_width);
+        
+        // Render first line with priority and kind (no cursor - selection via styling)
+        if let Some(first_line) = wrapped.first() {
+            lines.push(Line::from(vec![
+                Span::styled("  ", Style::default()),
+                priority_indicator,
+                Span::styled(format!("{}: ", kind_label), kind_style),
+                Span::styled(first_line.clone(), summary_style),
+            ]));
+            line_count += 1;
+        }
+        
+        // Render ALL continuation lines (no artificial limit)
+        for wrapped_line in wrapped.iter().skip(1) {
             if line_count >= visible_height.saturating_sub(4) {
                 break;
             }
             lines.push(Line::from(vec![
-                Span::styled("    ", Style::default()),
+                Span::styled(cont_indent, Style::default()),
                 Span::styled(wrapped_line.clone(), summary_style),
             ]));
             line_count += 1;
         }
         
-        // Actions for selected item
-        if is_selected && line_count < visible_height.saturating_sub(4) {
-            lines.push(Line::from(vec![
-                Span::styled("    ", Style::default()),
-                Span::styled("Enter", Style::default().fg(Theme::GREEN).add_modifier(Modifier::BOLD)),
-                Span::styled(" verify  ", Style::default().fg(Theme::GREY_500)),
-                Span::styled("d", Style::default().fg(Theme::GREY_400).add_modifier(Modifier::BOLD)),
-                Span::styled(" dismiss", Style::default().fg(Theme::GREY_600)),
-            ]));
-            line_count += 1;
-        }
-        
+        // Add empty line for spacing between suggestions
         if line_count < visible_height.saturating_sub(4) {
             lines.push(Line::from(""));
             line_count += 1;
@@ -3563,10 +3656,11 @@ fn render_verify_content<'a>(
     let state = &app.verify_state;
     
     if state.loading {
+        let spinner = SPINNER_FRAMES[app.loading_frame % SPINNER_FRAMES.len()];
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
             Span::styled("    ", Style::default()),
-            Span::styled("⠋ ", Style::default().fg(Theme::WHITE)),
+            Span::styled(format!("{} ", spinner), Style::default().fg(Theme::WHITE)),
             Span::styled("Verifying issue...", Style::default().fg(Theme::GREY_300)),
         ]));
         return;
@@ -3704,20 +3798,22 @@ fn render_review_content<'a>(
     let state = &app.review_state;
     
     if state.reviewing {
+        let spinner = SPINNER_FRAMES[app.loading_frame % SPINNER_FRAMES.len()];
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
             Span::styled("    ", Style::default()),
-            Span::styled("⠋ ", Style::default().fg(Theme::WHITE)),
+            Span::styled(format!("{} ", spinner), Style::default().fg(Theme::WHITE)),
             Span::styled("Reviewing changes...", Style::default().fg(Theme::GREY_300)),
         ]));
         return;
     }
     
     if state.fixing {
+        let spinner = SPINNER_FRAMES[app.loading_frame % SPINNER_FRAMES.len()];
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
             Span::styled("    ", Style::default()),
-            Span::styled("⠋ ", Style::default().fg(Theme::WHITE)),
+            Span::styled(format!("{} ", spinner), Style::default().fg(Theme::WHITE)),
             Span::styled("Applying fixes...", Style::default().fg(Theme::GREY_300)),
         ]));
         return;
@@ -4095,32 +4191,10 @@ fn render_question_input(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
-    // Top line - subtle separator
-    let separator = Line::from(vec![
-        Span::styled(
-            "─".repeat(area.width as usize),
-            Style::default().fg(Theme::GREY_600)
-        ),
-    ]);
-
-    // Bottom line - status and action buttons
+    // Status and action buttons
     let mut spans = vec![
         Span::styled("  ", Style::default()),
     ];
-    
-    // Loading indicator (non-blocking, inline in status bar)
-    if app.loading.is_loading() {
-        let spinner = SPINNER_FRAMES[app.loading_frame % SPINNER_FRAMES.len()];
-        spans.push(Span::styled(
-            format!("{} ", spinner),
-            Style::default().fg(Theme::WHITE).add_modifier(Modifier::BOLD),
-        ));
-        spans.push(Span::styled(
-            format!("{} ", app.loading.message()),
-            Style::default().fg(Theme::GREY_200),
-        ));
-        spans.push(Span::styled("│ ", Style::default().fg(Theme::GREY_600)));
-    }
     
     // Project name and branch with icon (truncate long branch names)
     let project_name = app.context.repo_root
@@ -4199,13 +4273,35 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
     // Spacer before buttons
     let status_len: usize = spans.iter().map(|s| s.content.chars().count()).sum();
     let available = area.width as usize;
-    let button_area_approx = 20; // Reduced - only help and quit now
+    // Panel-specific hints + help/quit buttons
+    let button_area_approx = match app.active_panel {
+        ActivePanel::Project => 55,      // / search  g group  ␣ expand  ? help  q quit
+        ActivePanel::Suggestions => 50,  // Enter verify  d dismiss  ? help  q quit
+    };
     let spacer_len = available.saturating_sub(status_len + button_area_approx);
     if spacer_len > 0 {
         spans.push(Span::styled(" ".repeat(spacer_len), Style::default()));
     }
 
-    // Minimal footer - just help and quit (other actions shown in panels)
+    // Panel-specific contextual hints
+    match app.active_panel {
+        ActivePanel::Project => {
+            spans.push(Span::styled(" / ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_500)));
+            spans.push(Span::styled(" search ", Style::default().fg(Theme::GREY_500)));
+            spans.push(Span::styled(" g ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_500)));
+            spans.push(Span::styled(" group ", Style::default().fg(Theme::GREY_500)));
+            spans.push(Span::styled(" ↵ ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_500)));
+            spans.push(Span::styled(" expand ", Style::default().fg(Theme::GREY_500)));
+        }
+        ActivePanel::Suggestions => {
+            spans.push(Span::styled(" Enter ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_500)));
+            spans.push(Span::styled(" verify ", Style::default().fg(Theme::GREY_500)));
+            spans.push(Span::styled(" d ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_500)));
+            spans.push(Span::styled(" dismiss ", Style::default().fg(Theme::GREY_500)));
+        }
+    }
+
+    // Help and quit (always shown)
     spans.push(Span::styled(" ? ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_500)));
     spans.push(Span::styled(" help ", Style::default().fg(Theme::GREY_500)));
     
@@ -4216,7 +4312,7 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
 
     let footer_line = Line::from(spans);
 
-    let footer = Paragraph::new(vec![separator, footer_line])
+    let footer = Paragraph::new(vec![Line::from(""), footer_line])
         .style(Style::default().bg(Theme::GREY_900));
     frame.render_widget(footer, area);
 }
@@ -4271,8 +4367,7 @@ fn render_help(frame: &mut Frame, scroll: usize) {
     help_text.push(key_row("↑↓", "Move up/down"));
     help_text.push(key_row("PgUp/Dn", "Page scroll"));
     help_text.push(key_row("Tab", "Switch between panels"));
-    help_text.push(key_row("Space", "Expand/collapse"));
-    help_text.push(key_row("Enter", "View details / confirm"));
+    help_text.push(key_row("Enter", "Expand/collapse or view details"));
     help_text.push(key_row("Esc", "Go back / cancel"));
     help_text.push(section_spacer());
     help_text.push(section_end());
@@ -4293,7 +4388,7 @@ fn render_help(frame: &mut Frame, scroll: usize) {
     help_text.push(key_row("f", "Fix selected findings"));
     help_text.push(key_row("u", "Undo last applied fix"));
     help_text.push(key_row("i", "Ask cosmos a question"));
-    help_text.push(key_row("r", "Refresh codebase"));
+    help_text.push(key_row("R", "Reset cosmos (full refresh)"));
     help_text.push(key_row("M", "Open repo memory"));
     help_text.push(key_row("e", "View error log"));
     help_text.push(section_spacer());
@@ -6498,6 +6593,88 @@ fn render_error_log(frame: &mut Frame, errors: &[ErrorEntry], scroll: usize, sel
     frame.render_widget(paragraph, area);
 }
 
+fn render_reset_overlay(
+    frame: &mut Frame,
+    options: &[(crate::cache::ResetOption, bool)],
+    selected: usize,
+) {
+    let area = centered_rect(55, 50, frame.area());
+    frame.render_widget(Clear, area);
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    // Header
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "  Select what to reset and regenerate:",
+        Style::default().fg(Theme::GREY_300),
+    )));
+    lines.push(Line::from(""));
+
+    // Options list
+    for (i, (option, is_selected)) in options.iter().enumerate() {
+        let is_focused = i == selected;
+        
+        // Checkbox
+        let checkbox = if *is_selected { "[x]" } else { "[ ]" };
+        let checkbox_color = if *is_selected { Theme::GREEN } else { Theme::GREY_500 };
+        
+        // Selection indicator
+        let indicator = if is_focused { "▸ " } else { "  " };
+        
+        // Format: "▸ [x] Label                (description)"
+        let label = option.label();
+        let desc = option.description();
+        
+        // Calculate padding for alignment
+        let label_width = 22;
+        let padded_label = format!("{:<width$}", label, width = label_width);
+        
+        let line_style = if is_focused {
+            Style::default().bg(Theme::GREY_700)
+        } else {
+            Style::default()
+        };
+        
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {}", indicator), Style::default().fg(Theme::ACCENT)),
+            Span::styled(format!("{} ", checkbox), Style::default().fg(checkbox_color)),
+            Span::styled(padded_label, Style::default().fg(Theme::GREY_100)),
+            Span::styled(format!("({})", desc), Style::default().fg(Theme::GREY_500)),
+        ]).style(line_style));
+    }
+
+    // Separator and help
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "  ─────────────────────────────────────────────────",
+        Style::default().fg(Theme::GREY_600),
+    )));
+    lines.push(Line::from(vec![
+        Span::styled("   ", Style::default()),
+        Span::styled(" Space ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_400)),
+        Span::styled(" toggle  ", Style::default().fg(Theme::GREY_400)),
+        Span::styled(" Enter ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_400)),
+        Span::styled(" reset  ", Style::default().fg(Theme::GREY_400)),
+        Span::styled(" Esc ", Style::default().fg(Theme::GREY_900).bg(Theme::GREY_400)),
+        Span::styled(" cancel", Style::default().fg(Theme::GREY_400)),
+    ]));
+    lines.push(Line::from(""));
+
+    let block = Block::default()
+        .title(" Reset Cosmos ")
+        .title_style(Style::default().fg(Theme::GREY_100))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Theme::ACCENT))
+        .style(Style::default().bg(Theme::GREY_800));
+
+    let paragraph = Paragraph::new(lines)
+        .block(block)
+        .wrap(Wrap { trim: false });
+
+    frame.render_widget(paragraph, area);
+}
+
 fn render_toast(frame: &mut Frame, toast: &Toast) {
     let area = frame.area();
     
@@ -6584,7 +6761,13 @@ fn truncate(s: &str, max: usize) -> String {
 
 /// Wrap text to fit within a given width
 fn wrap_text(text: &str, width: usize) -> Vec<String> {
-    if width == 0 {
+    wrap_text_variable_width(text, width, width)
+}
+
+/// Wrap text with different widths for first line vs continuation lines
+/// This is useful when the first line has a prefix (like "Fix: ") that takes up space
+fn wrap_text_variable_width(text: &str, first_line_width: usize, continuation_width: usize) -> Vec<String> {
+    if first_line_width == 0 || continuation_width == 0 {
         return vec![text.to_string()];
     }
     
@@ -6592,28 +6775,33 @@ fn wrap_text(text: &str, width: usize) -> Vec<String> {
     let mut current_line = String::new();
     
     for word in text.split_whitespace() {
+        // Use first_line_width for the first line, continuation_width for others
+        let current_width = if lines.is_empty() { first_line_width } else { continuation_width };
+        
         if current_line.is_empty() {
-            if word.len() > width {
+            if word.len() > current_width {
                 // Word is longer than width, force break it
                 let mut remaining = word;
-                while remaining.len() > width {
-                    lines.push(remaining[..width].to_string());
-                    remaining = &remaining[width..];
+                while remaining.len() > current_width {
+                    lines.push(remaining[..current_width].to_string());
+                    remaining = &remaining[current_width..];
                 }
                 current_line = remaining.to_string();
             } else {
                 current_line = word.to_string();
             }
-        } else if current_line.len() + 1 + word.len() <= width {
+        } else if current_line.len() + 1 + word.len() <= current_width {
             current_line.push(' ');
             current_line.push_str(word);
         } else {
             lines.push(current_line);
-            if word.len() > width {
+            // After pushing, we're now on a continuation line
+            let next_width = continuation_width;
+            if word.len() > next_width {
                 let mut remaining = word;
-                while remaining.len() > width {
-                    lines.push(remaining[..width].to_string());
-                    remaining = &remaining[width..];
+                while remaining.len() > next_width {
+                    lines.push(remaining[..next_width].to_string());
+                    remaining = &remaining[next_width..];
                 }
                 current_line = remaining.to_string();
             } else {

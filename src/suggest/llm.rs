@@ -8,6 +8,7 @@
 #![allow(dead_code)]
 
 use super::{Priority, Suggestion, SuggestionKind, SuggestionSource};
+use crate::cache::DomainGlossary;
 use crate::config::Config;
 use crate::context::WorkContext;
 use crate::index::{CodebaseIndex, PatternKind, SymbolKind};
@@ -736,10 +737,14 @@ fn parse_fix_preview(response: &str, modifier: Option<String>) -> anyhow::Result
 /// This is the main entry point for generating high-quality suggestions.
 /// Uses smart context building to pack maximum insight into the prompt.
 /// Returns suggestions and usage stats for cost tracking.
+/// 
+/// The optional `glossary` provides domain-specific terminology to help
+/// the LLM use the correct terms in suggestion summaries.
 pub async fn analyze_codebase(
     index: &CodebaseIndex,
     context: &WorkContext,
     repo_memory: Option<String>,
+    glossary: Option<&DomainGlossary>,
 ) -> anyhow::Result<(Vec<Suggestion>, Option<Usage>)> {
     let system = r#"You are a senior developer reviewing a codebase. Your job is to find genuinely useful improvements - things that will make the app better, not just cleaner.
 
@@ -749,35 +754,48 @@ OUTPUT FORMAT (JSON array, 5-10 suggestions):
     "file": "relative/path/to/file.rs",
     "kind": "improvement|bugfix|feature|optimization|quality|documentation|testing",
     "priority": "high|medium|low",
-    "summary": "One-line description of what to do and why it matters",
+    "summary": "REQUIRED 3-PART FORMAT: [code location] → [technical problem] → [user/business impact]",
     "detail": "Brief explanation with specific guidance",
     "line": null or specific line number if applicable
   }
 ]
 
-WHAT TO LOOK FOR (aim for variety across these categories):
+SUMMARY FORMAT (REQUIRED - all 3 parts in every summary):
+"[function/code location] → [technical problem] → [user/business impact]"
+
+GOOD EXAMPLES:
+- "processEmailQueue() in jobs/email.rs → throws on empty batch, no catch → Dump Alert emails never send, users miss price drops"
+- "calculateTrimmedMean() in stats.rs → divides by zero when dataset < trim_count → Analytics page crashes, users see error instead of stats"
+- "TaskQueue.run() in queue.rs → no catch on individual task errors → one failure kills all queued jobs, batch imports hang forever"
+- "send_notification() in notify.rs → no retry on 5xx from Resend API → transient API issues cause silent notification failures"
+
+BAD EXAMPLES (rejected - too vague):
+- "Division by zero possible" (WHICH function? WHAT breaks for users?)
+- "Error handling issue" (WHERE? WHAT's the impact?)
+- "Missing retry logic" (for WHAT? WHY should I care?)
+- "Could cause silent failures" (WHAT fails? WHO notices?)
+
+WHAT TO LOOK FOR (aim for variety):
 - **Bugs & Edge Cases**: Race conditions, off-by-one errors, null/None handling, error swallowing
 - **Security**: Hardcoded secrets, SQL injection, XSS, path traversal, insecure defaults
-- **Performance**: N+1 queries, unnecessary allocations, blocking in async, missing caching opportunities
-- **API Design**: Confusing function signatures, missing validation, inconsistent return types
-- **User Experience**: Error messages that don't help, missing loading states, accessibility gaps
+- **Performance**: N+1 queries, unnecessary allocations, blocking in async, missing caching
 - **Reliability**: Missing retries for network calls, no timeouts, silent failures
-- **Feature Gaps**: Obvious missing functionality, half-implemented features, TODO items worth addressing
-- **Testing Blind Spots**: Critical paths without tests, brittle test setups
+- **User Experience**: Error messages that don't help, missing loading states
 
 AVOID:
 - "Split this file" or "break this function up" unless it's genuinely causing problems
 - Generic advice like "add more comments" or "improve naming"
 - Suggestions that would just make the code "cleaner" without real benefit
 - Anything a linter would catch
+- Vague summaries that don't name specific code or explain user impact
 
 PRIORITIZE:
 - Files marked [CHANGED] - the developer is actively working there
 - Things that could cause bugs or outages
 - Quick wins that provide immediate value
-- Suggestions specific to THIS codebase, not generic best practices"#;
+- Use DOMAIN TERMINOLOGY when provided (these are this project's specific terms)"#;
 
-    let user_prompt = build_codebase_context(index, context, repo_memory.as_deref());
+    let user_prompt = build_codebase_context(index, context, repo_memory.as_deref(), glossary);
     
     // Use Smart preset for quality reasoning on suggestions
     let response = call_llm_with_usage(system, &user_prompt, Model::Smart, true).await?;
@@ -787,7 +805,12 @@ PRIORITIZE:
 }
 
 /// Build rich context from codebase index for the LLM prompt
-fn build_codebase_context(index: &CodebaseIndex, context: &WorkContext, repo_memory: Option<&str>) -> String {
+fn build_codebase_context(
+    index: &CodebaseIndex, 
+    context: &WorkContext, 
+    repo_memory: Option<&str>,
+    glossary: Option<&DomainGlossary>,
+) -> String {
     let stats = index.stats();
     let project_name = index.root.file_name()
         .and_then(|n| n.to_str())
@@ -867,6 +890,14 @@ fn build_codebase_context(index: &CodebaseIndex, context: &WorkContext, repo_mem
         let mem = mem.trim();
         if !mem.is_empty() {
             sections.push(format!("\n\nREPO MEMORY (follow these conventions):\n{}", mem));
+        }
+    }
+
+    // Domain glossary - terminology specific to this codebase
+    if let Some(g) = glossary {
+        let glossary_context = g.to_prompt_context(15);
+        if !glossary_context.is_empty() {
+            sections.push(format!("\n\n{}", glossary_context));
         }
     }
     
@@ -1498,18 +1529,20 @@ fn analyze_project_structure(index: &CodebaseIndex) -> String {
 /// Result from a single batch of file summaries
 pub struct SummaryBatchResult {
     pub summaries: HashMap<PathBuf, String>,
+    /// Domain terms extracted from these files
+    pub terms: HashMap<String, String>,
     pub usage: Option<Usage>,
 }
 
 /// Generate rich, context-aware summaries for all files in the codebase
 /// 
 /// Uses batched approach (4 files per call) for reliability.
-/// Returns all summaries and total usage stats.
+/// Returns all summaries, domain glossary, and total usage stats.
 /// 
 /// DEPRECATED: Use generate_file_summaries_incremental instead for caching support.
 pub async fn generate_file_summaries(
     index: &CodebaseIndex,
-) -> anyhow::Result<(HashMap<PathBuf, String>, Option<Usage>)> {
+) -> anyhow::Result<(HashMap<PathBuf, String>, DomainGlossary, Option<Usage>)> {
     let project_context = discover_project_context(index);
     let files: Vec<_> = index.files.keys().cloned().collect();
     generate_summaries_for_files(index, &files, &project_context).await
@@ -1517,11 +1550,12 @@ pub async fn generate_file_summaries(
 
 /// Generate summaries for a specific list of files with project context
 /// Uses aggressive parallel batch processing for speed
+/// Also extracts domain terminology for the glossary
 pub async fn generate_summaries_for_files(
     index: &CodebaseIndex,
     files: &[PathBuf],
     project_context: &str,
-) -> anyhow::Result<(HashMap<PathBuf, String>, Option<Usage>)> {
+) -> anyhow::Result<(HashMap<PathBuf, String>, DomainGlossary, Option<Usage>)> {
     // Large batch size for fewer API calls
     let batch_size = 16;
     // Higher concurrency for faster processing (Speed preset handles this well)
@@ -1530,6 +1564,7 @@ pub async fn generate_summaries_for_files(
     let batches: Vec<_> = files.chunks(batch_size).collect();
     
     let mut all_summaries = HashMap::new();
+    let mut glossary = DomainGlossary::new();
     let mut total_usage = Usage::default();
     
     // Process batches with limited concurrency
@@ -1545,7 +1580,17 @@ pub async fn generate_summaries_for_files(
         for result in results {
             match result {
                 Ok(batch_result) => {
-                    all_summaries.extend(batch_result.summaries);
+                    // Collect summaries
+                    all_summaries.extend(batch_result.summaries.clone());
+                    
+                    // Collect terms into glossary
+                    for (term, definition) in batch_result.terms {
+                        // Associate term with files from this batch
+                        for file in batch_result.summaries.keys() {
+                            glossary.add_term(term.clone(), definition.clone(), file.clone());
+                        }
+                    }
+                    
                     if let Some(usage) = batch_result.usage {
                         total_usage.prompt_tokens += usage.prompt_tokens;
                         total_usage.completion_tokens += usage.completion_tokens;
@@ -1566,7 +1611,7 @@ pub async fn generate_summaries_for_files(
         None
     };
     
-    Ok((all_summaries, final_usage))
+    Ok((all_summaries, glossary, final_usage))
 }
 
 /// Priority tier for file summarization
@@ -1628,6 +1673,7 @@ pub fn prioritize_files_for_summary(
 }
 
 /// Generate summaries for a single batch of files
+/// Also extracts domain-specific terminology for the glossary
 async fn generate_summary_batch(
     index: &CodebaseIndex,
     files: &[PathBuf],
@@ -1638,21 +1684,37 @@ async fn generate_summary_batch(
 - What it DOES (key functionality, main exports)
 - How it FITS (relationships to other parts)
 
+ALSO extract domain-specific terminology - terms that are unique to THIS codebase and wouldn't be obvious to someone new. Look for:
+- Business concepts (e.g., "DumpAlert" = price drop notification)
+- Custom abstractions (e.g., "TaskQueue" = background job system)
+- Domain entities (e.g., "Listing" = item for sale, "Watchlist" = user's tracked items)
+
 IMPORTANT: Use the PROJECT CONTEXT provided to understand what this codebase is for. 
-Write definitive statements like "This file handles X" not vague guesses like "This seems to be related to Y".
+Write definitive statements like "This file handles X" not vague guesses.
 Be specific and technical. Reference actual function/struct names.
 
-OUTPUT: A JSON object mapping file paths to summary strings. Example:
-{"src/main.rs": "This is the application entry point..."}"#;
+OUTPUT: A JSON object with two keys:
+{
+  "summaries": {
+    "src/main.rs": "This is the application entry point..."
+  },
+  "terms": {
+    "DumpAlert": "Price drop notification sent to users when a watched item's price falls",
+    "BatchProcessor": "System for handling bulk CSV imports of inventory data"
+  }
+}
+
+For "terms": only include 3-8 domain-specific terms per batch. Skip generic programming terms (like "Controller", "Service", "Handler"). Focus on business/domain concepts that need explanation."#;
 
     let user_prompt = build_batch_context(index, files, project_context);
     
     let response = call_llm_with_usage(system, &user_prompt, Model::Speed, true).await?;
     
-    let summaries = parse_summaries_response(&response.content, &index.root)?;
+    let (summaries, terms) = parse_summaries_and_terms_response(&response.content, &index.root)?;
     
     Ok(SummaryBatchResult {
         summaries,
+        terms,
         usage: response.usage,
     })
 }
@@ -1840,6 +1902,72 @@ fn parse_summaries_response(response: &str, root: &Path) -> anyhow::Result<HashM
         json_str.to_string()
     };
     Err(anyhow::anyhow!("Could not extract summaries from response. Preview: {}", preview))
+}
+
+/// Parse response containing both summaries and domain terms
+fn parse_summaries_and_terms_response(
+    response: &str, 
+    root: &Path
+) -> anyhow::Result<(HashMap<PathBuf, String>, HashMap<String, String>)> {
+    let json_str = extract_json_object(response)
+        .ok_or_else(|| anyhow::anyhow!("No JSON object found in response"))?;
+
+    // Try to parse as the expected format: {summaries: {...}, terms: {...}}
+    if let Ok(wrapper) = serde_json::from_str::<serde_json::Value>(json_str) {
+        let mut summaries = HashMap::new();
+        let mut terms = HashMap::new();
+
+        // Extract summaries
+        if let Some(summaries_obj) = wrapper.get("summaries") {
+            if let Some(obj) = summaries_obj.as_object() {
+                for (path, summary) in obj {
+                    if let Some(s) = summary.as_str() {
+                        summaries.insert(normalize_summary_path(path, root), s.to_string());
+                    }
+                }
+            }
+        }
+
+        // Extract terms
+        if let Some(terms_obj) = wrapper.get("terms") {
+            if let Some(obj) = terms_obj.as_object() {
+                for (term, definition) in obj {
+                    if let Some(d) = definition.as_str() {
+                        // Only include non-empty definitions
+                        if !d.trim().is_empty() {
+                            terms.insert(term.clone(), d.to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        // If we got summaries, return (even if no terms)
+        if !summaries.is_empty() {
+            return Ok((summaries, terms));
+        }
+
+        // Fallback: maybe it's the old format (just summaries, no terms wrapper)
+        // Try to extract file paths directly from the wrapper
+        if let Some(obj) = wrapper.as_object() {
+            for (key, value) in obj {
+                // Skip known meta keys
+                if key == "terms" || key == "analysis" || key == "notes" {
+                    continue;
+                }
+                if let Some(summary) = value.as_str() {
+                    summaries.insert(normalize_summary_path(key, root), summary.to_string());
+                }
+            }
+            if !summaries.is_empty() {
+                return Ok((summaries, terms));
+            }
+        }
+    }
+
+    // Try old format as complete fallback
+    let summaries = parse_summaries_response(response, root)?;
+    Ok((summaries, HashMap::new()))
 }
 
 // ============================================================================
