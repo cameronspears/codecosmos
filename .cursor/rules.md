@@ -32,6 +32,9 @@ constraints unless they clearly improve safety or user outcomes.
 - Prefer straightforward, readable code over cleverness.
 - Keep functions small and cohesive; use descriptive names.
 - Add comments only when logic is non-obvious.
+- Avoid oversized files. If a file approaches ~1000 lines, start
+  splitting into modules. Do not let a file exceed ~1500 lines. A
+  3000+ line file is unacceptable—refactor into smaller files.
 
 ## Dependencies
 - Prefer existing dependencies in the repo.
