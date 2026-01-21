@@ -27,8 +27,6 @@ pub struct ReviewFinding {
 #[derive(Debug, Clone, Deserialize)]
 struct ReviewResponseJson {
     summary: String,
-    #[serde(default)]
-    pass: Option<bool>,
     findings: Vec<ReviewFinding>,
 }
 
@@ -37,8 +35,6 @@ struct ReviewResponseJson {
 pub struct VerificationReview {
     pub findings: Vec<ReviewFinding>,
     pub summary: String, // Overall assessment
-    #[allow(dead_code)]
-    pub pass: bool, // True if no critical/warning issues
     pub usage: Option<Usage>,
 }
 
@@ -89,18 +85,9 @@ pub async fn verify_changes(
     // Merge usage from correction call if any
     let total_usage = merge_usage(response.usage, correction_usage);
 
-    // Determine pass based on findings if not explicitly set
-    let pass = parsed.pass.unwrap_or_else(|| {
-        !parsed
-            .findings
-            .iter()
-            .any(|f| f.severity == "critical" || f.severity == "warning")
-    });
-
     Ok(VerificationReview {
         findings: parsed.findings,
         summary: parsed.summary,
-        pass,
         usage: total_usage,
     })
 }

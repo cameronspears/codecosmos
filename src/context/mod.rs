@@ -31,9 +31,6 @@ pub struct WorkContext {
     pub uncommitted_files: Vec<PathBuf>,
     /// Files staged for commit
     pub staged_files: Vec<PathBuf>,
-    /// Untracked files (kept for potential future use)
-    #[allow(dead_code)]
-    pub untracked_files: Vec<PathBuf>,
     /// Recent commits (last 5)
     pub recent_commits: Vec<CommitInfo>,
     /// Inferred focus area (what the user seems to be working on)
@@ -54,7 +51,7 @@ impl WorkContext {
             .to_path_buf();
 
         let branch = get_current_branch(&repo)?;
-        let (uncommitted, staged, untracked) = get_file_statuses(&repo)?;
+        let (uncommitted, staged) = get_file_statuses(&repo)?;
         let recent_commits = get_recent_commits(&repo, 5)?;
         let modified_count = uncommitted.len() + staged.len();
 
@@ -64,7 +61,6 @@ impl WorkContext {
             branch,
             uncommitted_files: uncommitted,
             staged_files: staged,
-            untracked_files: untracked,
             recent_commits,
             inferred_focus,
             modified_count,
@@ -79,87 +75,12 @@ impl WorkContext {
         Ok(())
     }
 
-    /// Check if there are any uncommitted changes
-    #[allow(dead_code)]
-    pub fn has_changes(&self) -> bool {
-        !self.uncommitted_files.is_empty() || !self.staged_files.is_empty()
-    }
-
     /// Get all changed files (uncommitted + staged)
     pub fn all_changed_files(&self) -> Vec<&PathBuf> {
         self.uncommitted_files
             .iter()
             .chain(self.staged_files.iter())
             .collect()
-    }
-
-    /// Get the most recently modified directories
-    #[allow(dead_code)]
-    pub fn active_directories(&self) -> Vec<String> {
-        let mut dirs: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-        for file in self.all_changed_files() {
-            if let Some(parent) = file.parent() {
-                dirs.insert(parent.to_string_lossy().to_string());
-            }
-        }
-
-        // Also include directories from recent commits
-        for commit in &self.recent_commits {
-            for file in &commit.files_changed {
-                if let Some(parent) = Path::new(file).parent() {
-                    dirs.insert(parent.to_string_lossy().to_string());
-                }
-            }
-        }
-
-        let mut dirs: Vec<_> = dirs.into_iter().collect();
-        dirs.sort();
-        dirs
-    }
-
-    /// Format status for display
-    #[allow(dead_code)]
-    pub fn status_line(&self) -> String {
-        let mut parts = Vec::new();
-
-        parts.push(self.branch.clone());
-
-        if self.modified_count > 0 {
-            parts.push(format!("{} changed", self.modified_count));
-        }
-
-        if !self.staged_files.is_empty() {
-            parts.push(format!("{} staged", self.staged_files.len()));
-        }
-
-        parts.join(" | ")
-    }
-
-    /// Get a summary of the work context
-    #[allow(dead_code)]
-    pub fn summary(&self) -> String {
-        let mut lines = Vec::new();
-
-        lines.push(format!("Branch: {}", self.branch));
-
-        if let Some(ref focus) = self.inferred_focus {
-            lines.push(format!("Focus: {}", focus));
-        }
-
-        if self.has_changes() {
-            lines.push(format!(
-                "Changes: {} uncommitted, {} staged",
-                self.uncommitted_files.len(),
-                self.staged_files.len()
-            ));
-        }
-
-        if !self.recent_commits.is_empty() {
-            lines.push(format!("Recent: {}", self.recent_commits[0].message));
-        }
-
-        lines.join("\n")
     }
 }
 
@@ -170,8 +91,8 @@ fn get_current_branch(repo: &Repository) -> anyhow::Result<String> {
     Ok(shorthand.to_string())
 }
 
-/// Get file statuses (uncommitted, staged, untracked)
-fn get_file_statuses(repo: &Repository) -> anyhow::Result<(Vec<PathBuf>, Vec<PathBuf>, Vec<PathBuf>)> {
+/// Get file statuses (uncommitted, staged)
+fn get_file_statuses(repo: &Repository) -> anyhow::Result<(Vec<PathBuf>, Vec<PathBuf>)> {
     let mut opts = StatusOptions::new();
     opts.include_untracked(true);
     opts.include_ignored(false);
@@ -183,7 +104,6 @@ fn get_file_statuses(repo: &Repository) -> anyhow::Result<(Vec<PathBuf>, Vec<Pat
 
     let mut uncommitted = Vec::new();
     let mut staged = Vec::new();
-    let mut untracked = Vec::new();
 
     for entry in statuses.iter() {
         let status = entry.status();
@@ -202,16 +122,11 @@ fn get_file_statuses(repo: &Repository) -> anyhow::Result<(Vec<PathBuf>, Vec<Pat
                 staged.push(path.clone());
             }
 
-            // Untracked files (new in working tree, but NOT staged)
-            // A file that's been `git add`ed will have is_index_new() true,
-            // so we exclude those from the untracked list.
-            if status.is_wt_new() && !status.is_index_new() {
-                untracked.push(path);
-            }
+            // Untracked files are currently ignored.
         }
     }
 
-    Ok((uncommitted, staged, untracked))
+    Ok((uncommitted, staged))
 }
 
 /// Get recent commits

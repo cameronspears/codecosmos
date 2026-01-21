@@ -233,14 +233,6 @@ impl SuggestionEngine {
             .collect()
     }
 
-    /// Dismiss a suggestion
-    #[allow(dead_code)]
-    pub fn dismiss(&mut self, id: Uuid) {
-        if let Some(s) = self.suggestions.iter_mut().find(|s| s.id == id) {
-            s.dismissed = true;
-        }
-    }
-
     /// Mark a suggestion as applied
     pub fn mark_applied(&mut self, id: Uuid) {
         if let Some(s) = self.suggestions.iter_mut().find(|s| s.id == id) {

@@ -6,8 +6,6 @@
 //! - Import analysis
 //! - Symbol-based hints
 
-#![allow(dead_code)]
-
 use super::{CodebaseGrouping, Layer};
 use crate::index::{CodebaseIndex, Dependency, FileIndex, SymbolKind};
 use serde::{Deserialize, Serialize};
@@ -56,11 +54,6 @@ pub fn categorize_codebase(index: &CodebaseIndex) -> CodebaseGrouping {
     }
 
     grouping
-}
-
-/// Detect the architectural layer for a single file (simple API)
-pub fn detect_layer(path: &Path, file_index: &FileIndex) -> Layer {
-    detect_layer_with_confidence(path, file_index).layer
 }
 
 /// Detect the architectural layer for a single file with confidence score

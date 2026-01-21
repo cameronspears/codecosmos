@@ -79,18 +79,6 @@ pub enum SymbolKind {
 }
 
 impl SymbolKind {
-    #[allow(dead_code)]
-    pub fn icon(&self) -> char {
-        match self {
-            SymbolKind::Function | SymbolKind::Method => 'f',
-            SymbolKind::Struct | SymbolKind::Class => 'S',
-            SymbolKind::Enum => 'E',
-            SymbolKind::Interface | SymbolKind::Trait => 'T',
-            SymbolKind::Module => 'M',
-            SymbolKind::Constant => 'C',
-            SymbolKind::Variable => 'v',
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -152,19 +140,6 @@ impl PatternKind {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn description(&self) -> &'static str {
-        match self {
-            PatternKind::LongFunction => "Function exceeds 50 lines",
-            PatternKind::DeepNesting => "Code nesting exceeds 4 levels",
-            PatternKind::ManyParameters => "Function has more than 5 parameters",
-            PatternKind::GodModule => "File exceeds 500 lines",
-            PatternKind::DuplicatePattern => "Similar code pattern detected",
-            PatternKind::MissingErrorHandling => "Error handling may be missing",
-            PatternKind::UnusedImport => "Import appears unused",
-            PatternKind::TodoMarker => "TODO/FIXME marker found",
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -230,54 +205,6 @@ impl FileSummary {
         }
     }
     
-    /// Format for display in the UI
-    #[allow(dead_code)]
-    pub fn display(&self) -> String {
-        let mut lines = Vec::new();
-        
-        lines.push(self.purpose.clone());
-        lines.push(String::new());
-        
-        if !self.exports.is_empty() {
-            let exports_str = if self.exports.len() > 5 {
-                format!("{}, +{} more", self.exports[..5].join(", "), self.exports.len() - 5)
-            } else {
-                self.exports.join(", ")
-            };
-            lines.push(format!("Exports: {}", exports_str));
-        }
-        
-        if !self.used_by.is_empty() {
-            let used_by_str: Vec<_> = self.used_by.iter()
-                .take(3)
-                .filter_map(|p| p.file_name().and_then(|n| n.to_str()))
-                .collect();
-            let suffix = if self.used_by.len() > 3 {
-                format!(", +{} more", self.used_by.len() - 3)
-            } else {
-                String::new()
-            };
-            lines.push(format!("Used by: {}{}", used_by_str.join(", "), suffix));
-        }
-        
-        if !self.depends_on.is_empty() {
-            let deps_str: Vec<_> = self.depends_on.iter()
-                .take(3)
-                .filter_map(|p| p.file_name().and_then(|n| n.to_str()))
-                .collect();
-            let suffix = if self.depends_on.len() > 3 {
-                format!(", +{} more", self.depends_on.len() - 3)
-            } else {
-                String::new()
-            };
-            lines.push(format!("Depends: {}{}", deps_str.join(", "), suffix));
-        }
-        
-        lines.push(String::new());
-        lines.push(self.metrics.clone());
-        
-        lines.join("\n")
-    }
 }
 
 /// Infer the purpose of a file from its name and exports
@@ -844,12 +771,8 @@ impl CodebaseIndex {
         IndexStats {
             file_count: self.files.len(),
             total_loc: self.files.values().map(|f| f.loc).sum(),
-            total_sloc: self.files.values().map(|f| f.sloc).sum(),
             symbol_count: self.symbols.len(),
             pattern_count: self.patterns.len(),
-            high_priority_patterns: self.patterns.iter()
-                .filter(|p| p.kind.severity() >= PatternSeverity::High)
-                .count(),
         }
     }
 
@@ -875,12 +798,8 @@ impl CodebaseIndex {
 pub struct IndexStats {
     pub file_count: usize,
     pub total_loc: usize,
-    #[allow(dead_code)]
-    pub total_sloc: usize,
     pub symbol_count: usize,
     pub pattern_count: usize,
-    #[allow(dead_code)]
-    pub high_priority_patterns: usize,
 }
 
 /// Flattened file tree entry for UI display

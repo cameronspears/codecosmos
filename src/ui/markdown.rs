@@ -2,7 +2,6 @@
 //!
 //! Parses common markdown elements and renders them with appropriate styles.
 
-#![allow(dead_code)]
 #![allow(unused_mut)]
 
 use ratatui::{

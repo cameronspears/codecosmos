@@ -25,7 +25,6 @@ pub use review::{fix_review_findings, verify_changes, ReviewFinding, Verificatio
 #[allow(unused_imports)]
 pub use summaries::{
     discover_project_context,
-    generate_file_summaries,
     generate_summaries_for_files,
     prioritize_files_for_summary,
 };

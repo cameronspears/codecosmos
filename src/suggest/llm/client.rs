@@ -15,8 +15,6 @@ fn api_key() -> Option<String> {
 pub struct LlmResponse {
     pub content: String,
     pub usage: Option<Usage>,
-    #[allow(dead_code)]
-    pub model: String,
 }
 
 #[derive(Serialize)]
@@ -45,7 +43,6 @@ struct Message {
 struct ChatResponse {
     choices: Vec<Choice>,
     usage: Option<Usage>,
-    model: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -168,7 +165,6 @@ pub(crate) async fn call_llm_with_usage(
             return Ok(LlmResponse {
                 content,
                 usage: parsed.usage,
-                model: parsed.model.unwrap_or_default(),
             });
         }
 
