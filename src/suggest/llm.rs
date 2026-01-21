@@ -102,10 +102,21 @@ pub struct Usage {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
     pub total_tokens: u32,
+    /// Actual cost in USD as reported by OpenRouter (when available)
+    #[serde(default)]
+    pub cost: Option<f64>,
 }
 
 impl Usage {
+    /// Get the cost for this usage.
+    /// Prefers the actual cost from OpenRouter when available,
+    /// falls back to estimated cost based on hardcoded rates.
     pub fn calculate_cost(&self, model: Model) -> f64 {
+        // Prefer actual cost from OpenRouter if available
+        if let Some(actual_cost) = self.cost {
+            return actual_cost;
+        }
+        // Fall back to estimate using hardcoded rates
         model.calculate_cost(self.prompt_tokens, self.completion_tokens)
     }
 }
@@ -2292,13 +2303,19 @@ RULES:
     call_llm_with_usage(system, &user, Model::Speed, true).await
 }
 
-/// Merge two optional Usage values, summing their token counts
+/// Merge two optional Usage values, summing their token counts and costs
 fn merge_usage(primary: Option<Usage>, secondary: Option<Usage>) -> Option<Usage> {
     match (primary, secondary) {
         (Some(p), Some(s)) => Some(Usage {
             prompt_tokens: p.prompt_tokens + s.prompt_tokens,
             completion_tokens: p.completion_tokens + s.completion_tokens,
             total_tokens: p.total_tokens + s.total_tokens,
+            cost: match (p.cost, s.cost) {
+                (Some(pc), Some(sc)) => Some(pc + sc),
+                (Some(pc), None) => Some(pc),
+                (None, Some(sc)) => Some(sc),
+                (None, None) => None,
+            },
         }),
         (Some(p), None) => Some(p),
         (None, Some(s)) => Some(s),
