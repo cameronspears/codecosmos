@@ -75,7 +75,7 @@ pub async fn run_tui(
     let file_hashes = cache::compute_file_hashes(&index);
 
     // Optional AI-assisted grouping (safe fallback, low-confidence only)
-    let grouping_ai_enabled = app.config.enable_grouping_ai;
+    let grouping_ai_enabled = true;
     let mut grouping_ai_cache = cache_manager
         .load_grouping_ai_cache()
         .unwrap_or_else(cache::GroupingAiCache::new);
