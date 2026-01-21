@@ -3,8 +3,6 @@
 //! Uses dependency graph analysis, directory structure, naming patterns,
 //! and file purpose to identify feature clusters within each architectural layer.
 
-#![allow(dead_code)]
-
 use super::{CodebaseGrouping, Feature, Layer};
 use crate::index::CodebaseIndex;
 use std::collections::{HashMap, HashSet};
@@ -44,9 +42,6 @@ const MAX_MISC_FILES: usize = 8;
 
 /// Minimum files needed to form a group for generic files
 const MIN_GROUP_SIZE_GENERIC: usize = 2;
-
-/// Named files (not index.ts, mod.rs, etc.) can be single-file features
-const MIN_GROUP_SIZE_NAMED: usize = 1;
 
 /// Generic filenames that shouldn't form single-file features
 const GENERIC_FILES: &[&str] = &[

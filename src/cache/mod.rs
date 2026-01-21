@@ -14,11 +14,8 @@ use std::path::{Path, PathBuf};
 const CACHE_DIR: &str = ".cosmos";
 const INDEX_CACHE_FILE: &str = "index.json";
 const SUGGESTIONS_CACHE_FILE: &str = "suggestions.json";
-const SUMMARIES_CACHE_FILE: &str = "summaries.json";
-const SETTINGS_FILE: &str = "settings.json";
 const MEMORY_FILE: &str = "memory.json";
 const GLOSSARY_FILE: &str = "glossary.json";
-const HISTORY_DB_FILE: &str = "history.db";
 
 /// Options for selective cache reset
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,14 +24,10 @@ pub enum ResetOption {
     Index,
     /// Clear suggestions.json - generated suggestions
     Suggestions,
-    /// Clear summaries.json + llm_summaries.json - file summaries
+    /// Clear llm_summaries.json - file summaries
     Summaries,
     /// Clear glossary.json - domain terminology
     Glossary,
-    /// Clear history.db - suggestion history/analytics
-    History,
-    /// Clear settings.json - dismissed/applied suggestions
-    Settings,
     /// Clear memory.json - repo decisions/conventions
     Memory,
 }
@@ -47,8 +40,6 @@ impl ResetOption {
             ResetOption::Suggestions => "Suggestions",
             ResetOption::Summaries => "File Summaries",
             ResetOption::Glossary => "Domain Glossary",
-            ResetOption::History => "Suggestion History",
-            ResetOption::Settings => "User Settings",
             ResetOption::Memory => "Repo Memory",
         }
     }
@@ -60,8 +51,6 @@ impl ResetOption {
             ResetOption::Suggestions => "regenerate with AI",
             ResetOption::Summaries => "regenerate with AI",
             ResetOption::Glossary => "extract terminology",
-            ResetOption::History => "clear analytics",
-            ResetOption::Settings => "dismissed/applied",
             ResetOption::Memory => "decisions/conventions",
         }
     }
@@ -73,8 +62,6 @@ impl ResetOption {
             ResetOption::Suggestions,
             ResetOption::Summaries,
             ResetOption::Glossary,
-            ResetOption::History,
-            ResetOption::Settings,
             ResetOption::Memory,
         ]
     }
@@ -91,8 +78,6 @@ impl ResetOption {
 }
 
 /// Cache validity durations
-const INDEX_CACHE_HOURS: i64 = 24;
-const SUGGESTIONS_CACHE_DAYS: i64 = 7;
 const LLM_SUMMARY_CACHE_DAYS: i64 = 30;
 
 /// Cached index metadata
@@ -107,7 +92,6 @@ pub struct IndexCache {
 
 impl IndexCache {
     /// Create from a CodebaseIndex
-    #[allow(dead_code)]
     pub fn from_index(index: &CodebaseIndex) -> Self {
         Self {
             root: index.root.clone(),
@@ -118,18 +102,6 @@ impl IndexCache {
         }
     }
 
-    /// Check if the cache is still valid
-    #[allow(dead_code)]
-    pub fn is_valid(&self) -> bool {
-        let age = Utc::now() - self.cached_at;
-        age < Duration::hours(INDEX_CACHE_HOURS)
-    }
-
-    /// Check if a file has changed since caching
-    #[allow(dead_code)]
-    pub fn file_changed(&self, path: &PathBuf, new_hash: &str) -> bool {
-        self.file_hashes.get(path).map(|h| h != new_hash).unwrap_or(true)
-    }
 }
 
 /// Cached suggestions
@@ -143,7 +115,6 @@ pub struct SuggestionsCache {
 
 impl SuggestionsCache {
     /// Create from a list of suggestions
-    #[allow(dead_code)]
     pub fn from_suggestions(suggestions: &[Suggestion]) -> Self {
         let files: Vec<PathBuf> = suggestions.iter()
             .map(|s| s.file.clone())
@@ -158,21 +129,6 @@ impl SuggestionsCache {
         }
     }
 
-    /// Check if the cache is still valid
-    #[allow(dead_code)]
-    pub fn is_valid(&self) -> bool {
-        let age = Utc::now() - self.cached_at;
-        age < Duration::days(SUGGESTIONS_CACHE_DAYS)
-    }
-
-    /// Filter out suggestions for files that have changed
-    #[allow(dead_code)]
-    pub fn filter_unchanged(&self, changed_files: &[PathBuf]) -> Vec<Suggestion> {
-        self.suggestions.iter()
-            .filter(|s| !changed_files.contains(&s.file))
-            .cloned()
-            .collect()
-    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -249,15 +205,6 @@ impl LlmSummaryCache {
     }
 
     /// Get summary for a file if valid
-    #[allow(dead_code)]
-    pub fn get_valid_summary(&self, path: &PathBuf, current_hash: &str) -> Option<&str> {
-        if self.is_file_valid(path, current_hash) {
-            self.summaries.get(path).map(|e| e.summary.as_str())
-        } else {
-            None
-        }
-    }
-
     /// Update or insert a summary
     pub fn set_summary(&mut self, path: PathBuf, summary: String, file_hash: String) {
         self.summaries.insert(path, LlmSummaryEntry {
@@ -293,19 +240,6 @@ impl LlmSummaryCache {
             .filter(|(path, hash)| !self.is_file_valid(path, hash))
             .map(|(path, _)| path.clone())
             .collect()
-    }
-
-    /// Count stats
-    #[allow(dead_code)]
-    pub fn stats(&self) -> (usize, usize) {
-        let total = self.summaries.len();
-        let valid = self.summaries.iter()
-            .filter(|(_, entry)| {
-                let age = Utc::now() - entry.generated_at;
-                age < Duration::days(LLM_SUMMARY_CACHE_DAYS)
-            })
-            .count();
-        (total, valid)
     }
 
     /// Normalize cached paths to match current index keys.
@@ -359,17 +293,6 @@ pub fn compute_file_hashes(index: &CodebaseIndex) -> HashMap<PathBuf, String> {
             (path.clone(), hash)
         })
         .collect()
-}
-
-/// User settings
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct Settings {
-    /// Dismissed suggestion IDs
-    pub dismissed: Vec<uuid::Uuid>,
-    /// Applied suggestion IDs
-    pub applied: Vec<uuid::Uuid>,
-    /// Custom ignore patterns
-    pub ignore_patterns: Vec<String>,
 }
 
 /// Local “repo memory” entries (decisions, conventions, reminders).
@@ -554,24 +477,6 @@ impl Cache {
         Ok(())
     }
 
-    /// Load cached index metadata
-    #[allow(dead_code)]
-    pub fn load_index_cache(&self) -> Option<IndexCache> {
-        let path = self.cache_dir.join(INDEX_CACHE_FILE);
-        if !path.exists() {
-            return None;
-        }
-
-        let content = fs::read_to_string(&path).ok()?;
-        let cache: IndexCache = serde_json::from_str(&content).ok()?;
-        
-        if cache.is_valid() {
-            Some(cache)
-        } else {
-            None
-        }
-    }
-
     /// Save index cache
     pub fn save_index_cache(&self, cache: &IndexCache) -> anyhow::Result<()> {
         self.ensure_dir()?;
@@ -606,30 +511,6 @@ impl Cache {
         self.ensure_dir()?;
         let path = self.cache_dir.join(LLM_SUMMARIES_CACHE_FILE);
         let content = serde_json::to_string_pretty(cache)?;
-        fs::write(path, content)?;
-        Ok(())
-    }
-
-    /// Load settings
-    #[allow(dead_code)]
-    pub fn load_settings(&self) -> Settings {
-        let path = self.cache_dir.join(SETTINGS_FILE);
-        if !path.exists() {
-            return Settings::default();
-        }
-
-        fs::read_to_string(&path)
-            .ok()
-            .and_then(|content| serde_json::from_str(&content).ok())
-            .unwrap_or_default()
-    }
-
-    /// Save settings
-    #[allow(dead_code)]
-    pub fn save_settings(&self, settings: &Settings) -> anyhow::Result<()> {
-        self.ensure_dir()?;
-        let path = self.cache_dir.join(SETTINGS_FILE);
-        let content = serde_json::to_string_pretty(settings)?;
         fs::write(path, content)?;
         Ok(())
     }
@@ -675,15 +556,6 @@ impl Cache {
         Ok(())
     }
 
-    /// Clear all caches
-    #[allow(dead_code)]
-    pub fn clear(&self) -> anyhow::Result<()> {
-        if self.cache_dir.exists() {
-            fs::remove_dir_all(&self.cache_dir)?;
-        }
-        Ok(())
-    }
-
     /// Clear selected cache files only
     pub fn clear_selective(&self, options: &[ResetOption]) -> anyhow::Result<Vec<String>> {
         let mut cleared = Vec::new();
@@ -692,10 +564,8 @@ impl Cache {
             let files_to_remove: Vec<&str> = match option {
                 ResetOption::Index => vec![INDEX_CACHE_FILE],
                 ResetOption::Suggestions => vec![SUGGESTIONS_CACHE_FILE],
-                ResetOption::Summaries => vec![SUMMARIES_CACHE_FILE, LLM_SUMMARIES_CACHE_FILE],
+                ResetOption::Summaries => vec![LLM_SUMMARIES_CACHE_FILE],
                 ResetOption::Glossary => vec![GLOSSARY_FILE],
-                ResetOption::History => vec![HISTORY_DB_FILE],
-                ResetOption::Settings => vec![SETTINGS_FILE],
                 ResetOption::Memory => vec![MEMORY_FILE],
             };
 
@@ -711,77 +581,5 @@ impl Cache {
         Ok(cleared)
     }
 
-    /// Get cache stats
-    #[allow(dead_code)]
-    pub fn stats(&self) -> CacheStats {
-        let mut stats = CacheStats::default();
-
-        if self.cache_dir.exists() {
-            stats.exists = true;
-
-            if let Ok(entries) = fs::read_dir(&self.cache_dir) {
-                for entry in entries.flatten() {
-                    if let Ok(metadata) = entry.metadata() {
-                        stats.total_size += metadata.len();
-                        stats.file_count += 1;
-                    }
-                }
-            }
-
-            stats.has_index = self.cache_dir.join(INDEX_CACHE_FILE).exists();
-            stats.has_suggestions = self.cache_dir.join(SUGGESTIONS_CACHE_FILE).exists();
-        }
-
-        stats
-    }
 }
 
-#[allow(dead_code)]
-#[derive(Debug, Clone, Default)]
-pub struct CacheStats {
-    pub exists: bool,
-    pub file_count: usize,
-    pub total_size: u64,
-    pub has_index: bool,
-    pub has_suggestions: bool,
-}
-
-impl CacheStats {
-    #[allow(dead_code)]
-    pub fn size_human(&self) -> String {
-        if self.total_size < 1024 {
-            format!("{} B", self.total_size)
-        } else if self.total_size < 1024 * 1024 {
-            format!("{:.1} KB", self.total_size as f64 / 1024.0)
-        } else {
-            format!("{:.1} MB", self.total_size as f64 / (1024.0 * 1024.0))
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::tempdir;
-
-    #[test]
-    fn test_cache_creation() {
-        let dir = tempdir().unwrap();
-        let cache = Cache::new(dir.path());
-        
-        assert!(cache.load_settings().dismissed.is_empty());
-    }
-
-    #[test]
-    fn test_cache_validity() {
-        let cache = IndexCache {
-            root: PathBuf::from("/test"),
-            file_count: 10,
-            symbol_count: 100,
-            cached_at: Utc::now(),
-            file_hashes: HashMap::new(),
-        };
-        
-        assert!(cache.is_valid());
-    }
-}

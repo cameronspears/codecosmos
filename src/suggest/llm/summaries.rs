@@ -184,21 +184,6 @@ fn analyze_project_structure(index: &CodebaseIndex) -> String {
 //  FILE SUMMARIES GENERATION
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Generate rich, context-aware summaries for all files in the codebase
-///
-/// Uses batched approach (4 files per call) for reliability.
-/// Returns all summaries, domain glossary, and total usage stats.
-///
-/// DEPRECATED: Use generate_file_summaries_incremental instead for caching support.
-#[allow(dead_code)]
-pub async fn generate_file_summaries(
-    index: &CodebaseIndex,
-) -> anyhow::Result<(HashMap<PathBuf, String>, DomainGlossary, Option<Usage>)> {
-    let project_context = discover_project_context(index);
-    let files: Vec<_> = index.files.keys().cloned().collect();
-    generate_summaries_for_files(index, &files, &project_context).await
-}
-
 /// Generate summaries for a specific list of files with project context
 /// Uses aggressive parallel batch processing for speed
 /// Also extracts domain terminology for the glossary
@@ -263,18 +248,6 @@ pub async fn generate_summaries_for_files(
     };
 
     Ok((all_summaries, glossary, final_usage))
-}
-
-/// Priority tier for file summarization
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SummaryPriority {
-    /// Tier 1: Changed files, high complexity - summarize immediately
-    High,
-    /// Tier 2: Files with suggestions, focus directories - summarize soon
-    Medium,
-    /// Tier 3: Everything else - background processing
-    Low,
 }
 
 /// Categorize files by priority for smart summarization

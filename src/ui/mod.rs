@@ -15,10 +15,7 @@
 //! ║  main ● 5 changed │ ? inquiry  ↵ view  a apply  q quit      ║
 //! ╚══════════════════════════════════════════════════════════════╝
 
-#![allow(dead_code)]
-
 pub mod markdown;
-pub mod panels;
 pub mod theme;
 
 use crate::context::WorkContext;
@@ -3787,35 +3784,6 @@ fn render_suggestions_panel(frame: &mut Frame, area: Rect, app: &App) {
 
     let paragraph = Paragraph::new(lines).block(block);
     frame.render_widget(paragraph, area);
-}
-
-/// Render the breadcrumb navigation bar (now unused, kept for reference)
-#[allow(dead_code)]
-fn render_breadcrumbs(current: WorkflowStep) -> Line<'static> {
-    let mut spans = vec![Span::styled("  ", Style::default())];
-
-    for (i, step) in WorkflowStep::all().iter().enumerate() {
-        if i > 0 {
-            spans.push(Span::styled(" › ", Style::default().fg(Theme::GREY_600)));
-        }
-
-        let style = if *step == current {
-            Style::default()
-                .fg(Theme::WHITE)
-                .add_modifier(Modifier::BOLD)
-        } else if step.index() < current.index() {
-            // Completed steps
-            Style::default().fg(Theme::GREEN)
-        } else {
-            // Future steps
-            Style::default().fg(Theme::GREY_500)
-        };
-
-        let label = step.label();
-        spans.push(Span::styled(label.to_string(), style));
-    }
-
-    Line::from(spans)
 }
 
 /// Build the workflow title for the border (italic, lowercase like project panel)

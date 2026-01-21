@@ -190,86 +190,6 @@ fn try_parse_individual_suggestions(json: &str) -> anyhow::Result<Vec<CodebaseSu
     Ok(suggestions)
 }
 
-/// Parse JSON suggestions from LLM response
-#[allow(dead_code)]
-fn parse_suggestions(response: &str, path: &PathBuf) -> anyhow::Result<Vec<Suggestion>> {
-    // Strip markdown code fences if present
-    let trimmed = response.trim();
-    let clean = if trimmed.starts_with("```json") {
-        trimmed.strip_prefix("```json").unwrap_or(trimmed)
-    } else if trimmed.starts_with("```") {
-        trimmed.strip_prefix("```").unwrap_or(trimmed)
-    } else {
-        trimmed
-    };
-    let clean = if clean.ends_with("```") {
-        clean.strip_suffix("```").unwrap_or(clean)
-    } else {
-        clean
-    };
-    let clean = clean.trim();
-
-    // Extract JSON array from response
-    let json_str = if let Some(start) = clean.find('[') {
-        if let Some(end) = clean.rfind(']') {
-            clean[start..=end].to_string()
-        } else {
-            clean.to_string()
-        }
-    } else {
-        clean.to_string()
-    };
-
-    let parsed: Vec<LocalSuggestionJson> = serde_json::from_str(&json_str)?;
-
-    let suggestions = parsed
-        .into_iter()
-        .map(|s| {
-            let kind = match s.kind.as_str() {
-                "bugfix" => SuggestionKind::BugFix,
-                "feature" => SuggestionKind::Feature,
-                "optimization" => SuggestionKind::Optimization,
-                "quality" => SuggestionKind::Quality,
-                "documentation" => SuggestionKind::Documentation,
-                "testing" => SuggestionKind::Testing,
-                _ => SuggestionKind::Improvement,
-            };
-
-            let priority = match s.priority.as_str() {
-                "high" => Priority::High,
-                "low" => Priority::Low,
-                _ => Priority::Medium,
-            };
-
-            let mut suggestion = Suggestion::new(
-                kind,
-                priority,
-                path.clone(),
-                s.summary,
-                SuggestionSource::LlmDeep,
-            )
-            .with_detail(s.detail);
-
-            if let Some(line) = s.line {
-                suggestion = suggestion.with_line(line);
-            }
-
-            suggestion
-        })
-        .collect();
-
-    Ok(suggestions)
-}
-
-#[derive(Deserialize)]
-struct LocalSuggestionJson {
-    kind: String,
-    priority: String,
-    summary: String,
-    detail: String,
-    line: Option<usize>,
-}
-
 /// Truncate file contents for prompt safety (keep beginning + end)
 pub(crate) fn truncate_content(content: &str, max_chars: usize) -> String {
     if content.chars().count() <= max_chars {
@@ -425,7 +345,6 @@ fn normalize_path_str(raw: &str, root: &Path) -> PathBuf {
     crate::cache::normalize_summary_path(&PathBuf::from(raw.trim()), root)
 }
 
-#[allow(dead_code)]
 pub(crate) fn parse_summaries_response(
     response: &str,
     root: &Path,
@@ -546,22 +465,4 @@ mod tests {
         assert!(truncated.len() < content.len() + 20);
     }
 
-    #[test]
-    fn test_parse_suggestions() {
-        let json = r#"[
-            {
-                "kind": "improvement",
-                "priority": "high",
-                "summary": "Test suggestion",
-                "detail": "Test detail",
-                "line": 10
-            }
-        ]"#;
-
-        let path = PathBuf::from("test.rs");
-        let suggestions = parse_suggestions(json, &path).unwrap();
-
-        assert_eq!(suggestions.len(), 1);
-        assert_eq!(suggestions[0].priority, Priority::High);
-    }
 }
