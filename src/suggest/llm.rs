@@ -406,6 +406,16 @@ struct EditOp {
     new_string: String,
 }
 
+/// Response structure for fix generation (used for JSON parsing with retry)
+#[derive(Debug, Clone, Deserialize)]
+struct FixResponse {
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    modified_areas: Vec<String>,
+    edits: Vec<EditOp>,
+}
+
 /// Generate the actual fixed code content based on a human-language plan.
 /// Uses a search/replace approach for precise, validated edits.
 /// This is Phase 2 of the two-phase fix flow - Smart preset generates the actual changes
@@ -478,27 +488,17 @@ EXAMPLE - Adding a null check:
 
     let response = call_llm_with_usage(system, &user, Model::Smart, true).await?;
     
-    // Parse the JSON response
-    let json_str = extract_json_object(&response.content)
-        .ok_or_else(|| anyhow::anyhow!("No JSON found in fix response"))?;
+    // Parse the JSON response with self-correction on failure
+    let (parsed, correction_usage): (FixResponse, _) = 
+        parse_json_with_retry(&response.content, "fix generation").await?;
     
-    let parsed: serde_json::Value = serde_json::from_str(json_str)
-        .map_err(|e| anyhow::anyhow!("Failed to parse fix JSON: {}", e))?;
+    // Merge usage from correction call if any
+    let total_usage = merge_usage(response.usage, correction_usage);
     
-    let description = parsed.get("description")
-        .and_then(|v| v.as_str())
-        .unwrap_or("Applied the requested fix")
-        .to_string();
-    
-    let modified_areas = parsed.get("modified_areas")
-        .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-        .unwrap_or_default();
-    
-    // Parse and apply edits
-    let edits: Vec<EditOp> = parsed.get("edits")
-        .and_then(|v| serde_json::from_value(v.clone()).ok())
-        .ok_or_else(|| anyhow::anyhow!("Missing or invalid 'edits' array in response"))?;
+    let description = parsed.description
+        .unwrap_or_else(|| "Applied the requested fix".to_string());
+    let modified_areas = parsed.modified_areas;
+    let edits = parsed.edits;
     
     if edits.is_empty() {
         return Err(anyhow::anyhow!("No edits provided in response"));
@@ -550,7 +550,7 @@ EXAMPLE - Adding a null check:
         description,
         new_content,
         modified_areas,
-        usage: response.usage,
+        usage: total_usage,
     })
 }
 
@@ -594,6 +594,14 @@ pub struct MultiFileAppliedFix {
 struct FileEditsJson {
     file: String,
     edits: Vec<EditOp>,
+}
+
+/// Response structure for multi-file fix generation
+#[derive(Debug, Clone, Deserialize)]
+struct MultiFileFixResponse {
+    #[serde(default)]
+    description: Option<String>,
+    file_edits: Vec<FileEditsJson>,
 }
 
 /// Generate coordinated fixes across multiple files
@@ -698,22 +706,16 @@ EXAMPLE - Renaming a function across files:
 
     let response = call_llm_with_usage(system, &user, Model::Smart, true).await?;
     
-    // Parse the JSON response
-    let json_str = extract_json_object(&response.content)
-        .ok_or_else(|| anyhow::anyhow!("No JSON found in multi-file fix response"))?;
+    // Parse the JSON response with self-correction on failure
+    let (parsed, correction_usage): (MultiFileFixResponse, _) = 
+        parse_json_with_retry(&response.content, "multi-file fix").await?;
     
-    let parsed: serde_json::Value = serde_json::from_str(json_str)
-        .map_err(|e| anyhow::anyhow!("Failed to parse multi-file fix JSON: {}", e))?;
+    // Merge usage from correction call if any
+    let total_usage = merge_usage(response.usage, correction_usage);
     
-    let description = parsed.get("description")
-        .and_then(|v| v.as_str())
-        .unwrap_or("Applied the requested multi-file fix")
-        .to_string();
-    
-    // Parse file edits
-    let file_edits_json: Vec<FileEditsJson> = parsed.get("file_edits")
-        .and_then(|v| serde_json::from_value(v.clone()).ok())
-        .ok_or_else(|| anyhow::anyhow!("Missing or invalid 'file_edits' array in response"))?;
+    let description = parsed.description
+        .unwrap_or_else(|| "Applied the requested multi-file fix".to_string());
+    let file_edits_json = parsed.file_edits;
     
     if file_edits_json.is_empty() {
         return Err(anyhow::anyhow!("No file edits provided in response"));
@@ -796,7 +798,7 @@ EXAMPLE - Renaming a function across files:
     Ok(MultiFileAppliedFix {
         description,
         file_edits,
-        usage: response.usage,
+        usage: total_usage,
     })
 }
 
@@ -948,17 +950,36 @@ Be concise. The verification note should explain the finding in plain English. T
     );
 
     let response = call_llm(system, &user, Model::Balanced).await?;
-    parse_fix_preview(&response, modifier.map(String::from))
+    
+    // Try parsing, with self-correction retry on failure
+    match try_parse_preview_json(&response) {
+        Ok(parsed) => build_fix_preview(parsed, modifier.map(String::from)),
+        Err(initial_error) => {
+            // Try LLM self-correction
+            if let Ok(correction) = request_json_correction_generic(&response, &initial_error.to_string(), "fix preview").await {
+                if let Ok(parsed) = try_parse_preview_json(&correction.content) {
+                    return build_fix_preview(parsed, modifier.map(String::from));
+                }
+            }
+            Err(initial_error)
+        }
+    }
 }
 
-/// Parse the preview JSON response
-fn parse_fix_preview(response: &str, modifier: Option<String>) -> anyhow::Result<FixPreview> {
-    // Extract JSON from response
+/// Try to parse preview JSON, returning the parsed Value or error
+fn try_parse_preview_json(response: &str) -> anyhow::Result<serde_json::Value> {
     let json_str = extract_json_object(response)
         .ok_or_else(|| anyhow::anyhow!("No JSON found in preview response"))?;
+    
+    // Try common fixes first
+    let fixed_json = fix_json_issues(json_str);
+    serde_json::from_str(&fixed_json)
+        .or_else(|_| serde_json::from_str(json_str))
+        .map_err(|e| anyhow::anyhow!("Failed to parse preview JSON: {}", e))
+}
 
-    let parsed: serde_json::Value = serde_json::from_str(json_str)
-        .map_err(|e| anyhow::anyhow!("Failed to parse preview JSON: {}", e))?;
+/// Build FixPreview from parsed JSON Value
+fn build_fix_preview(parsed: serde_json::Value, modifier: Option<String>) -> anyhow::Result<FixPreview> {
 
     // Handle verified as either boolean or string
     let verified = parsed.get("verified")
@@ -1058,7 +1079,7 @@ pub async fn analyze_codebase(
 ) -> anyhow::Result<(Vec<Suggestion>, Option<Usage>)> {
     let system = r#"You are a senior developer reviewing a codebase. Your job is to find genuinely useful improvements - things that will make the app better, not just cleaner.
 
-OUTPUT FORMAT (JSON array, 5-10 suggestions):
+OUTPUT FORMAT (JSON array, 10-15 suggestions):
 [
   {
     "file": "relative/path/to/file.rs",
@@ -2188,6 +2209,103 @@ fn extract_json_object(response: &str) -> Option<&str> {
     }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+//  JSON SELF-CORRECTION
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Parse JSON from LLM response with automatic self-correction on failure.
+/// 
+/// If the initial parse fails, asks the LLM to fix its own JSON output.
+/// Uses the Speed model for corrections since it's a simple task.
+/// Returns the parsed value and any additional usage from the correction call.
+async fn parse_json_with_retry<T>(
+    response: &str,
+    context_hint: &str,
+) -> anyhow::Result<(T, Option<Usage>)>
+where
+    T: serde::de::DeserializeOwned,
+{
+    // Extract JSON from response
+    let json_str = extract_json_object(response)
+        .ok_or_else(|| anyhow::anyhow!("No JSON object found in {} response", context_hint))?;
+    
+    // First attempt
+    match serde_json::from_str::<T>(json_str) {
+        Ok(parsed) => Ok((parsed, None)),
+        Err(initial_error) => {
+            // Self-correction: ask LLM to fix its own JSON
+            let correction_response = request_json_correction(response, &initial_error, context_hint).await?;
+            
+            // Extract and parse the corrected JSON
+            let corrected_json = extract_json_object(&correction_response.content)
+                .ok_or_else(|| anyhow::anyhow!(
+                    "No JSON found in correction response for {}", context_hint
+                ))?;
+            
+            let parsed = serde_json::from_str::<T>(corrected_json)
+                .map_err(|e| anyhow::anyhow!(
+                    "JSON still invalid after self-correction for {}: {}\nOriginal error: {}",
+                    context_hint, e, initial_error
+                ))?;
+            
+            Ok((parsed, correction_response.usage))
+        }
+    }
+}
+
+/// Ask the LLM to fix malformed JSON from a previous response.
+/// Uses Speed model since JSON correction is a simple task.
+async fn request_json_correction(
+    original_response: &str,
+    parse_error: &serde_json::Error,
+    context_hint: &str,
+) -> anyhow::Result<LlmResponse> {
+    request_json_correction_generic(original_response, &parse_error.to_string(), context_hint).await
+}
+
+/// Ask the LLM to fix malformed JSON (generic version taking error as string).
+async fn request_json_correction_generic(
+    original_response: &str,
+    error_message: &str,
+    context_hint: &str,
+) -> anyhow::Result<LlmResponse> {
+    let system = r#"You are a JSON repair assistant. Your ONLY job is to fix malformed JSON.
+
+RULES:
+- Output ONLY the corrected JSON, nothing else
+- No explanations, no markdown fences, no commentary
+- Preserve all the original data and structure
+- Fix syntax errors: missing commas, unclosed brackets, invalid escapes
+- Ensure strings are properly quoted and escaped
+- Ensure the JSON is complete (not truncated)"#;
+
+    let user = format!(
+        "The following {} response contains invalid JSON.\n\n\
+         Parse error: {}\n\n\
+         Original response:\n{}\n\n\
+         Output ONLY the corrected, valid JSON:",
+        context_hint,
+        error_message,
+        truncate_str(original_response, 4000)  // Limit size for correction prompt
+    );
+
+    call_llm_with_usage(system, &user, Model::Speed, true).await
+}
+
+/// Merge two optional Usage values, summing their token counts
+fn merge_usage(primary: Option<Usage>, secondary: Option<Usage>) -> Option<Usage> {
+    match (primary, secondary) {
+        (Some(p), Some(s)) => Some(Usage {
+            prompt_tokens: p.prompt_tokens + s.prompt_tokens,
+            completion_tokens: p.completion_tokens + s.completion_tokens,
+            total_tokens: p.total_tokens + s.total_tokens,
+        }),
+        (Some(p), None) => Some(p),
+        (None, Some(s)) => Some(s),
+        (None, None) => None,
+    }
+}
+
 /// Normalize a path string to repo-relative format (wrapper around cache::normalize_summary_path)
 fn normalize_path_str(raw: &str, root: &Path) -> PathBuf {
     crate::cache::normalize_summary_path(&PathBuf::from(raw.trim()), root)
@@ -2331,6 +2449,15 @@ pub struct ReviewFinding {
     pub title: String,          // Short title
     pub description: String,    // Detailed explanation in plain language
     pub recommended: bool,      // Reviewer recommends fixing this (true = should fix, false = optional)
+}
+
+/// Response structure for code review (used for JSON parsing with retry)
+#[derive(Debug, Clone, Deserialize)]
+struct ReviewResponseJson {
+    summary: String,
+    #[serde(default)]
+    pass: Option<bool>,
+    findings: Vec<ReviewFinding>,
 }
 
 /// Result of a deep verification review
@@ -2503,19 +2630,12 @@ If no issues found, use "findings": []"#,
 
     let response = call_llm_with_usage(&system, &user, Model::Reviewer, true).await?;
     
-    // Parse the response
-    let json_str = extract_json_object(&response.content)
-        .ok_or_else(|| anyhow::anyhow!("No JSON found in review response"))?;
+    // Parse the response with self-correction on failure
+    let (parsed, correction_usage): (ReviewResponseJson, _) = 
+        parse_json_with_retry(&response.content, "code review").await?;
     
-    #[derive(Deserialize)]
-    struct ReviewResponse {
-        summary: String,
-        pass: Option<bool>,
-        findings: Vec<ReviewFinding>,
-    }
-    
-    let parsed: ReviewResponse = serde_json::from_str(json_str)
-        .map_err(|e| anyhow::anyhow!("Failed to parse review JSON: {}", e))?;
+    // Merge usage from correction call if any
+    let total_usage = merge_usage(response.usage, correction_usage);
     
     // Determine pass based on findings if not explicitly set
     let pass = parsed.pass.unwrap_or_else(|| {
@@ -2528,7 +2648,7 @@ If no issues found, use "findings": []"#,
         findings: parsed.findings,
         summary: parsed.summary,
         pass,
-        usage: response.usage,
+        usage: total_usage,
     })
 }
 
@@ -2665,27 +2785,17 @@ CRITICAL RULES FOR EDITS:
     // Always use Smart model for fixes - getting it right the first time saves iterations
     let response = call_llm_with_usage(&system, &user, Model::Smart, true).await?;
     
-    // Parse the JSON response
-    let json_str = extract_json_object(&response.content)
-        .ok_or_else(|| anyhow::anyhow!("No JSON found in fix response"))?;
+    // Parse the JSON response with self-correction on failure
+    let (parsed, correction_usage): (FixResponse, _) = 
+        parse_json_with_retry(&response.content, "review fix").await?;
     
-    let parsed: serde_json::Value = serde_json::from_str(json_str)
-        .map_err(|e| anyhow::anyhow!("Failed to parse fix JSON: {}", e))?;
+    // Merge usage from correction call if any
+    let total_usage = merge_usage(response.usage, correction_usage);
     
-    let description = parsed.get("description")
-        .and_then(|v| v.as_str())
-        .unwrap_or("Fixed review findings")
-        .to_string();
-    
-    let modified_areas = parsed.get("modified_areas")
-        .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-        .unwrap_or_default();
-    
-    // Parse and apply edits
-    let edits: Vec<EditOp> = parsed.get("edits")
-        .and_then(|v| serde_json::from_value(v.clone()).ok())
-        .ok_or_else(|| anyhow::anyhow!("Missing or invalid 'edits' array in response"))?;
+    let description = parsed.description
+        .unwrap_or_else(|| "Fixed review findings".to_string());
+    let modified_areas = parsed.modified_areas;
+    let edits = parsed.edits;
     
     if edits.is_empty() {
         return Err(anyhow::anyhow!("No edits provided in response"));
@@ -2731,7 +2841,7 @@ CRITICAL RULES FOR EDITS:
         description,
         new_content,
         modified_areas,
-        usage: response.usage,
+        usage: total_usage,
     })
 }
 
