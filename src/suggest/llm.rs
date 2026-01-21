@@ -531,16 +531,6 @@ EXAMPLE - Adding a null check:
         new_content = new_content.replacen(&edit.old_string, &edit.new_string, 1);
     }
 
-    // Strip trailing whitespace from each line and ensure file ends with newline
-    let mut new_content: String = new_content
-        .lines()
-        .map(|line| line.trim_end())
-        .collect::<Vec<_>>()
-        .join("\n");
-    if !new_content.ends_with('\n') {
-        new_content.push('\n');
-    }
-
     // Validate the new content isn't empty
     if new_content.trim().is_empty() {
         return Err(anyhow::anyhow!("Generated content is empty"));
@@ -770,16 +760,6 @@ EXAMPLE - Renaming a function across files:
                     modified_areas.push(area);
                 }
             }
-        }
-
-        // Normalize whitespace
-        let mut new_content: String = new_content
-            .lines()
-            .map(|line| line.trim_end())
-            .collect::<Vec<_>>()
-            .join("\n");
-        if !new_content.ends_with('\n') {
-            new_content.push('\n');
         }
 
         if new_content.trim().is_empty() {
@@ -2717,16 +2697,6 @@ CRITICAL RULES FOR EDITS:
         }
 
         new_content = new_content.replacen(&edit.old_string, &edit.new_string, 1);
-    }
-
-    // Normalize whitespace
-    let mut new_content: String = new_content
-        .lines()
-        .map(|line| line.trim_end())
-        .collect::<Vec<_>>()
-        .join("\n");
-    if !new_content.ends_with('\n') {
-        new_content.push('\n');
     }
 
     if new_content.trim().is_empty() {
