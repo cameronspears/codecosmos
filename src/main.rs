@@ -169,8 +169,9 @@ async fn main() -> Result<()> {
     let index = init_index(&path, &cache_manager)?;
     let context = init_context(&path)?;
 
-    // Create empty suggestion engine (will be populated by LLM)
-    let suggestions = SuggestionEngine::new(index.clone());
+    // Create suggestion engine with static refactoring suggestions (LLM suggestions added later)
+    let mut suggestions = SuggestionEngine::new(index.clone());
+    suggestions.generate_static_suggestions();
 
     // Stats mode: print and exit
     if args.stats {
@@ -1783,6 +1784,7 @@ fn run_loop<B: Backend>(
                                                 app.suggestions = suggest::SuggestionEngine::new(
                                                     app.index.clone(),
                                                 );
+                                                app.suggestions.generate_static_suggestions();
                                             }
 
                                             // Clear in-memory summaries if needed

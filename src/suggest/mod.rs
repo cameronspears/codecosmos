@@ -8,7 +8,7 @@
 
 pub mod llm;
 
-use crate::index::{CodebaseIndex, PatternSeverity};
+use crate::index::{CodebaseIndex, Pattern, PatternKind, PatternSeverity};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -55,18 +55,21 @@ pub enum SuggestionKind {
     Documentation,
     /// Test coverage
     Testing,
+    /// Code refactoring (extract, rename, restructure)
+    Refactoring,
 }
 
 impl SuggestionKind {
     pub fn icon(&self) -> char {
         match self {
-            SuggestionKind::Improvement => '\u{2728}',  // 
-            SuggestionKind::BugFix => '\u{1F41B}',      // 
-            SuggestionKind::Feature => '\u{2795}',      // 
-            SuggestionKind::Optimization => '\u{26A1}', // 
-            SuggestionKind::Quality => '\u{2726}',      // 
-            SuggestionKind::Documentation => '\u{1F4DD}', // 
-            SuggestionKind::Testing => '\u{1F9EA}',     // 
+            SuggestionKind::Improvement => '\u{2728}',  // ✨
+            SuggestionKind::BugFix => '\u{1F41B}',      // 🐛
+            SuggestionKind::Feature => '\u{2795}',      // ➕
+            SuggestionKind::Optimization => '\u{26A1}', // ⚡
+            SuggestionKind::Quality => '\u{2726}',      // ✦
+            SuggestionKind::Documentation => '\u{1F4DD}', // 📝
+            SuggestionKind::Testing => '\u{1F9EA}',     // 🧪
+            SuggestionKind::Refactoring => '\u{1F527}', // 🔧
         }
     }
 
@@ -79,6 +82,7 @@ impl SuggestionKind {
             SuggestionKind::Quality => "Quality",
             SuggestionKind::Documentation => "Docs",
             SuggestionKind::Testing => "Test",
+            SuggestionKind::Refactoring => "Refactor",
         }
     }
 }
@@ -258,6 +262,20 @@ impl SuggestionEngine {
         }
     }
 
+    /// Generate static refactoring suggestions from detected patterns.
+    /// 
+    /// This provides immediate, free suggestions based on code patterns
+    /// detected during indexing (long functions, deep nesting, etc.).
+    pub fn generate_static_suggestions(&mut self) {
+        for pattern in &self.index.patterns {
+            if let Some(suggestion) = pattern_to_refactoring_suggestion(pattern) {
+                self.suggestions.push(suggestion);
+            }
+        }
+        // Sort by priority after adding static suggestions
+        self.suggestions.sort_by(|a, b| b.priority.cmp(&a.priority));
+    }
+
     /// Add a suggestion from LLM
     pub fn add_llm_suggestion(&mut self, suggestion: Suggestion) {
         self.suggestions.push(suggestion);
@@ -291,6 +309,7 @@ impl SuggestionEngine {
         let kind_weight = |k: SuggestionKind| -> i64 {
             match k {
                 SuggestionKind::BugFix => 40,
+                SuggestionKind::Refactoring => 30,
                 SuggestionKind::Optimization => 25,
                 SuggestionKind::Testing => 20,
                 SuggestionKind::Quality => 15,
@@ -349,6 +368,72 @@ pub struct SuggestionCounts {
     pub high: usize,
     pub medium: usize,
     pub low: usize,
+}
+
+/// Convert a detected pattern into a refactoring suggestion, if applicable.
+/// 
+/// Returns None for patterns that aren't refactoring-related (e.g., TodoMarker).
+fn pattern_to_refactoring_suggestion(pattern: &Pattern) -> Option<Suggestion> {
+    let (summary, detail, priority) = match pattern.kind {
+        PatternKind::LongFunction => {
+            let summary = format!(
+                "This function is {} - consider breaking it into smaller, focused functions",
+                pattern.description
+            );
+            let detail = "Long functions are harder to test, understand, and maintain. \
+                Look for logical sections that could become separate functions with clear names.";
+            (summary, detail, Priority::Medium)
+        }
+        PatternKind::DeepNesting => {
+            let summary = "Deeply nested code makes logic hard to follow - consider early returns or extracting helpers".to_string();
+            let detail = "Deep nesting often indicates complex conditional logic. \
+                Try using early returns (guard clauses) to reduce nesting, \
+                or extract nested blocks into well-named helper functions.";
+            (summary, detail, Priority::Medium)
+        }
+        PatternKind::ManyParameters => {
+            let summary = format!(
+                "{} - consider grouping related parameters into a struct",
+                pattern.description
+            );
+            let detail = "Functions with many parameters are hard to call correctly \
+                and suggest the function may be doing too much. \
+                Group related parameters into a configuration struct or builder pattern.";
+            (summary, detail, Priority::Low)
+        }
+        PatternKind::GodModule => {
+            let summary = format!(
+                "{} - consider splitting into focused modules",
+                pattern.description
+            );
+            let detail = "Large files are hard to navigate and often contain \
+                multiple responsibilities. Look for natural groupings of \
+                functions and types that could become separate modules.";
+            (summary, detail, Priority::High)
+        }
+        PatternKind::DuplicatePattern => {
+            let summary = "Duplicate code pattern detected - consider extracting into a shared utility".to_string();
+            let detail = "Repeated code makes maintenance harder and increases bug risk. \
+                Extract the common pattern into a reusable function or module.";
+            (summary, detail, Priority::Medium)
+        }
+        // These patterns aren't refactoring-related
+        PatternKind::MissingErrorHandling
+        | PatternKind::UnusedImport
+        | PatternKind::TodoMarker => return None,
+    };
+
+    Some(
+        Suggestion::new(
+            SuggestionKind::Refactoring,
+            priority,
+            pattern.file.clone(),
+            summary,
+            SuggestionSource::Static,
+        )
+        .with_line(pattern.line)
+        .with_detail(detail.to_string()),
+    )
 }
 
 #[cfg(test)]
