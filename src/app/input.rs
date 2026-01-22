@@ -1,3 +1,4 @@
+use crate::app::background;
 use crate::app::messages::BackgroundMessage;
 use crate::app::RuntimeContext;
 use crate::cache;
@@ -70,7 +71,7 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent, ctx: &RuntimeContext) -> R
 
                         app.loading = LoadingState::Answering;
 
-                        tokio::spawn(async move {
+                        background::spawn_background(ctx.tx.clone(), "ask_question", async move {
                             let mem = if repo_memory_context.trim().is_empty() {
                                 None
                             } else {
@@ -127,7 +128,7 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent, ctx: &RuntimeContext) -> R
                     let repo_memory_context = app.repo_memory.to_prompt_context(12, 900);
                     app.loading = LoadingState::Answering;
                     app.close_overlay();
-                    tokio::spawn(async move {
+                    background::spawn_background(ctx.tx.clone(), "ask_question_preview", async move {
                         let mem = if repo_memory_context.trim().is_empty() {
                             None
                         } else {
@@ -233,7 +234,7 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent, ctx: &RuntimeContext) -> R
 
                     app.ship_step = Some(ui::ShipStep::Committing);
 
-                    tokio::spawn(async move {
+                    background::spawn_background(ctx.tx.clone(), "ship_inline", async move {
                         // Stage all files (handle both absolute and relative paths)
                         for file in &files {
                             let rel_path = if file.is_absolute() {
@@ -351,7 +352,7 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent, ctx: &RuntimeContext) -> R
                                     let repo_for_push = repo_path.clone();
                                     let branch_for_push = branch.clone();
                                     let tx_push = ctx.tx.clone();
-                                    tokio::spawn(async move {
+                                    background::spawn_background(ctx.tx.clone(), "ship_push", async move {
                                         match git_ops::push_branch(&repo_for_push, &branch_for_push)
                                         {
                                             Ok(_) => {
@@ -414,7 +415,7 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent, ctx: &RuntimeContext) -> R
 
                     app.update_ship_step(ui::ShipStep::Committing);
 
-                    tokio::spawn(async move {
+                    background::spawn_background(ctx.tx.clone(), "ship_workflow", async move {
                         // Step 1: Stage all files (handle both absolute and relative paths)
                         for file in &files {
                             let rel_path = if file.is_absolute() {
@@ -772,7 +773,7 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent, ctx: &RuntimeContext) -> R
                                             app.pending_suggestions_on_init = true;
                                         }
 
-                                        tokio::spawn(async move {
+                                        background::spawn_background(ctx.tx.clone(), "reset_summary_generation", async move {
                                             let cache = cache::Cache::new(&cache_path);
 
                                             // Start with fresh cache after reset
@@ -901,7 +902,7 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent, ctx: &RuntimeContext) -> R
 
                                     app.loading = LoadingState::GeneratingSuggestions;
 
-                                    tokio::spawn(async move {
+                                    background::spawn_background(ctx.tx.clone(), "reset_suggestions_generation", async move {
                                         let mem = if repo_memory_context.trim().is_empty() {
                                             None
                                         } else {
@@ -1129,7 +1130,7 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent, ctx: &RuntimeContext) -> R
                 if let Some(file_path) = file {
                     app.set_review_fixing(true);
 
-                    tokio::spawn(async move {
+                    background::spawn_background(ctx.tx.clone(), "verification_fix", async move {
                         let orig_ref = if iter > 1 {
                             Some(original.as_str())
                         } else {
@@ -1210,7 +1211,7 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent, ctx: &RuntimeContext) -> R
                                             summary.clone(),
                                         );
 
-                                        tokio::spawn(async move {
+                                        background::spawn_background(ctx.tx.clone(), "preview_generation", async move {
                                             let mem = if repo_memory_context.trim().is_empty() {
                                                 None
                                             } else {
@@ -1303,7 +1304,7 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent, ctx: &RuntimeContext) -> R
                                             }
                                             app.loading = LoadingState::GeneratingFix;
 
-                                            tokio::spawn(async move {
+                                            background::spawn_background(ctx.tx.clone(), "apply_fix", async move {
                                                 // Create branch from main
                                                 let branch_name = git_ops::generate_fix_branch_name(
                                                     &suggestion.id.to_string(),
@@ -1429,7 +1430,7 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent, ctx: &RuntimeContext) -> R
                                                                     std::fs::copy(&full_path, &backup_path)
                                                                 {
                                                                     // Rollback any backups we made
-                                                                    for (_, bp) in &backups {
+                                                                    for (_, bp, _) in &backups {
                                                                         let _ =
                                                                             std::fs::remove_file(bp);
                                                                     }
@@ -1721,7 +1722,7 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent, ctx: &RuntimeContext) -> R
                                         if let Some(file_path) = file {
                                             app.set_review_fixing(true);
 
-                                            tokio::spawn(async move {
+                                            background::spawn_background(ctx.tx.clone(), "verification_fix", async move {
                                                 let orig_ref = if iter > 1 {
                                                     Some(original.as_str())
                                                 } else {
@@ -1783,7 +1784,7 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent, ctx: &RuntimeContext) -> R
 
                                         app.set_ship_step(ui::ShipStep::Committing);
 
-                                        tokio::spawn(async move {
+                                        background::spawn_background(ctx.tx.clone(), "ship_confirm", async move {
                                             // Execute ship workflow
                                             let _ = tx_ship.send(BackgroundMessage::ShipProgress(
                                                 ui::ShipStep::Committing,

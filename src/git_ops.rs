@@ -25,6 +25,7 @@ pub fn current_status(repo_path: &Path) -> Result<GitStatus> {
     let repo = Repository::open(repo_path)?;
     
     let head = repo.head().context("Failed to get HEAD")?;
+    let is_detached = !head.is_branch();
     let branch = head.shorthand().unwrap_or("detached").to_string();
     
     let mut status = GitStatus {
@@ -50,7 +51,11 @@ pub fn current_status(repo_path: &Path) -> Result<GitStatus> {
     }
     
     // Count ahead/behind (simplified - just counts local commits)
-    if let Ok(local_oid) = head.target().ok_or(()) {
+    if is_detached {
+        return Ok(status);
+    }
+
+    if let Some(local_oid) = head.target() {
         if let Ok(upstream) = repo.find_branch(&status.branch, git2::BranchType::Local)
             .and_then(|b| b.upstream()) {
             if let Some(upstream_oid) = upstream.get().target() {

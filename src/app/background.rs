@@ -5,8 +5,11 @@ use crate::suggest;
 use crate::ui::{App, LoadingState, WorkflowStep};
 use crate::ui;
 use crate::util::truncate;
+use futures::FutureExt;
 use std::path::PathBuf;
 use std::sync::mpsc;
+use std::future::Future;
+use std::panic::AssertUnwindSafe;
 
 pub fn drain_messages(
     app: &mut App,
@@ -137,7 +140,7 @@ pub fn drain_messages(
                             ));
                         }
 
-                        tokio::spawn(async move {
+                        spawn_background(ctx.tx.clone(), "suggestions_generation", async move {
                             let mem = if repo_memory_context.trim().is_empty() {
                                 None
                             } else {
@@ -361,7 +364,7 @@ pub fn drain_messages(
                     app.show_toast(&e);
                 } else {
                     let tx_verify = ctx.tx.clone();
-                    tokio::spawn(async move {
+                    spawn_background(ctx.tx.clone(), "verification", async move {
                         match suggest::llm::verify_changes(&files_with_content, 1, &[]).await {
                             Ok(review) => {
                                 let _ = tx_verify.send(BackgroundMessage::VerificationComplete {
@@ -489,7 +492,7 @@ pub fn drain_messages(
                         app.loading = LoadingState::ReviewingChanges;
 
                         let tx_verify = ctx.tx.clone();
-                        tokio::spawn(async move {
+                        spawn_background(ctx.tx.clone(), "re_verification", async move {
                             let files_with_content = vec![(fp, original_content, new_content)];
                             match suggest::llm::verify_changes(
                                 &files_with_content,
@@ -519,4 +522,21 @@ pub fn drain_messages(
             }
         }
     }
+}
+
+pub fn spawn_background<F>(
+    tx: mpsc::Sender<BackgroundMessage>,
+    task_name: &'static str,
+    fut: F,
+) where
+    F: Future<Output = ()> + Send + 'static,
+{
+    tokio::spawn(async move {
+        if AssertUnwindSafe(fut).catch_unwind().await.is_err() {
+            let _ = tx.send(BackgroundMessage::Error(format!(
+                "Background task '{}' crashed unexpectedly.",
+                task_name
+            )));
+        }
+    });
 }

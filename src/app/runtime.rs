@@ -174,7 +174,7 @@ pub async fn run_tui(
             let cache_path = repo_path.clone();
 
             // Process chunks sequentially in a single task to avoid cache races
-            tokio::spawn(async move {
+            background::spawn_background(tx.clone(), "grouping_ai", async move {
                 let cache = cache::Cache::new(&cache_path);
                 let mut grouping_cache = cache
                     .load_grouping_ai_cache()
@@ -284,7 +284,7 @@ pub async fn run_tui(
             // Calculate total file count for progress
             let total_to_process = high_priority.len() + medium_priority.len() + low_priority.len();
 
-            tokio::spawn(async move {
+            background::spawn_background(tx.clone(), "summary_generation", async move {
                 let cache = cache::Cache::new(&cache_path);
 
                 // Load existing cache to update incrementally
@@ -408,7 +408,7 @@ pub async fn run_tui(
                 ));
             }
 
-            tokio::spawn(async move {
+            background::spawn_background(tx.clone(), "suggestions_generation", async move {
                 let mem = if repo_memory_context.trim().is_empty() {
                     None
                 } else {
@@ -570,8 +570,8 @@ fn select_grouping_ai_candidates(
         .filter(|(_, assignment)| assignment.confidence == Confidence::Low)
         .filter(|(_, assignment)| matches!(assignment.layer, Layer::Unknown | Layer::Shared))
         .filter(|(path, _)| {
-            if let Some(hash) = file_hashes.get(path) {
-                !cache.is_file_valid(path, hash)
+            if let Some(hash) = file_hashes.get(*path) {
+                !cache.is_file_valid(*path, hash)
             } else {
                 false
             }

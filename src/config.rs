@@ -2,6 +2,7 @@
 //!
 //! Stores settings in ~/.config/codecosmos/config.json
 
+use keyring::Entry;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
@@ -22,6 +23,27 @@ pub struct Config {
     /// If true, show a preview of what will be sent before inquiry actions
     #[serde(default = "default_privacy_preview")]
     pub privacy_preview: bool,
+}
+
+const KEYRING_SERVICE: &str = "codecosmos";
+const KEYRING_USERNAME: &str = "openrouter_api_key";
+
+fn keyring_entry() -> Result<Entry, keyring::Error> {
+    Entry::new(KEYRING_SERVICE, KEYRING_USERNAME)
+}
+
+fn read_keyring_key() -> Result<Option<String>, keyring::Error> {
+    let entry = keyring_entry()?;
+    match entry.get_password() {
+        Ok(key) => Ok(Some(key)),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(err) => Err(err),
+    }
+}
+
+fn write_keyring_key(key: &str) -> Result<(), keyring::Error> {
+    let entry = keyring_entry()?;
+    entry.set_password(key)
 }
 
 fn default_privacy_preview() -> bool {
@@ -82,21 +104,54 @@ impl Config {
     }
 
     /// Get the OpenRouter API key (from config or environment)
-    pub fn get_api_key(&self) -> Option<String> {
+    pub fn get_api_key(&mut self) -> Option<String> {
         // Environment variable takes precedence
-        std::env::var("OPENROUTER_API_KEY").ok()
-            .or_else(|| self.openrouter_api_key.clone())
+        if let Ok(key) = std::env::var("OPENROUTER_API_KEY") {
+            return Some(key);
+        }
+
+        if let Ok(Some(key)) = read_keyring_key() {
+            return Some(key);
+        }
+
+        if let Some(key) = self.openrouter_api_key.clone() {
+            if write_keyring_key(&key).is_ok() {
+                self.openrouter_api_key = None;
+                let _ = self.save();
+            }
+            return Some(key);
+        }
+
+        None
     }
 
     /// Set and save the API key
     pub fn set_api_key(&mut self, key: &str) -> Result<(), String> {
-        self.openrouter_api_key = Some(key.to_string());
-        self.save()
+        match write_keyring_key(key) {
+            Ok(()) => {
+                self.openrouter_api_key = None;
+                self.save()
+            }
+            Err(err) => {
+                eprintln!(
+                    "  Warning: Failed to store API key in system keychain ({}). Falling back to config file.",
+                    err
+                );
+                self.openrouter_api_key = Some(key.to_string());
+                self.save()
+            }
+        }
     }
 
     /// Check if API key is configured
     pub fn has_api_key(&self) -> bool {
-        self.get_api_key().is_some()
+        if std::env::var("OPENROUTER_API_KEY").is_ok() {
+            return true;
+        }
+        if let Ok(Some(_)) = read_keyring_key() {
+            return true;
+        }
+        self.openrouter_api_key.is_some()
     }
 
     /// Validate API key format (should start with sk-)
@@ -164,7 +219,7 @@ pub fn setup_api_key_interactive() -> Result<String, String> {
     println!("  Uses a 4-tier model system optimized for cost and quality.");
     println!();
     println!("  1. Get a free API key at: https://openrouter.ai/keys");
-    println!("  2. Paste it below (it will be saved locally)");
+    println!("  2. Paste it below (saved in your system keychain when available)");
     println!();
     print!("  API Key: ");
     io::stdout().flush().map_err(|e| e.to_string())?;

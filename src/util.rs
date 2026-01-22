@@ -39,7 +39,6 @@ pub fn run_command_with_timeout(
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("Failed to start command: {}", e))?;
-    child.kill_on_drop(true);
 
     let stdout = child
         .stdout

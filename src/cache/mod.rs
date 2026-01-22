@@ -6,9 +6,10 @@
 use crate::index::CodebaseIndex;
 use crate::suggest::Suggestion;
 use chrono::{DateTime, Duration, Utc};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 
 const CACHE_DIR: &str = ".cosmos";
@@ -535,6 +536,16 @@ pub struct Cache {
     cache_dir: PathBuf,
 }
 
+struct CacheLock {
+    file: std::fs::File,
+}
+
+impl Drop for CacheLock {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
+}
+
 impl Cache {
     /// Create a new cache manager for a project
     pub fn new(project_root: &Path) -> Self {
@@ -566,21 +577,44 @@ impl Cache {
         Ok(())
     }
 
+    fn lock(&self, exclusive: bool) -> anyhow::Result<CacheLock> {
+        if exclusive {
+            self.ensure_dir()?;
+        } else if !self.cache_dir.exists() {
+            return Err(anyhow::anyhow!("Cache directory missing"));
+        }
+
+        let lock_path = self.cache_dir.join(".lock");
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(&lock_path)?;
+
+        if exclusive {
+            file.lock_exclusive()?;
+        } else {
+            file.lock_shared()?;
+        }
+
+        Ok(CacheLock { file })
+    }
+
     /// Save index cache
     pub fn save_index_cache(&self, cache: &IndexCache) -> anyhow::Result<()> {
-        self.ensure_dir()?;
+        let _lock = self.lock(true)?;
         let path = self.cache_dir.join(INDEX_CACHE_FILE);
         let content = serde_json::to_string_pretty(cache)?;
-        fs::write(path, content)?;
+        write_atomic(&path, &content)?;
         Ok(())
     }
 
     /// Save suggestions cache
     pub fn save_suggestions_cache(&self, cache: &SuggestionsCache) -> anyhow::Result<()> {
-        self.ensure_dir()?;
+        let _lock = self.lock(true)?;
         let path = self.cache_dir.join(SUGGESTIONS_CACHE_FILE);
         let content = serde_json::to_string_pretty(cache)?;
-        fs::write(path, content)?;
+        write_atomic(&path, &content)?;
         Ok(())
     }
 
@@ -591,16 +625,17 @@ impl Cache {
             return None;
         }
 
+        let _lock = self.lock(false).ok()?;
         let content = fs::read_to_string(&path).ok()?;
         serde_json::from_str(&content).ok()
     }
 
     /// Save LLM-generated summaries cache
     pub fn save_llm_summaries_cache(&self, cache: &LlmSummaryCache) -> anyhow::Result<()> {
-        self.ensure_dir()?;
+        let _lock = self.lock(true)?;
         let path = self.cache_dir.join(LLM_SUMMARIES_CACHE_FILE);
         let content = serde_json::to_string_pretty(cache)?;
-        fs::write(path, content)?;
+        write_atomic(&path, &content)?;
         Ok(())
     }
 
@@ -610,16 +645,17 @@ impl Cache {
         if !path.exists() {
             return None;
         }
+        let _lock = self.lock(false).ok()?;
         let content = fs::read_to_string(&path).ok()?;
         serde_json::from_str(&content).ok()
     }
 
     /// Save grouping AI cache
     pub fn save_grouping_ai_cache(&self, cache: &GroupingAiCache) -> anyhow::Result<()> {
-        self.ensure_dir()?;
+        let _lock = self.lock(true)?;
         let path = self.cache_dir.join(GROUPING_AI_CACHE_FILE);
         let content = serde_json::to_string_pretty(cache)?;
-        fs::write(path, content)?;
+        write_atomic(&path, &content)?;
         Ok(())
     }
 
@@ -629,6 +665,10 @@ impl Cache {
         if !path.exists() {
             return RepoMemory::default();
         }
+        let _lock = match self.lock(false) {
+            Ok(lock) => lock,
+            Err(_) => return RepoMemory::default(),
+        };
         fs::read_to_string(&path)
             .ok()
             .and_then(|content| serde_json::from_str(&content).ok())
@@ -637,10 +677,10 @@ impl Cache {
 
     /// Save repo memory to `.cosmos/memory.json`
     pub fn save_repo_memory(&self, memory: &RepoMemory) -> anyhow::Result<()> {
-        self.ensure_dir()?;
+        let _lock = self.lock(true)?;
         let path = self.cache_dir.join(MEMORY_FILE);
         let content = serde_json::to_string_pretty(memory)?;
-        fs::write(path, content)?;
+        write_atomic(&path, &content)?;
         Ok(())
     }
 
@@ -650,6 +690,7 @@ impl Cache {
         if !path.exists() {
             return None;
         }
+        let _lock = self.lock(false).ok()?;
         fs::read_to_string(&path)
             .ok()
             .and_then(|content| serde_json::from_str(&content).ok())
@@ -657,15 +698,16 @@ impl Cache {
 
     /// Save domain glossary to `.cosmos/glossary.json`
     pub fn save_glossary(&self, glossary: &DomainGlossary) -> anyhow::Result<()> {
-        self.ensure_dir()?;
+        let _lock = self.lock(true)?;
         let path = self.cache_dir.join(GLOSSARY_FILE);
         let content = serde_json::to_string_pretty(glossary)?;
-        fs::write(path, content)?;
+        write_atomic(&path, &content)?;
         Ok(())
     }
 
     /// Clear selected cache files only
     pub fn clear_selective(&self, options: &[ResetOption]) -> anyhow::Result<Vec<String>> {
+        let _lock = self.lock(true)?;
         let mut cleared = Vec::new();
 
         for option in options {
@@ -690,5 +732,15 @@ impl Cache {
         Ok(cleared)
     }
 
+}
+
+fn write_atomic(path: &Path, content: &str) -> anyhow::Result<()> {
+    let tmp_path = path.with_extension("tmp");
+    fs::write(&tmp_path, content)?;
+    if let Err(err) = fs::rename(&tmp_path, path) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(err.into());
+    }
+    Ok(())
 }
 

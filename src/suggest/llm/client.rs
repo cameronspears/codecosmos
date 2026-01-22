@@ -8,7 +8,8 @@ const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
 
 /// Get the configured OpenRouter API key, if any.
 fn api_key() -> Option<String> {
-    Config::load().get_api_key()
+    let mut config = Config::load();
+    config.get_api_key()
 }
 
 /// Response from LLM including content and usage stats
@@ -87,6 +88,13 @@ fn parse_retry_after(text: &str) -> Option<u64> {
         }
     }
     None
+}
+
+fn backoff_secs(retry_count: u32) -> u64 {
+    let factor = BACKOFF_MULTIPLIER.pow(retry_count.saturating_sub(1));
+    let ms = INITIAL_BACKOFF_MS.saturating_mul(factor);
+    let secs = ms / 1000;
+    if secs == 0 { 1 } else { secs }
 }
 
 /// Call LLM API with full response including usage stats
@@ -175,14 +183,23 @@ pub(crate) async fn call_llm_with_usage(
             retry_count += 1;
 
             // Try to parse retry-after
-            let retry_after = parse_retry_after(&text).unwrap_or_else(|| {
-                // Exponential backoff
-                (INITIAL_BACKOFF_MS * BACKOFF_MULTIPLIER.pow(retry_count - 1)) / 1000
-            });
+            let retry_after = parse_retry_after(&text).unwrap_or_else(|| backoff_secs(retry_count));
 
             eprintln!(
                 "  OpenRouter rate limited. Retrying in {}s (attempt {}/{})",
                 retry_after, retry_count, MAX_RETRIES
+            );
+            tokio::time::sleep(tokio::time::Duration::from_secs(retry_after)).await;
+            continue;
+        }
+
+        // Retry transient server errors
+        if status.is_server_error() && retry_count < MAX_RETRIES {
+            retry_count += 1;
+            let retry_after = backoff_secs(retry_count);
+            eprintln!(
+                "  OpenRouter server error ({}). Retrying in {}s (attempt {}/{})",
+                status, retry_after, retry_count, MAX_RETRIES
             );
             tokio::time::sleep(tokio::time::Duration::from_secs(retry_after)).await;
             continue;

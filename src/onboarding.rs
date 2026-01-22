@@ -108,7 +108,7 @@ fn setup_byok() -> Result<(), String> {
     println!("  1. Go to: https://openrouter.ai/keys");
     println!("  2. Sign up or log in");
     println!("  3. Create a new API key");
-    println!("  4. Copy and paste it below");
+    println!("  4. Copy and paste it below (saved in your system keychain when available)");
     println!();
     println!("  Tip: OpenRouter offers $5 free credit for new accounts!");
     println!();
