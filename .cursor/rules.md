@@ -41,7 +41,7 @@ constraints unless they clearly improve safety or user outcomes.
 - Add new crates only when they provide clear value; use latest versions.
 
 ## Testing
-- **Always run `cargo test` before completing any change** to ensure
+- Always run `cargo test` before completing any change to ensure
   the codebase compiles and tests pass.
 - Add unit tests for new behavior, bug fixes, and non-trivial logic.
 - For refactors without behavior change, rely on existing tests unless
