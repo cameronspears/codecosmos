@@ -485,20 +485,26 @@ fn resolve_import_path(import: &str, from_file: &Path) -> Option<PathBuf> {
     // Handle relative imports
     if import.starts_with('.') {
         let parent = from_file.parent()?;
-        let cleaned = import.trim_start_matches("./").trim_start_matches("../");
-        
-        // Try common extensions
-        for ext in &["rs", "ts", "tsx", "js", "jsx", "py", "go"] {
-            let candidate = parent.join(format!("{}.{}", cleaned, ext));
-            if candidate.exists() {
-                return Some(candidate);
+        let base = normalize_path(&parent.join(import));
+
+        if base.extension().is_some() {
+            if base.exists() {
+                return Some(base);
             }
-        }
-        
-        // Try as directory with index
-        let dir_candidate = parent.join(cleaned).join("mod.rs");
-        if dir_candidate.exists() {
-            return Some(dir_candidate);
+        } else {
+            // Try common extensions
+            for ext in &["rs", "ts", "tsx", "js", "jsx", "py", "go"] {
+                let candidate = base.with_extension(ext);
+                if candidate.exists() {
+                    return Some(candidate);
+                }
+            }
+
+            // Try as directory with index
+            let dir_candidate = base.join("mod.rs");
+            if dir_candidate.exists() {
+                return Some(dir_candidate);
+            }
         }
     }
     

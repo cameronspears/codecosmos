@@ -4,7 +4,7 @@
 
 use anyhow::{Context, Result};
 use crate::util::{run_command_with_timeout, CommandRunResult};
-use git2::{IndexAddOption, Repository, Signature};
+use git2::{IndexAddOption, Repository, Signature, StatusOptions};
 use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
@@ -33,7 +33,14 @@ pub fn current_status(repo_path: &Path) -> Result<GitStatus> {
         ..Default::default()
     };
     
-    let statuses = repo.statuses(None)?;
+    let mut opts = StatusOptions::new();
+    opts.include_untracked(true);
+    opts.recurse_untracked_dirs(true);
+    opts.include_ignored(false);
+    opts.include_unmodified(false);
+    opts.exclude_submodules(true);
+
+    let statuses = repo.statuses(Some(&mut opts))?;
     
     for entry in statuses.iter() {
         let path = entry.path().unwrap_or("").to_string();
@@ -266,8 +273,29 @@ pub fn commit(repo_path: &Path, message: &str) -> Result<String> {
     let tree_id = index.write_tree()?;
     let tree = repo.find_tree(tree_id)?;
     
-    let head = repo.head()?;
-    let parent = head.peel_to_commit()?;
+    let parent = match repo.head() {
+        Ok(head) => match head.peel_to_commit() {
+            Ok(commit) => Some(commit),
+            Err(err)
+                if matches!(
+                    err.code(),
+                    git2::ErrorCode::UnbornBranch | git2::ErrorCode::NotFound
+                ) =>
+            {
+                None
+            }
+            Err(err) => return Err(err.into()),
+        },
+        Err(err)
+            if matches!(
+                err.code(),
+                git2::ErrorCode::UnbornBranch | git2::ErrorCode::NotFound
+            ) =>
+        {
+            None
+        }
+        Err(err) => return Err(err.into()),
+    };
     
     // Get author info from git config
     let config = repo.config()?;
@@ -276,14 +304,10 @@ pub fn commit(repo_path: &Path, message: &str) -> Result<String> {
     
     let sig = Signature::now(&name, &email)?;
     
-    let oid = repo.commit(
-        Some("HEAD"),
-        &sig,
-        &sig,
-        message,
-        &tree,
-        &[&parent],
-    )?;
+    let oid = match parent {
+        Some(ref parent) => repo.commit(Some("HEAD"), &sig, &sig, message, &tree, &[parent])?,
+        None => repo.commit(Some("HEAD"), &sig, &sig, message, &tree, &[])?,
+    };
     
     Ok(oid.to_string())
 }
@@ -588,48 +612,80 @@ pub fn stash_and_switch_to_main(repo_path: &Path) -> Result<()> {
 // GitHub CLI (gh) Integration
 // ============================================================================
 
+const GH_TIMEOUT_SECS: u64 = 30;
+
+fn run_gh_command(repo_path: Option<&Path>, args: &[&str]) -> Result<CommandRunResult> {
+    let mut cmd = Command::new("gh");
+    if let Some(path) = repo_path {
+        cmd.current_dir(path);
+    }
+    cmd.args(args)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GH_PROMPT_DISABLED", "1");
+
+    run_command_with_timeout(&mut cmd, Duration::from_secs(GH_TIMEOUT_SECS))
+        .map_err(|e| anyhow::anyhow!("Failed to run gh command: {}", e))
+}
+
 /// Check if gh CLI is available
-pub fn gh_available() -> bool {
-    Command::new("gh")
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+pub fn gh_available() -> Result<()> {
+    let output = run_gh_command(None, &["--version"])
+        .map_err(|_| anyhow::anyhow!("gh CLI not installed. Install from https://cli.github.com"))?;
+    if output.timed_out {
+        return Err(anyhow::anyhow!(
+            "GitHub CLI timed out after {}s while checking version. Check your network and try again.",
+            GH_TIMEOUT_SECS
+        ));
+    }
+    if output.status.map(|s| s.success()).unwrap_or(false) {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!("gh CLI not installed. Install from https://cli.github.com"))
+    }
 }
 
 /// Check if gh is authenticated
-pub fn gh_authenticated() -> bool {
-    Command::new("gh")
-        .args(["auth", "status"])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+pub fn gh_authenticated() -> Result<()> {
+    let output = run_gh_command(None, &["auth", "status"])
+        .map_err(|_| anyhow::anyhow!("gh CLI not authenticated. Run 'gh auth login' first"))?;
+    if output.timed_out {
+        return Err(anyhow::anyhow!(
+            "GitHub CLI timed out after {}s while checking login. Check your network and try again.",
+            GH_TIMEOUT_SECS
+        ));
+    }
+    if output.status.map(|s| s.success()).unwrap_or(false) {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!("gh CLI not authenticated. Run 'gh auth login' first"))
+    }
 }
 
 /// Create a pull request using gh CLI
 pub fn create_pr(repo_path: &Path, title: &str, body: &str) -> Result<String> {
-    if !gh_available() {
-        return Err(anyhow::anyhow!("gh CLI not installed. Install from https://cli.github.com"));
+    gh_available()?;
+    gh_authenticated()?;
+
+    let output = run_gh_command(
+        Some(repo_path),
+        &["pr", "create", "--title", title, "--body", body],
+    )
+    .context("Failed to create PR")?;
+    if output.timed_out {
+        return Err(anyhow::anyhow!(
+            "GitHub CLI timed out after {}s while creating the PR. Check your network and try again.",
+            GH_TIMEOUT_SECS
+        ));
     }
     
-    if !gh_authenticated() {
-        return Err(anyhow::anyhow!("gh CLI not authenticated. Run 'gh auth login' first"));
-    }
-    
-    let output = Command::new("gh")
-        .current_dir(repo_path)
-        .args(["pr", "create", "--title", title, "--body", body])
-        .output()
-        .context("Failed to create PR")?;
-    
-    if output.status.success() {
+    if output.status.map(|s| s.success()).unwrap_or(false) {
         // gh pr create outputs the PR URL
-        let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let url = output.stdout.trim().to_string();
         Ok(url)
     } else {
         Err(anyhow::anyhow!(
             "Failed to create PR: {}",
-            String::from_utf8_lossy(&output.stderr)
+            output.stderr.trim()
         ))
     }
 }

@@ -737,6 +737,15 @@ impl Cache {
 fn write_atomic(path: &Path, content: &str) -> anyhow::Result<()> {
     let tmp_path = path.with_extension("tmp");
     fs::write(&tmp_path, content)?;
+    #[cfg(windows)]
+    {
+        if path.exists() {
+            if let Err(err) = fs::remove_file(path) {
+                let _ = fs::remove_file(&tmp_path);
+                return Err(err.into());
+            }
+        }
+    }
     if let Err(err) = fs::rename(&tmp_path, path) {
         let _ = fs::remove_file(&tmp_path);
         return Err(err.into());

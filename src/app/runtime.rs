@@ -50,7 +50,7 @@ pub async fn run_tui(
         let main_branch =
             git_ops::get_main_branch_name(&repo_path).unwrap_or_else(|_| "main".to_string());
         let is_on_main = status.branch == main_branch;
-        let changed_count = status.staged.len() + status.modified.len();
+        let changed_count = status.staged.len() + status.modified.len() + status.untracked.len();
 
         // Show overlay if not on main or has uncommitted changes
         if !is_on_main || changed_count > 0 {
