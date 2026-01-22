@@ -48,6 +48,9 @@ constraints unless they clearly improve safety or user outcomes.
   risk is high.
 - Test edge cases: empty inputs, error paths, boundary conditions.
 - When fixing a bug, add a regression test that would have caught it.
+- If a test fails, investigate and fix the underlying issue. Do not skip
+  or ignore failing tests—they indicate real problems that need to be
+  resolved.
 
 ## UX text
 - Plain English, avoid jargon.
