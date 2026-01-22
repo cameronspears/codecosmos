@@ -3,9 +3,11 @@
 //! Provides branch, stage, commit, and push operations.
 
 use anyhow::{Context, Result};
+use crate::util::{run_command_with_timeout, CommandRunResult};
 use git2::{IndexAddOption, Repository, Signature};
 use std::path::Path;
 use std::process::Command;
+use std::time::Duration;
 
 /// Status of the working directory
 #[derive(Debug, Clone, Default)]
@@ -237,11 +239,20 @@ pub fn push_branch(repo_path: &Path, branch: &str) -> Result<String> {
     let output = run_git_push(repo_path, &remote, branch, needs_upstream)
         .context("Failed to execute git push")?;
 
-    if output.status.success() {
-        return Ok(String::from_utf8_lossy(&output.stdout).to_string());
+    if output.timed_out {
+        return Err(anyhow::anyhow!(
+            "git push timed out after {}s (remote: {}, branch: {})",
+            GIT_PUSH_TIMEOUT_SECS,
+            remote,
+            branch
+        ));
     }
 
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    if output.status.map(|s| s.success()).unwrap_or(false) {
+        return Ok(output.stdout);
+    }
+
+    let stderr = output.stderr;
     // Only retry with -u if the first attempt didn't include it.
     // If needs_upstream was already true, retrying with -u is pointless.
     if !needs_upstream
@@ -251,10 +262,18 @@ pub fn push_branch(repo_path: &Path, branch: &str) -> Result<String> {
     {
         let retry = run_git_push(repo_path, &remote, branch, true)
             .context("Failed to retry git push with upstream")?;
-        if retry.status.success() {
-            return Ok(String::from_utf8_lossy(&retry.stdout).to_string());
+        if retry.timed_out {
+            return Err(anyhow::anyhow!(
+                "git push timed out after {}s (remote: {}, branch: {})",
+                GIT_PUSH_TIMEOUT_SECS,
+                remote,
+                branch
+            ));
         }
-        let retry_err = String::from_utf8_lossy(&retry.stderr);
+        if retry.status.map(|s| s.success()).unwrap_or(false) {
+            return Ok(retry.stdout);
+        }
+        let retry_err = retry.stderr;
         return Err(anyhow::anyhow!(
             "git push failed after retrying with upstream (remote: {}, branch: {}): {}",
             remote,
@@ -271,12 +290,14 @@ pub fn push_branch(repo_path: &Path, branch: &str) -> Result<String> {
     ))
 }
 
+const GIT_PUSH_TIMEOUT_SECS: u64 = 180;
+
 fn run_git_push(
     repo_path: &Path,
     remote: &str,
     branch: &str,
     set_upstream: bool,
-) -> Result<std::process::Output> {
+) -> Result<CommandRunResult> {
     let mut args = vec!["push".to_string()];
     if set_upstream {
         args.push("-u".to_string());
@@ -284,11 +305,13 @@ fn run_git_push(
     args.push(remote.to_string());
     args.push(branch.to_string());
 
-    Command::new("git")
-        .current_dir(repo_path)
+    let mut cmd = Command::new("git");
+    cmd.current_dir(repo_path)
         .args(args)
-        .output()
-        .context("Failed to run git push command")
+        .env("GIT_TERMINAL_PROMPT", "0");
+
+    run_command_with_timeout(&mut cmd, Duration::from_secs(GIT_PUSH_TIMEOUT_SECS))
+        .map_err(|e| anyhow::anyhow!("Failed to run git push command: {}", e))
 }
 
 fn has_upstream(repo: &Repository, branch: &str) -> bool {

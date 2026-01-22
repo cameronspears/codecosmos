@@ -719,8 +719,13 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent, ctx: &RuntimeContext) -> R
                                 let _ = app.context.refresh();
 
                                 // Check if AI is available for regeneration
-                                let ai_enabled = suggest::llm::is_available()
-                                    && app.config.allow_ai(app.session_cost).is_ok();
+                                let mut ai_enabled = suggest::llm::is_available();
+                                if ai_enabled {
+                                    if let Err(e) = app.config.allow_ai(app.session_cost) {
+                                        app.show_toast(&e);
+                                        ai_enabled = false;
+                                    }
+                                }
 
                                 // IMPORTANT: Summaries must generate FIRST (they build the glossary),
                                 // THEN suggestions can use the rebuilt glossary.
@@ -1054,6 +1059,10 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent, ctx: &RuntimeContext) -> R
                 && !app.review_state.fixing
                 && !app.review_state.selected.is_empty()
             {
+                if let Err(e) = app.config.allow_ai(app.session_cost) {
+                    app.show_toast(&e);
+                    return Ok(());
+                }
                 let selected_findings = app.get_selected_review_findings();
                 let file = app.review_state.file_path.clone();
                 let content = app.review_state.new_content.clone();
@@ -1239,6 +1248,10 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent, ctx: &RuntimeContext) -> R
                                             .find(|s| s.id == sid)
                                             .cloned()
                                         {
+                                            if let Err(e) = app.config.allow_ai(app.session_cost) {
+                                                app.show_toast(&e);
+                                                return Ok(());
+                                            }
                                             app.loading = LoadingState::GeneratingFix;
 
                                             tokio::spawn(async move {
@@ -1637,6 +1650,10 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent, ctx: &RuntimeContext) -> R
                                 if !app.review_state.reviewing && !app.review_state.fixing {
                                     if !app.review_state.selected.is_empty() {
                                         // Fix selected findings (same as 'f' key)
+                                        if let Err(e) = app.config.allow_ai(app.session_cost) {
+                                            app.show_toast(&e);
+                                            return Ok(());
+                                        }
                                         let selected_findings = app.get_selected_review_findings();
                                         let file = app.review_state.file_path.clone();
                                         let content = app.review_state.new_content.clone();

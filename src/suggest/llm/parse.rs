@@ -72,10 +72,12 @@ pub(crate) fn parse_codebase_suggestions(response: &str) -> anyhow::Result<Vec<S
                     match try_parse_individual_suggestions(&json_str) {
                         Ok(v) if !v.is_empty() => v,
                         _ => {
-                            // Log the error but return empty instead of crashing
-                            eprintln!("Warning: Failed to parse LLM suggestions: {}", e);
-                            eprintln!("Response preview: {}", truncate_str(&json_str, 300));
-                            return Ok(Vec::new());
+                            let preview = truncate_str(&json_str, 200);
+                            return Err(anyhow::anyhow!(
+                                "Suggestions could not be parsed ({}). Try regenerating. Response preview: {}",
+                                e,
+                                preview
+                            ));
                         }
                     }
                 }

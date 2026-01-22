@@ -5,6 +5,9 @@
 
 use std::path::Path;
 use std::process::Command;
+use std::time::Duration;
+
+use crate::util::run_command_with_timeout;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CheckStatus {
@@ -60,25 +63,35 @@ pub fn run(repo_path: &Path) -> Vec<CheckResult> {
 }
 
 fn run_cmd(repo_path: &Path, name: &str, bin: &str, args: &[&str]) -> CheckResult {
-    let output = Command::new(bin)
-        .current_dir(repo_path)
-        .args(args)
-        .output();
+    const SAFE_APPLY_TIMEOUT_SECS: u64 = 180;
+    let mut cmd = Command::new(bin);
+    cmd.current_dir(repo_path).args(args);
 
-    match output {
+    match run_command_with_timeout(&mut cmd, Duration::from_secs(SAFE_APPLY_TIMEOUT_SECS)) {
         Ok(out) => {
             let mut combined = String::new();
+            if out.timed_out {
+                combined.push_str(&format!(
+                    "Timed out after {}s",
+                    SAFE_APPLY_TIMEOUT_SECS
+                ));
+            }
             if !out.stdout.is_empty() {
-                combined.push_str(&String::from_utf8_lossy(&out.stdout));
+                if !combined.is_empty() {
+                    combined.push_str("\n");
+                }
+                combined.push_str(&out.stdout);
             }
             if !out.stderr.is_empty() {
                 if !combined.is_empty() {
                     combined.push_str("\n");
                 }
-                combined.push_str(&String::from_utf8_lossy(&out.stderr));
+                combined.push_str(&out.stderr);
             }
 
-            let status = if out.status.success() {
+            let status = if out.timed_out {
+                CheckStatus::Fail
+            } else if out.status.map(|s| s.success()).unwrap_or(false) {
                 CheckStatus::Pass
             } else {
                 CheckStatus::Fail

@@ -91,8 +91,13 @@ pub fn drain_messages(
                     app.pending_suggestions_on_init = false;
 
                     // Check if AI is still available
-                    let ai_enabled = suggest::llm::is_available()
-                        && app.config.allow_ai(app.session_cost).is_ok();
+                    let mut ai_enabled = suggest::llm::is_available();
+                    if ai_enabled {
+                        if let Err(e) = app.config.allow_ai(app.session_cost) {
+                            app.show_toast(&e);
+                            ai_enabled = false;
+                        }
+                    }
 
                     if ai_enabled {
                         let index_clone = app.index.clone();
@@ -316,24 +321,28 @@ pub fn drain_messages(
                 app.start_review(first_file, first_original.clone(), first_new.clone());
 
                 // Trigger verification in background (all files)
-                let tx_verify = ctx.tx.clone();
-                tokio::spawn(async move {
-                    match suggest::llm::verify_changes(&files_with_content, 1, &[]).await {
-                        Ok(review) => {
-                            let _ = tx_verify.send(BackgroundMessage::VerificationComplete {
-                                findings: review.findings,
-                                summary: review.summary,
-                                usage: review.usage,
-                            });
+                if let Err(e) = app.config.allow_ai(app.session_cost) {
+                    app.show_toast(&e);
+                } else {
+                    let tx_verify = ctx.tx.clone();
+                    tokio::spawn(async move {
+                        match suggest::llm::verify_changes(&files_with_content, 1, &[]).await {
+                            Ok(review) => {
+                                let _ = tx_verify.send(BackgroundMessage::VerificationComplete {
+                                    findings: review.findings,
+                                    summary: review.summary,
+                                    usage: review.usage,
+                                });
+                            }
+                            Err(e) => {
+                                let _ = tx_verify.send(BackgroundMessage::Error(format!(
+                                    "Verification failed: {}",
+                                    e
+                                )));
+                            }
                         }
-                        Err(e) => {
-                            let _ = tx_verify.send(BackgroundMessage::Error(format!(
-                                "Verification failed: {}",
-                                e
-                            )));
-                        }
-                    }
-                });
+                    });
+                }
             }
             BackgroundMessage::DirectFixError(e) => {
                 app.loading = LoadingState::None;
@@ -437,35 +446,39 @@ pub fn drain_messages(
                 // Note: On re-reviews, we don't pass suggestion context because we're
                 // verifying fixes to the reviewer's findings, not the original suggestion
                 if let Some(fp) = file_path {
-                    app.review_state.reviewing = true;
-                    app.loading = LoadingState::ReviewingChanges;
+                    if let Err(e) = app.config.allow_ai(app.session_cost) {
+                        app.show_toast(&e);
+                    } else {
+                        app.review_state.reviewing = true;
+                        app.loading = LoadingState::ReviewingChanges;
 
-                    let tx_verify = ctx.tx.clone();
-                    tokio::spawn(async move {
-                        let files_with_content = vec![(fp, original_content, new_content)];
-                        match suggest::llm::verify_changes(
-                            &files_with_content,
-                            iteration,
-                            &fixed_titles,
-                        )
-                        .await
-                        {
-                            Ok(review) => {
-                                let _ =
-                                    tx_verify.send(BackgroundMessage::VerificationComplete {
-                                        findings: review.findings,
-                                        summary: review.summary,
-                                        usage: review.usage,
-                                    });
+                        let tx_verify = ctx.tx.clone();
+                        tokio::spawn(async move {
+                            let files_with_content = vec![(fp, original_content, new_content)];
+                            match suggest::llm::verify_changes(
+                                &files_with_content,
+                                iteration,
+                                &fixed_titles,
+                            )
+                            .await
+                            {
+                                Ok(review) => {
+                                    let _ =
+                                        tx_verify.send(BackgroundMessage::VerificationComplete {
+                                            findings: review.findings,
+                                            summary: review.summary,
+                                            usage: review.usage,
+                                        });
+                                }
+                                Err(e) => {
+                                    let _ = tx_verify.send(BackgroundMessage::Error(format!(
+                                        "Re-verification failed: {}",
+                                        e
+                                    )));
+                                }
                             }
-                            Err(e) => {
-                                let _ = tx_verify.send(BackgroundMessage::Error(format!(
-                                    "Re-verification failed: {}",
-                                    e
-                                )));
-                            }
-                        }
-                    });
+                        });
+                    }
                 }
             }
         }

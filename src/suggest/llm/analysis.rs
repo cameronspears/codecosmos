@@ -122,12 +122,16 @@ fn build_codebase_context(
     ));
 
     // Uncommitted changes FIRST (highest priority)
-    if !context.uncommitted_files.is_empty() || !context.staged_files.is_empty() {
+    if !context.uncommitted_files.is_empty()
+        || !context.staged_files.is_empty()
+        || !context.untracked_files.is_empty()
+    {
         let mut changes_section = String::from("\n\nACTIVELY WORKING ON [CHANGED]:");
         for file in context
             .uncommitted_files
             .iter()
             .chain(context.staged_files.iter())
+            .chain(context.untracked_files.iter())
             .take(15)
         {
             // Include file details if we have them

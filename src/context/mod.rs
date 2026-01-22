@@ -31,6 +31,8 @@ pub struct WorkContext {
     pub uncommitted_files: Vec<PathBuf>,
     /// Files staged for commit
     pub staged_files: Vec<PathBuf>,
+    /// Untracked files in the working tree
+    pub untracked_files: Vec<PathBuf>,
     /// Recent commits (last 5)
     pub recent_commits: Vec<CommitInfo>,
     /// Inferred focus area (what the user seems to be working on)
@@ -51,16 +53,17 @@ impl WorkContext {
             .to_path_buf();
 
         let branch = get_current_branch(&repo)?;
-        let (uncommitted, staged) = get_file_statuses(&repo)?;
+        let (uncommitted, staged, untracked) = get_file_statuses(&repo)?;
         let recent_commits = get_recent_commits(&repo, 5)?;
-        let modified_count = uncommitted.len() + staged.len();
+        let modified_count = uncommitted.len() + staged.len() + untracked.len();
 
-        let inferred_focus = infer_focus(&uncommitted, &staged, &recent_commits);
+        let inferred_focus = infer_focus(&uncommitted, &staged, &untracked, &recent_commits);
 
         Ok(Self {
             branch,
             uncommitted_files: uncommitted,
             staged_files: staged,
+            untracked_files: untracked,
             recent_commits,
             inferred_focus,
             modified_count,
@@ -80,6 +83,7 @@ impl WorkContext {
         self.uncommitted_files
             .iter()
             .chain(self.staged_files.iter())
+            .chain(self.untracked_files.iter())
             .collect()
     }
 }
@@ -92,7 +96,9 @@ fn get_current_branch(repo: &Repository) -> anyhow::Result<String> {
 }
 
 /// Get file statuses (uncommitted, staged)
-fn get_file_statuses(repo: &Repository) -> anyhow::Result<(Vec<PathBuf>, Vec<PathBuf>)> {
+fn get_file_statuses(
+    repo: &Repository,
+) -> anyhow::Result<(Vec<PathBuf>, Vec<PathBuf>, Vec<PathBuf>)> {
     let mut opts = StatusOptions::new();
     opts.include_untracked(true);
     opts.include_ignored(false);
@@ -104,6 +110,7 @@ fn get_file_statuses(repo: &Repository) -> anyhow::Result<(Vec<PathBuf>, Vec<Pat
 
     let mut uncommitted = Vec::new();
     let mut staged = Vec::new();
+    let mut untracked = Vec::new();
 
     for entry in statuses.iter() {
         let status = entry.status();
@@ -122,11 +129,13 @@ fn get_file_statuses(repo: &Repository) -> anyhow::Result<(Vec<PathBuf>, Vec<Pat
                 staged.push(path.clone());
             }
 
-            // Untracked files are currently ignored.
+            if status.is_wt_new() {
+                untracked.push(path.clone());
+            }
         }
     }
 
-    Ok((uncommitted, staged))
+    Ok((uncommitted, staged, untracked))
 }
 
 /// Get recent commits
@@ -213,12 +222,14 @@ fn get_commit_files(repo: &Repository, commit: &git2::Commit) -> anyhow::Result<
 fn infer_focus(
     uncommitted: &[PathBuf],
     staged: &[PathBuf],
+    untracked: &[PathBuf],
     recent_commits: &[CommitInfo],
 ) -> Option<String> {
     // Collect all changed files
     let mut all_files: Vec<&str> = uncommitted
         .iter()
         .chain(staged.iter())
+        .chain(untracked.iter())
         .filter_map(|p| p.to_str())
         .collect();
 
@@ -285,9 +296,10 @@ mod tests {
             PathBuf::from("src/auth/session.rs"),
         ];
         let staged = vec![];
+        let untracked = vec![];
         let commits = vec![];
 
-        let focus = infer_focus(&uncommitted, &staged, &commits);
+        let focus = infer_focus(&uncommitted, &staged, &untracked, &commits);
         assert!(focus.is_some());
         assert!(focus.unwrap().contains("auth"));
     }
