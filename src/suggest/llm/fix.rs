@@ -1,6 +1,8 @@
 use super::client::call_llm_with_usage;
 use super::models::{Model, Usage};
-use super::parse::{merge_usage, parse_json_with_retry, truncate_content};
+use super::parse::{
+    merge_usage, parse_json_with_retry, truncate_content, truncate_content_around_line,
+};
 use super::prompt_utils::format_repo_memory_section;
 use super::prompts::{FIX_CONTENT_SYSTEM, FIX_PREVIEW_SYSTEM, MULTI_FILE_FIX_SYSTEM};
 use crate::suggest::Suggestion;
@@ -419,7 +421,10 @@ pub async fn generate_fix_preview(
     let memory_section =
         format_repo_memory_section(repo_memory.as_deref(), "Repo conventions / decisions");
 
-    let preview_content = truncate_content(content, MAX_PREVIEW_CHARS);
+    let preview_content = suggestion
+        .line
+        .and_then(|line| truncate_content_around_line(content, line, MAX_PREVIEW_CHARS))
+        .unwrap_or_else(|| truncate_content(content, MAX_PREVIEW_CHARS));
     let user = format!(
         "File: {}\nIssue: {}\n{}{}{}\n\nCurrent Code:\n```\n{}\n```",
         path.display(),

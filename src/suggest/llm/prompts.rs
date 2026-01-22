@@ -251,7 +251,7 @@ IMPORTANT: Use the PROJECT CONTEXT provided to understand what this codebase is 
 Write definitive statements like "This file handles X" not vague guesses.
 Be specific and technical. Reference actual function/struct names.
 
-OUTPUT: A JSON object with two keys:
+OUTPUT: A JSON object with three keys:
 {
   "summaries": {
     "src/main.rs": "This is the application entry point..."
@@ -259,10 +259,16 @@ OUTPUT: A JSON object with two keys:
   "terms": {
     "DumpAlert": "Price drop notification sent to users when a watched item's price falls",
     "BatchProcessor": "System for handling bulk CSV imports of inventory data"
+  },
+  "terms_by_file": {
+    "src/main.rs": {
+      "DumpAlert": "Price drop notification sent to users when a watched item's price falls"
+    }
   }
 }
 
-For "terms": only include 3-8 domain-specific terms per batch. Skip generic programming terms (like "Controller", "Service", "Handler"). Focus on business/domain concepts that need explanation."#;
+For "terms": only include 3-8 domain-specific terms per batch. Skip generic programming terms (like "Controller", "Service", "Handler"). Focus on business/domain concepts that need explanation.
+For "terms_by_file": include only the terms that come from each specific file. If a file has no terms, omit it from "terms_by_file"."#;
 
 const REVIEW_SYSTEM_INITIAL: &str = r#"You are a skeptical senior code reviewer. Your job is to find bugs, security issues, and problems that the implementing developer might have missed.
 

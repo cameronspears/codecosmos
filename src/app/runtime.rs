@@ -300,6 +300,7 @@ pub async fn run_tui(
                 let mut all_summaries = HashMap::new();
                 let mut total_usage = suggest::llm::Usage::default();
                 let mut completed_count = 0usize;
+                let mut failed_files: Vec<PathBuf> = Vec::new();
 
                 // Process all priority tiers with parallel batching within each tier
                 let priority_tiers = [
@@ -319,45 +320,58 @@ pub async fn run_tui(
 
                     // Process batches sequentially (llm.rs handles internal parallelism)
                     for batch in batches {
-                        if let Ok((summaries, batch_glossary, usage)) =
-                            suggest::llm::generate_summaries_for_files(
-                                &index_clone2,
-                                batch,
-                                &project_context,
-                            )
-                            .await
+                        let batch_files: Vec<PathBuf> = batch.iter().cloned().collect();
+                        match suggest::llm::generate_summaries_for_files(
+                            &index_clone2,
+                            batch,
+                            &project_context,
+                        )
+                        .await
                         {
-                            // Update cache with new summaries
-                            for (path, summary) in &summaries {
-                                if let Some(hash) = file_hashes_clone.get(path) {
-                                    llm_cache.set_summary(
-                                        path.clone(),
-                                        summary.clone(),
-                                        hash.clone(),
-                                    );
+                            Ok((summaries, batch_glossary, usage, batch_failed)) => {
+                                // Update cache with new summaries
+                                for (path, summary) in &summaries {
+                                    if let Some(hash) = file_hashes_clone.get(path) {
+                                        llm_cache.set_summary(
+                                            path.clone(),
+                                            summary.clone(),
+                                            hash.clone(),
+                                        );
+                                    }
+                                }
+                                // Merge new terms into glossary
+                                glossary.merge(&batch_glossary);
+
+                                // Save cache incrementally after each batch
+                                let _ = cache.save_llm_summaries_cache(&llm_cache);
+                                let _ = cache.save_glossary(&glossary);
+
+                                completed_count += summaries.len() + batch_failed.len();
+                                failed_files.extend(batch_failed);
+
+                                // Send progress update with new summaries
+                                let _ = tx_summaries.send(BackgroundMessage::SummaryProgress {
+                                    completed: completed_count,
+                                    total: total_to_process,
+                                    summaries: summaries.clone(),
+                                });
+
+                                all_summaries.extend(summaries);
+                                if let Some(u) = usage {
+                                    total_usage.prompt_tokens += u.prompt_tokens;
+                                    total_usage.completion_tokens += u.completion_tokens;
+                                    total_usage.total_tokens += u.total_tokens;
                                 }
                             }
-                            // Merge new terms into glossary
-                            glossary.merge(&batch_glossary);
-
-                            // Save cache incrementally after each batch
-                            let _ = cache.save_llm_summaries_cache(&llm_cache);
-                            let _ = cache.save_glossary(&glossary);
-
-                            completed_count += summaries.len();
-
-                            // Send progress update with new summaries
-                            let _ = tx_summaries.send(BackgroundMessage::SummaryProgress {
-                                completed: completed_count,
-                                total: total_to_process,
-                                summaries: summaries.clone(),
-                            });
-
-                            all_summaries.extend(summaries);
-                            if let Some(u) = usage {
-                                total_usage.prompt_tokens += u.prompt_tokens;
-                                total_usage.completion_tokens += u.completion_tokens;
-                                total_usage.total_tokens += u.total_tokens;
+                            Err(e) => {
+                                completed_count += batch_files.len();
+                                failed_files.extend(batch_files);
+                                let _ = tx_summaries.send(BackgroundMessage::SummaryProgress {
+                                    completed: completed_count,
+                                    total: total_to_process,
+                                    summaries: HashMap::new(),
+                                });
+                                eprintln!("Warning: Failed to generate summaries for batch: {}", e);
                             }
                         }
                     }
@@ -373,6 +387,7 @@ pub async fn run_tui(
                 let _ = tx_summaries.send(BackgroundMessage::SummariesReady {
                     summaries: HashMap::new(),
                     usage: final_usage,
+                    failed_files,
                 });
             });
         } else {

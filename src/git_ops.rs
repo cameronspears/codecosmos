@@ -105,10 +105,15 @@ pub fn create_and_checkout_branch(repo_path: &Path, name: &str) -> Result<()> {
 pub fn create_fix_branch_from_main(repo_path: &Path, branch_name: &str) -> Result<String> {
     let repo = Repository::open(repo_path)?;
     
-    // Try to find main or master branch
-    let main_branch = repo.find_branch("main", git2::BranchType::Local)
-        .or_else(|_| repo.find_branch("master", git2::BranchType::Local))
-        .context("Could not find 'main' or 'master' branch")?;
+    // Find the default branch (main/master/trunk/etc)
+    let main_branch_name = get_main_branch_name(repo_path)?;
+    let main_branch = repo
+        .find_branch(&main_branch_name, git2::BranchType::Local)
+        .or_else(|_| repo.find_branch(&main_branch_name, git2::BranchType::Remote))
+        .context(format!(
+            "Could not find '{}' branch locally or on remote",
+            main_branch_name
+        ))?;
     
     let main_commit = main_branch.get().peel_to_commit()
         .context("Failed to get commit from main branch")?;
@@ -155,26 +160,75 @@ pub fn generate_fix_branch_name(suggestion_id: &str, summary: &str) -> String {
     // Take first 8 chars of UUID
     let short_id = &suggestion_id[..8.min(suggestion_id.len())];
     
+    let slug = sanitize_branch_slug(summary);
+    let candidate = if slug.is_empty() {
+        format!("fix/{}", short_id)
+    } else {
+        format!("fix/{}-{}", short_id, slug)
+    };
+
+    if is_valid_git_ref(&candidate) {
+        candidate
+    } else {
+        format!("fix/{}", short_id)
+    }
+}
+
+fn sanitize_branch_slug(summary: &str) -> String {
     // Slugify the summary: lowercase, replace spaces/special chars with dashes
     let slug: String = summary
         .to_lowercase()
         .chars()
-        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect::<String>()
         .split('-')
         .filter(|s| !s.is_empty())
         .take(5) // Limit to first 5 words
         .collect::<Vec<_>>()
         .join("-");
-    
-    // Truncate slug to reasonable length (character-safe for Unicode)
+
+    // Truncate slug to reasonable length
     let slug = if slug.chars().count() > 40 {
-        slug.chars().take(40).collect::<String>().trim_end_matches('-').to_string()
+        slug.chars()
+            .take(40)
+            .collect::<String>()
+            .trim_end_matches('-')
+            .to_string()
     } else {
         slug
     };
-    
-    format!("fix/{}-{}", short_id, slug)
+
+    slug.trim_matches('-').to_string()
+}
+
+fn is_valid_git_ref(name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    if name.starts_with('.') || name.ends_with('.') || name.ends_with('/') {
+        return false;
+    }
+    if name.ends_with(".lock") {
+        return false;
+    }
+    if name.contains("..") || name.contains("@{") || name.contains("//") {
+        return false;
+    }
+    for c in name.chars() {
+        if c.is_control()
+            || c == ' '
+            || c == '~'
+            || c == '^'
+            || c == ':'
+            || c == '?'
+            || c == '*'
+            || c == '['
+            || c == '\\'
+        {
+            return false;
+        }
+    }
+    true
 }
 
 /// Stage a specific file
@@ -385,14 +439,54 @@ pub fn reset_file(repo_path: &Path, file_path: &str) -> Result<()> {
 /// Get the name of the main branch (main or master)
 pub fn get_main_branch_name(repo_path: &Path) -> Result<String> {
     let repo = Repository::open(repo_path)?;
-    
+
+    if let Some(remote_default) = resolve_remote_head_branch(&repo) {
+        if repo
+            .find_branch(&remote_default, git2::BranchType::Local)
+            .is_ok()
+        {
+            return Ok(remote_default);
+        }
+    }
+
+    if let Ok(config) = repo.config() {
+        if let Ok(name) = config.get_string("init.defaultBranch") {
+            let name = name.trim();
+            if !name.is_empty()
+                && repo
+                    .find_branch(name, git2::BranchType::Local)
+                    .is_ok()
+            {
+                return Ok(name.to_string());
+            }
+        }
+    }
+
     if repo.find_branch("main", git2::BranchType::Local).is_ok() {
         Ok("main".to_string())
     } else if repo.find_branch("master", git2::BranchType::Local).is_ok() {
         Ok("master".to_string())
     } else {
-        Err(anyhow::anyhow!("Could not find 'main' or 'master' branch"))
+        let head = repo.head().context("Failed to get HEAD")?;
+        let branch = head.shorthand().unwrap_or("HEAD").to_string();
+        Ok(branch)
     }
+}
+
+fn resolve_remote_head_branch(repo: &Repository) -> Option<String> {
+    let remotes = repo.remotes().ok()?;
+    for name in remotes.iter().flatten() {
+        let head_ref = format!("refs/remotes/{}/HEAD", name);
+        if let Ok(reference) = repo.find_reference(&head_ref) {
+            if let Some(target) = reference.symbolic_target() {
+                let prefix = format!("refs/remotes/{}/", name);
+                if let Some(branch) = target.strip_prefix(&prefix) {
+                    return Some(branch.to_string());
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Stash all changes (staged + unstaged) with an optional message
@@ -576,6 +670,28 @@ mod tests {
         let status = current_status(&repo_path);
         assert!(status.is_ok());
         assert!(!status.unwrap().branch.is_empty());
+    }
+
+    #[test]
+    fn test_branch_name_sanitization() {
+        let name = generate_fix_branch_name("12345678", "Fix: user/login (v2)!!!");
+        assert!(name.starts_with("fix/12345678-"));
+        assert!(is_valid_git_ref(&name));
+    }
+
+    #[test]
+    fn test_branch_name_fallback_on_empty_slug() {
+        let name = generate_fix_branch_name("12345678", "!!!");
+        assert_eq!(name, "fix/12345678");
+    }
+
+    #[test]
+    fn test_invalid_git_ref_rejected() {
+        assert!(!is_valid_git_ref("bad..name"));
+        assert!(!is_valid_git_ref("bad@{name"));
+        assert!(!is_valid_git_ref("bad name"));
+        assert!(!is_valid_git_ref("bad:ref"));
+        assert!(!is_valid_git_ref("bad.lock"));
     }
 }
 

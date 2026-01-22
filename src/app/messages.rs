@@ -16,6 +16,7 @@ pub enum BackgroundMessage {
     SummariesReady {
         summaries: HashMap<PathBuf, String>,
         usage: Option<suggest::llm::Usage>,
+        failed_files: Vec<PathBuf>,
     },
     /// Incremental summary progress update
     SummaryProgress {

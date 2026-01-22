@@ -211,6 +211,65 @@ pub(crate) fn truncate_content(content: &str, max_chars: usize) -> String {
     }
 }
 
+/// Truncate content around a specific line number (1-based).
+pub(crate) fn truncate_content_around_line(
+    content: &str,
+    line_number: usize,
+    max_chars: usize,
+) -> Option<String> {
+    if max_chars == 0 {
+        return None;
+    }
+
+    let lines: Vec<&str> = content.lines().collect();
+    if lines.is_empty() {
+        return None;
+    }
+
+    let target = line_number.saturating_sub(1);
+    if target >= lines.len() {
+        return None;
+    }
+
+    let max_radius = target.max(lines.len().saturating_sub(1).saturating_sub(target));
+    let mut best: Option<(usize, usize)> = None;
+    let mut lo = 0usize;
+    let mut hi = max_radius;
+
+    while lo <= hi {
+        let mid = (lo + hi) / 2;
+        let start = target.saturating_sub(mid);
+        let end = (target + mid).min(lines.len() - 1);
+        let snippet = lines[start..=end].join("\n");
+        if snippet.chars().count() <= max_chars {
+            best = Some((start, end));
+            lo = mid + 1;
+        } else if mid == 0 {
+            break;
+        } else {
+            hi = mid - 1;
+        }
+    }
+
+    if let Some((start, end)) = best {
+        return Some(lines[start..=end].join("\n"));
+    }
+
+    Some(truncate_line_to_chars(lines[target], max_chars))
+}
+
+fn truncate_line_to_chars(line: &str, max_chars: usize) -> String {
+    let count = line.chars().count();
+    if count <= max_chars {
+        return line.to_string();
+    }
+    if max_chars <= 3 {
+        return line.chars().take(max_chars).collect();
+    }
+    let prefix: String = line.chars().take(max_chars - 3).collect();
+    format!("{}...", prefix)
+}
+
 /// Extract JSON from LLM response, handling markdown fences and noise
 fn extract_json_object(response: &str) -> Option<&str> {
     let clean = strip_markdown_fences(response);
@@ -402,10 +461,16 @@ pub(crate) fn parse_summaries_response(
 }
 
 /// Parse response containing both summaries and domain terms
+pub(crate) struct SummariesAndTerms {
+    pub summaries: HashMap<PathBuf, String>,
+    pub terms: HashMap<String, String>,
+    pub terms_by_file: HashMap<PathBuf, HashMap<String, String>>,
+}
+
 pub(crate) fn parse_summaries_and_terms_response(
     response: &str,
     root: &Path,
-) -> anyhow::Result<(HashMap<PathBuf, String>, HashMap<String, String>)> {
+) -> anyhow::Result<SummariesAndTerms> {
     let json_str = extract_json_object(response)
         .ok_or_else(|| anyhow::anyhow!("No JSON object found in response"))?;
     let json_str = fix_json_issues(json_str);
@@ -414,6 +479,7 @@ pub(crate) fn parse_summaries_and_terms_response(
     if let Ok(wrapper) = serde_json::from_str::<serde_json::Value>(&json_str) {
         let mut summaries = HashMap::new();
         let mut terms = HashMap::new();
+        let mut terms_by_file = HashMap::new();
 
         // Extract summaries
         if let Some(summaries_obj) = wrapper.get("summaries") {
@@ -436,14 +502,40 @@ pub(crate) fn parse_summaries_and_terms_response(
             }
         }
 
-        if !summaries.is_empty() || !terms.is_empty() {
-            return Ok((summaries, terms));
+        // Extract terms by file (preferred mapping)
+        if let Some(terms_by_file_obj) = wrapper
+            .get("terms_by_file")
+            .or_else(|| wrapper.get("termsByFile"))
+        {
+            if let Some(obj) = terms_by_file_obj.as_object() {
+                for (path, term_map) in obj {
+                    if let Ok(parsed) =
+                        serde_json::from_value::<HashMap<String, String>>(term_map.clone())
+                    {
+                        if !parsed.is_empty() {
+                            terms_by_file.insert(normalize_path_str(path, root), parsed);
+                        }
+                    }
+                }
+            }
+        }
+
+        if !summaries.is_empty() || !terms.is_empty() || !terms_by_file.is_empty() {
+            return Ok(SummariesAndTerms {
+                summaries,
+                terms,
+                terms_by_file,
+            });
         }
     }
 
     // Fallback: try to parse as simple summaries object
     let summaries = parse_summaries_response(response, root)?;
-    Ok((summaries, HashMap::new()))
+    Ok(SummariesAndTerms {
+        summaries,
+        terms: HashMap::new(),
+        terms_by_file: HashMap::new(),
+    })
 }
 
 #[cfg(test)]

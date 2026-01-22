@@ -708,6 +708,7 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent, ctx: &RuntimeContext) -> R
                                     app.llm_summaries.clear();
                                     app.needs_summary_generation = true;
                                     app.summary_progress = None;
+                                    app.summary_failed_files.clear();
                                 }
 
                                 // Clear in-memory glossary if needed
@@ -781,6 +782,7 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent, ctx: &RuntimeContext) -> R
                                             let mut all_summaries = HashMap::new();
                                             let mut total_usage = suggest::llm::Usage::default();
                                             let mut completed_count = 0usize;
+                                            let mut failed_files: Vec<PathBuf> = Vec::new();
 
                                             let priority_tiers = [
                                                 ("high", high_priority),
@@ -798,32 +800,76 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent, ctx: &RuntimeContext) -> R
                                                     files.chunks(batch_size).collect();
 
                                                 for batch in batches {
-                                                    if let Ok((summaries, batch_glossary, usage)) = suggest::llm::generate_summaries_for_files(
-                                                        &index_clone2, batch, &project_context
-                                                    ).await {
-                                                        for (path, summary) in &summaries {
-                                                            if let Some(hash) = file_hashes_clone.get(path) {
-                                                                llm_cache.set_summary(path.clone(), summary.clone(), hash.clone());
+                                                    let batch_files: Vec<PathBuf> =
+                                                        batch.iter().cloned().collect();
+                                                    match suggest::llm::generate_summaries_for_files(
+                                                        &index_clone2,
+                                                        batch,
+                                                        &project_context,
+                                                    )
+                                                    .await
+                                                    {
+                                                        Ok((
+                                                            summaries,
+                                                            batch_glossary,
+                                                            usage,
+                                                            batch_failed,
+                                                        )) => {
+                                                            for (path, summary) in &summaries {
+                                                                if let Some(hash) =
+                                                                    file_hashes_clone.get(path)
+                                                                {
+                                                                    llm_cache.set_summary(
+                                                                        path.clone(),
+                                                                        summary.clone(),
+                                                                        hash.clone(),
+                                                                    );
+                                                                }
+                                                            }
+                                                            glossary.merge(&batch_glossary);
+
+                                                            let _ =
+                                                                cache.save_llm_summaries_cache(
+                                                                    &llm_cache,
+                                                                );
+                                                            let _ = cache.save_glossary(&glossary);
+
+                                                            completed_count +=
+                                                                summaries.len() + batch_failed.len();
+                                                            failed_files.extend(batch_failed);
+
+                                                            let _ = tx_summaries.send(
+                                                                BackgroundMessage::SummaryProgress {
+                                                                    completed: completed_count,
+                                                                    total: total_to_process,
+                                                                    summaries: summaries.clone(),
+                                                                },
+                                                            );
+
+                                                            all_summaries.extend(summaries);
+                                                            if let Some(u) = usage {
+                                                                total_usage.prompt_tokens +=
+                                                                    u.prompt_tokens;
+                                                                total_usage.completion_tokens +=
+                                                                    u.completion_tokens;
+                                                                total_usage.total_tokens +=
+                                                                    u.total_tokens;
                                                             }
                                                         }
-                                                        glossary.merge(&batch_glossary);
-                                                        
-                                                        let _ = cache.save_llm_summaries_cache(&llm_cache);
-                                                        let _ = cache.save_glossary(&glossary);
-                                                        
-                                                        completed_count += summaries.len();
-                                                        
-                                                        let _ = tx_summaries.send(BackgroundMessage::SummaryProgress {
-                                                            completed: completed_count,
-                                                            total: total_to_process,
-                                                            summaries: summaries.clone(),
-                                                        });
-                                                        
-                                                        all_summaries.extend(summaries);
-                                                        if let Some(u) = usage {
-                                                            total_usage.prompt_tokens += u.prompt_tokens;
-                                                            total_usage.completion_tokens += u.completion_tokens;
-                                                            total_usage.total_tokens += u.total_tokens;
+                                                        Err(e) => {
+                                                            completed_count += batch_files.len();
+                                                            failed_files.extend(batch_files);
+                                                            let _ = tx_summaries.send(
+                                                                BackgroundMessage::SummaryProgress {
+                                                                    completed: completed_count,
+                                                                    total: total_to_process,
+                                                                    summaries: HashMap::new(),
+                                                                },
+                                                            );
+                                                            eprintln!(
+                                                                "Warning: Failed to generate summaries for batch: {}",
+                                                                e
+                                                            );
                                                         }
                                                     }
                                                 }
@@ -835,10 +881,13 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent, ctx: &RuntimeContext) -> R
                                                 None
                                             };
 
-                                            let _ = tx_summaries.send(BackgroundMessage::SummariesReady {
-                                                summaries: HashMap::new(),
-                                                usage: final_usage,
-                                            });
+                                            let _ = tx_summaries.send(
+                                                BackgroundMessage::SummariesReady {
+                                                    summaries: HashMap::new(),
+                                                    usage: final_usage,
+                                                    failed_files,
+                                                },
+                                            );
                                         });
                                     }
                                 } else if needs_suggestions && ai_enabled {

@@ -1,11 +1,11 @@
 use super::client::call_llm_with_usage;
 use super::models::{Model, Usage};
-use super::parse::parse_summaries_and_terms_response;
+use super::parse::{parse_summaries_and_terms_response, SummariesAndTerms};
 use super::prompts::SUMMARY_BATCH_SYSTEM;
 use crate::cache::DomainGlossary;
 use crate::context::WorkContext;
 use crate::index::{CodebaseIndex, SymbolKind};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 /// Result from a single batch of file summaries
@@ -13,6 +13,8 @@ pub struct SummaryBatchResult {
     pub summaries: HashMap<PathBuf, String>,
     /// Domain terms extracted from these files
     pub terms: HashMap<String, String>,
+    /// Domain terms mapped to their source files
+    pub terms_by_file: HashMap<PathBuf, HashMap<String, String>>,
     pub usage: Option<Usage>,
 }
 
@@ -191,7 +193,12 @@ pub async fn generate_summaries_for_files(
     index: &CodebaseIndex,
     files: &[PathBuf],
     project_context: &str,
-) -> anyhow::Result<(HashMap<PathBuf, String>, DomainGlossary, Option<Usage>)> {
+) -> anyhow::Result<(
+    HashMap<PathBuf, String>,
+    DomainGlossary,
+    Option<Usage>,
+    Vec<PathBuf>,
+)> {
     // Large batch size for fewer API calls
     let batch_size = 16;
     // Higher concurrency for faster processing (Speed preset handles this well)
@@ -202,28 +209,43 @@ pub async fn generate_summaries_for_files(
     let mut all_summaries = HashMap::new();
     let mut glossary = DomainGlossary::new();
     let mut total_usage = Usage::default();
+    let mut failed_files: HashSet<PathBuf> = HashSet::new();
 
     // Process batches with limited concurrency
     for batch_group in batches.chunks(concurrency) {
         // Run concurrent batches
         let futures: Vec<_> = batch_group
             .iter()
-            .map(|batch| generate_summary_batch(index, batch, project_context))
+            .map(|batch| {
+                let batch_files: Vec<PathBuf> = batch.iter().cloned().collect();
+                async move {
+                    let result = generate_summary_batch(index, &batch_files, project_context).await;
+                    (batch_files, result)
+                }
+            })
             .collect();
 
         let results = futures::future::join_all(futures).await;
 
-        for result in results {
+        for (batch_files, result) in results {
             match result {
                 Ok(batch_result) => {
                     // Collect summaries
                     all_summaries.extend(batch_result.summaries.clone());
 
                     // Collect terms into glossary
-                    for (term, definition) in batch_result.terms {
-                        // Associate term with files from this batch
-                        for file in batch_result.summaries.keys() {
-                            glossary.add_term(term.clone(), definition.clone(), file.clone());
+                    if !batch_result.terms_by_file.is_empty() {
+                        for (file, terms) in batch_result.terms_by_file {
+                            for (term, definition) in terms {
+                                glossary.add_term(term, definition, file.clone());
+                            }
+                        }
+                    } else {
+                        for (term, definition) in batch_result.terms {
+                            // Backward compatibility: associate term with files from this batch
+                            for file in batch_result.summaries.keys() {
+                                glossary.add_term(term.clone(), definition.clone(), file.clone());
+                            }
                         }
                     }
 
@@ -236,6 +258,9 @@ pub async fn generate_summaries_for_files(
                 Err(e) => {
                     // Log error but continue with other batches
                     eprintln!("Warning: Failed to generate summaries for batch: {}", e);
+                    for file in batch_files {
+                        failed_files.insert(file);
+                    }
                 }
             }
         }
@@ -247,7 +272,12 @@ pub async fn generate_summaries_for_files(
         None
     };
 
-    Ok((all_summaries, glossary, final_usage))
+    Ok((
+        all_summaries,
+        glossary,
+        final_usage,
+        failed_files.into_iter().collect(),
+    ))
 }
 
 /// Categorize files by priority for smart summarization
@@ -311,11 +341,16 @@ async fn generate_summary_batch(
     let response =
         call_llm_with_usage(SUMMARY_BATCH_SYSTEM, &user_prompt, Model::Speed, true).await?;
 
-    let (summaries, terms) = parse_summaries_and_terms_response(&response.content, &index.root)?;
+    let SummariesAndTerms {
+        summaries,
+        terms,
+        terms_by_file,
+    } = parse_summaries_and_terms_response(&response.content, &index.root)?;
 
     Ok(SummaryBatchResult {
         summaries,
         terms,
+        terms_by_file,
         usage: response.usage,
     })
 }

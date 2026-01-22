@@ -688,6 +688,8 @@ pub struct App {
 
     // Summary generation progress (completed, total)
     pub summary_progress: Option<(usize, usize)>,
+    /// Files that failed summary generation (for retry visibility)
+    pub summary_failed_files: Vec<PathBuf>,
 
     // Cached data for display
     pub file_tree: Vec<FlatTreeEntry>,
@@ -765,6 +767,7 @@ impl App {
             active_model: None,
             needs_summary_generation: false,
             summary_progress: None,
+            summary_failed_files: Vec::new(),
             file_tree,
             filtered_tree,
             repo_path,

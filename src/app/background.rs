@@ -61,9 +61,31 @@ pub fn drain_messages(
                 }
                 app.show_toast(&format!("Error: {}", truncate(&e, 80)));
             }
-            BackgroundMessage::SummariesReady { summaries, usage } => {
+            BackgroundMessage::SummariesReady {
+                summaries,
+                usage,
+                failed_files,
+            } => {
                 let new_count = summaries.len();
                 app.update_summaries(summaries);
+                let failed_count = failed_files.len();
+                app.summary_failed_files = failed_files;
+                let failure_context = if failed_count > 0 {
+                    let sample: Vec<String> = app
+                        .summary_failed_files
+                        .iter()
+                        .take(10)
+                        .map(|p| p.display().to_string())
+                        .collect();
+                    let mut context = String::from("Failed files:\n");
+                    context.push_str(&sample.join("\n"));
+                    if failed_count > sample.len() {
+                        context.push_str(&format!("\n... +{} more", failed_count - sample.len()));
+                    }
+                    Some(context)
+                } else {
+                    None
+                };
 
                 // Track cost (using Speed preset for summaries)
                 if let Some(u) = usage {
@@ -84,7 +106,7 @@ pub fn drain_messages(
                 }
 
                 app.summary_progress = None;
-                app.needs_summary_generation = false;
+                app.needs_summary_generation = failed_count > 0;
 
                 // If we're waiting to generate suggestions after reset, do it now
                 if app.pending_suggestions_on_init {
@@ -108,10 +130,12 @@ pub fn drain_messages(
                         let glossary_clone = app.glossary.clone();
 
                         app.loading = LoadingState::GeneratingSuggestions;
-                        app.show_toast(&format!(
-                            "{} terms in glossary · generating suggestions...",
-                            glossary_clone.len()
-                        ));
+                        if failed_count == 0 {
+                            app.show_toast(&format!(
+                                "{} terms in glossary · generating suggestions...",
+                                glossary_clone.len()
+                            ));
+                        }
 
                         tokio::spawn(async move {
                             let mem = if repo_memory_context.trim().is_empty() {
@@ -154,7 +178,13 @@ pub fn drain_messages(
                         });
                     } else {
                         app.loading = LoadingState::None;
-                        if new_count > 0 {
+                        if failed_count > 0 {
+                            let message = format!(
+                                "Summaries incomplete: {} files failed. Press 'R' to retry.",
+                                failed_count
+                            );
+                            app.log_error(&message, failure_context.as_deref());
+                        } else if new_count > 0 {
                             app.show_toast(&format!(
                                 "{} summaries · {} glossary terms",
                                 new_count,
@@ -167,7 +197,13 @@ pub fn drain_messages(
                     if !matches!(app.loading, LoadingState::GeneratingSuggestions) {
                         app.loading = LoadingState::None;
                     }
-                    if new_count > 0 {
+                    if failed_count > 0 {
+                        let message = format!(
+                            "Summaries incomplete: {} files failed. Press 'R' to retry.",
+                            failed_count
+                        );
+                        app.log_error(&message, failure_context.as_deref());
+                    } else if new_count > 0 {
                         app.show_toast(&format!(
                             "{} summaries · {} glossary terms",
                             new_count,
