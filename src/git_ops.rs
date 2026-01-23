@@ -152,18 +152,18 @@ fn unique_branch_name(repo: &Repository, base: &str) -> Result<String> {
 pub fn generate_fix_branch_name(suggestion_id: &str, summary: &str) -> String {
     // Take first 8 chars of UUID
     let short_id = &suggestion_id[..8.min(suggestion_id.len())];
-    
-    let slug = sanitize_branch_slug(summary);
-    let candidate = if slug.is_empty() {
-        format!("fix/{}", short_id)
-    } else {
-        format!("fix/{}-{}", short_id, slug)
-    };
+    let fallback = format!("fix/{}", short_id);
 
+    let slug = sanitize_branch_slug(summary);
+    if slug.is_empty() {
+        return fallback;
+    }
+
+    let candidate = format!("fix/{}-{}", short_id, slug);
     if is_valid_git_ref(&candidate) {
         candidate
     } else {
-        format!("fix/{}", short_id)
+        fallback
     }
 }
 

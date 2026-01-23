@@ -11,6 +11,16 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
+// ═══════════════════════════════════════════════════════════════════════════
+//  PATTERN DETECTION THRESHOLDS
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Number of lines above which a function is considered "long"
+const LONG_FUNCTION_THRESHOLD: usize = 50;
+
+/// Number of lines above which a file is considered a "god module"
+const GOD_MODULE_LOC_THRESHOLD: usize = 500;
+
 /// Supported programming languages
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Language {
@@ -686,7 +696,8 @@ impl CodebaseIndex {
         
         // Check for long functions
         for sym in &symbols {
-            if matches!(sym.kind, SymbolKind::Function | SymbolKind::Method) && sym.line_count() > 50
+            if matches!(sym.kind, SymbolKind::Function | SymbolKind::Method)
+                && sym.line_count() > LONG_FUNCTION_THRESHOLD
             {
                 patterns.push(Pattern {
                     kind: PatternKind::LongFunction,
@@ -696,9 +707,9 @@ impl CodebaseIndex {
                 });
             }
         }
-        
+
         // Check for god module
-        if loc > 500 {
+        if loc > GOD_MODULE_LOC_THRESHOLD {
             patterns.push(Pattern {
                 kind: PatternKind::GodModule,
                 file: path.to_path_buf(),
