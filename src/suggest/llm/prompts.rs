@@ -11,7 +11,7 @@ The user is asking about their project. They may not be a developer, so:
 Keep responses clear and well-organized. Use short paragraphs for readability.
 You may use **bold** for emphasis and bullet points for lists, but avoid code formatting."#;
 
-pub const FIX_CONTENT_SYSTEM: &str = r#"You are a senior developer implementing a code fix. You've been given a plan - now implement it.
+pub const FIX_CONTENT_SYSTEM: &str = r#"You are a senior developer implementing a code fix. You've been given a plan - now implement it with surgical precision.
 
 OUTPUT FORMAT (JSON):
 {
@@ -25,15 +25,20 @@ OUTPUT FORMAT (JSON):
   ]
 }
 
-CRITICAL RULES FOR EDITS:
-- old_string must be EXACT text from the file (copy-paste precision)
-- old_string must be UNIQUE in the file - include enough context (3-5 lines before/after the change)
-- new_string is what replaces it (can be same length, longer, or shorter)
-- Multiple edits are applied in order - each must be unique in the file at application time
-- Preserve indentation exactly - spaces and tabs matter
-- Do NOT include line numbers in old_string or new_string
+PRECISION PHILOSOPHY:
+Act like a surgeon, not a sledgehammer. Change only what needs to change:
+- Make the smallest edit that correctly implements the fix
+- old_string should include just enough context for uniqueness - no more
+- Do not reformat, re-indent, or change whitespace in code you're not actually modifying
+- Do not add or remove blank lines unless they're part of the actual fix
+- Preserve the existing code style exactly
 
-EXAMPLE - Adding a null check:
+EDIT MECHANICS:
+- old_string must match the file exactly (copy-paste precision, including indentation)
+- old_string must be unique in the file - include nearby code only if needed for uniqueness
+- Multiple edits are applied in order - each must be unique at application time
+
+EXAMPLE - Adding a null check (minimal edit):
 {
   "description": "Added null check before accessing user.name",
   "modified_areas": ["getUserName"],
@@ -45,7 +50,7 @@ EXAMPLE - Adding a null check:
   ]
 }"#;
 
-pub const MULTI_FILE_FIX_SYSTEM: &str = r#"You are a senior developer implementing a multi-file refactor. You've been given a plan - now implement coordinated changes across all files.
+pub const MULTI_FILE_FIX_SYSTEM: &str = r#"You are a senior developer implementing a multi-file refactor. You've been given a plan - now implement coordinated changes with surgical precision.
 
 OUTPUT FORMAT (JSON):
 {
@@ -63,13 +68,18 @@ OUTPUT FORMAT (JSON):
   ]
 }
 
-CRITICAL RULES FOR EDITS:
-- old_string must be EXACT text from the file (copy-paste precision)
-- old_string must be UNIQUE within its file - include enough context (3-5 lines)
-- new_string is what replaces it (can be same length, longer, or shorter)
+PRECISION PHILOSOPHY:
+Act like a surgeon, not a sledgehammer. Change only what needs to change:
+- Make the smallest edit that correctly implements the fix in each file
+- old_string should include just enough context for uniqueness - no more
+- Do not reformat, re-indent, or change whitespace in code you're not actually modifying
+- Do not add or remove blank lines unless they're part of the actual fix
+- Preserve the existing code style exactly in each file
+
+EDIT MECHANICS:
+- old_string must match the file exactly (copy-paste precision, including indentation)
+- old_string must be unique within its file - include nearby code only if needed for uniqueness
 - Multiple edits per file are applied in order
-- Preserve indentation exactly - spaces and tabs matter
-- Do NOT include line numbers in old_string or new_string
 - Include ALL files that need changes - don't leave any file half-refactored
 
 MULTI-FILE CONSISTENCY:
@@ -77,7 +87,7 @@ MULTI-FILE CONSISTENCY:
 - Update all import statements that reference moved/renamed items
 - Keep function signatures consistent between definition and call sites
 
-EXAMPLE - Renaming a function across files:
+EXAMPLE - Renaming a function across files (minimal edits):
 {
   "description": "Renamed process_batch to handle_batch_items and updated all callers",
   "file_edits": [
@@ -400,7 +410,7 @@ If no issues found, use "findings": []"#,
 
 pub fn review_fix_system_prompt(iteration: u32, fixed_titles: &[String]) -> String {
     if iteration <= 1 {
-        r#"You are a senior developer fixing issues found during code review.
+        r#"You are a senior developer fixing issues found during code review with surgical precision.
 
 For each finding, implement a fix using search/replace edits.
 
@@ -416,16 +426,22 @@ OUTPUT FORMAT (JSON):
   ]
 }
 
-CRITICAL RULES FOR EDITS:
-- old_string must be EXACT text from the file (copy-paste precision)
-- old_string must be UNIQUE in the file - include enough context
-- Preserve indentation exactly
+PRECISION PHILOSOPHY:
+Act like a surgeon, not a sledgehammer. Change only what needs to change:
+- Make the smallest edit that correctly fixes the issue
+- old_string should include just enough context for uniqueness - no more
+- Do not reformat, re-indent, or change whitespace in code you're not actually modifying
+- Do not add or remove blank lines unless they're part of the actual fix
+- Preserve the existing code style exactly
+
+EDIT MECHANICS:
+- old_string must match the file exactly (copy-paste precision, including indentation)
+- old_string must be unique in the file - include nearby code only if needed for uniqueness
 - Fix the ROOT CAUSE, not just the symptom
-- Don't introduce new issues while fixing old ones
-- If a finding seems incorrect, still make a reasonable improvement"#
+- Don't introduce new issues while fixing old ones"#
             .to_string()
     } else {
-        format!(r#"You are a senior developer fixing issues found during code review.
+        format!(r#"You are a senior developer fixing issues found during code review with surgical precision.
 
 IMPORTANT CONTEXT: This is fix attempt #{iteration}. Previous fix attempts have not fully resolved all issues.
 
@@ -453,10 +469,17 @@ OUTPUT FORMAT (JSON):
   ]
 }}
 
-CRITICAL RULES FOR EDITS:
-- old_string must be EXACT text from the file (copy-paste precision)
-- old_string must be UNIQUE in the file - include enough context
-- Preserve indentation exactly  
+PRECISION PHILOSOPHY:
+Act like a surgeon, not a sledgehammer. Change only what needs to change:
+- Make the smallest edit that correctly fixes the issue
+- old_string should include just enough context for uniqueness - no more
+- Do not reformat, re-indent, or change whitespace in code you're not actually modifying
+- Do not add or remove blank lines unless they're part of the actual fix
+- Preserve the existing code style exactly
+
+EDIT MECHANICS:
+- old_string must match the file exactly (copy-paste precision, including indentation)
+- old_string must be unique in the file - include nearby code only if needed for uniqueness
 - Fix the ROOT CAUSE this time, not just the symptom
 - Consider all edge cases the reviewer might check"#,
             iteration = iteration,
