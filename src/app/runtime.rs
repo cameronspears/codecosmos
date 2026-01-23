@@ -88,7 +88,7 @@ pub async fn run_tui(
     let grouping_ai_enabled = true;
     let mut grouping_ai_cache = cache_manager
         .load_grouping_ai_cache()
-        .unwrap_or_else(cache::GroupingAiCache::new);
+        .unwrap_or_default();
     if grouping_ai_cache.normalize_paths(&index.root) {
         let _ = cache_manager.save_grouping_ai_cache(&grouping_ai_cache);
     }
@@ -107,7 +107,7 @@ pub async fn run_tui(
     // Load cached LLM summaries and apply immediately
     let mut llm_cache = cache_manager
         .load_llm_summaries_cache()
-        .unwrap_or_else(cache::LlmSummaryCache::new);
+        .unwrap_or_default();
     if llm_cache.normalize_paths(&index.root) {
         let _ = cache_manager.save_llm_summaries_cache(&llm_cache);
     }
@@ -189,7 +189,7 @@ pub async fn run_tui(
                 let cache = cache::Cache::new(&cache_path);
                 let mut grouping_cache = cache
                     .load_grouping_ai_cache()
-                    .unwrap_or_else(cache::GroupingAiCache::new);
+                    .unwrap_or_default();
                 let _ = grouping_cache.normalize_paths(&index_clone.root);
 
                 let mut total_usage = suggest::llm::Usage::default();
@@ -308,12 +308,12 @@ pub async fn run_tui(
                 // Load existing cache to update incrementally
                 let mut llm_cache = cache
                     .load_llm_summaries_cache()
-                    .unwrap_or_else(cache::LlmSummaryCache::new);
+                    .unwrap_or_default();
 
                 // Load existing glossary to merge new terms into
                 let mut glossary = cache
                     .load_glossary()
-                    .unwrap_or_else(cache::DomainGlossary::new);
+                    .unwrap_or_default();
 
                 let mut all_summaries = HashMap::new();
                 let mut total_usage = suggest::llm::Usage::default();
@@ -337,7 +337,7 @@ pub async fn run_tui(
 
                     // Process batches sequentially (llm.rs handles internal parallelism)
                     for batch in batches {
-                        let batch_files: Vec<PathBuf> = batch.iter().cloned().collect();
+                        let batch_files: Vec<PathBuf> = batch.to_vec();
                         let mut config = crate::config::Config::load();
                         if let Err(e) = budget_guard.allow_ai(&mut config) {
                             let _ = tx_summaries
@@ -627,7 +627,7 @@ fn select_grouping_ai_candidates(
         .filter(|(_, assignment)| matches!(assignment.layer, Layer::Unknown | Layer::Shared))
         .filter(|(path, _)| {
             if let Some(hash) = file_hashes.get(*path) {
-                !cache.is_file_valid(*path, hash)
+                !cache.is_file_valid(path, hash)
             } else {
                 false
             }

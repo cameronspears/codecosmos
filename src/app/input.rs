@@ -345,7 +345,7 @@ fn handle_overlay_input(app: &mut App, key: KeyEvent, ctx: &RuntimeContext) -> R
 
                                                 for batch in batches {
                                                     let batch_files: Vec<PathBuf> =
-                                                        batch.iter().cloned().collect();
+                                                        batch.to_vec();
                                                     match suggest::llm::generate_summaries_for_files(
                                                         &index_clone2,
                                                         batch,

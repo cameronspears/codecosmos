@@ -66,7 +66,7 @@ fn is_named_file(path: &Path) -> bool {
         .trim_end_matches(".model")
         .trim_end_matches(".component");
     
-    !GENERIC_FILES.iter().any(|g| clean_stem == *g)
+    !GENERIC_FILES.contains(&clean_stem)
 }
 
 /// Extract a feature name from a file path
@@ -100,7 +100,7 @@ fn extract_feature_name(path: &Path, index: &CodebaseIndex) -> Option<String> {
     
     // Split by separators and get first meaningful part
     let parts: Vec<&str> = clean_name
-        .split(|c| c == '-' || c == '_' || c == '.')
+        .split(['-', '_', '.'])
         .filter(|p| !p.is_empty())
         .collect();
     
@@ -545,7 +545,7 @@ fn extract_naming_prefix(path: &Path) -> Option<String> {
 
     // Split by common separators
     let parts: Vec<&str> = clean_name
-        .split(|c| c == '-' || c == '_' || c == '.')
+        .split(['-', '_', '.'])
         .collect();
 
     if parts.is_empty() {
@@ -708,7 +708,7 @@ fn generate_cluster_name(files: &[PathBuf], index: &CodebaseIndex, fallback_inde
     // Fall back to the most common word
     let mut word_counts: HashMap<&str, usize> = HashMap::new();
     for name in &names {
-        for word in name.split(|c| c == '-' || c == '_' || c == '.') {
+        for word in name.split(['-', '_', '.']) {
             if word.len() >= 3 {
                 *word_counts.entry(word).or_default() += 1;
             }

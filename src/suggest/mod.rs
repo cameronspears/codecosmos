@@ -27,8 +27,6 @@ pub enum SuggestionSource {
     LlmDeep,
 }
 
-impl SuggestionSource {
-}
 
 /// Kind of suggestion
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
