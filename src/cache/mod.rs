@@ -112,19 +112,6 @@ pub struct IndexCache {
     pub file_hashes: HashMap<PathBuf, String>,
 }
 
-impl IndexCache {
-    /// Create from a CodebaseIndex
-    pub fn from_index(index: &CodebaseIndex) -> Self {
-        Self {
-            root: index.root.clone(),
-            file_count: index.files.len(),
-            symbol_count: index.symbols.len(),
-            cached_at: Utc::now(),
-            file_hashes: compute_file_hashes(index),
-        }
-    }
-
-}
 
 /// Cached suggestions
 #[derive(Debug, Clone, Serialize, Deserialize)]
