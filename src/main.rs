@@ -64,8 +64,23 @@ async fn main() -> Result<()> {
     if onboarding::is_first_run() {
         match onboarding::run_onboarding() {
             Ok(true) => {
-                // Setup completed, continue to TUI
-                eprintln!();
+                // Setup completed, verify API key is accessible
+                let mut config = config::Config::load();
+                match config.get_api_key() {
+                    Some(_) => {
+                        eprintln!("  + API key verified and ready to use");
+                        eprintln!();
+                    }
+                    None => {
+                        eprintln!("  ! Warning: API key was saved but cannot be read back.");
+                        eprintln!("  ! This may be due to keychain access issues.");
+                        eprintln!("  ! Workaround: Set OPENROUTER_API_KEY environment variable.");
+                        eprintln!();
+                        eprintln!("  Press Enter to continue...");
+                        let mut _input = String::new();
+                        let _ = std::io::stdin().read_line(&mut _input);
+                    }
+                }
             }
             Ok(false) => {
                 // Setup skipped, continue to TUI
@@ -214,6 +229,24 @@ fn print_stats(index: &CodebaseIndex, suggestions: &SuggestionEngine, context: &
 /// Set up the API key interactively
 fn setup_api_key() -> Result<()> {
     config::setup_api_key_interactive().map_err(|e| anyhow::anyhow!("{}", e))?;
-    println!("  + API key configured. You can now use AI features!");
+    
+    // Verify the key is readable
+    let mut config = config::Config::load();
+    match config.get_api_key() {
+        Some(_) => {
+            println!("  + API key verified and ready to use!");
+        }
+        None => {
+            eprintln!();
+            eprintln!("  ! Warning: API key was saved but cannot be read back.");
+            eprintln!("  ! This may be due to system keychain access issues.");
+            eprintln!();
+            eprintln!("  Workaround: Set the OPENROUTER_API_KEY environment variable:");
+            eprintln!("    export OPENROUTER_API_KEY=\"your-key-here\"");
+            eprintln!();
+            return Err(anyhow::anyhow!("API key verification failed"));
+        }
+    }
+    
     Ok(())
 }
