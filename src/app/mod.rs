@@ -3,8 +3,6 @@ pub mod input;
 pub mod messages;
 pub mod runtime;
 
-#[allow(unused_imports)]
-pub use messages::BackgroundMessage;
 pub use runtime::run_tui;
 
 use crate::index::CodebaseIndex;
@@ -48,10 +46,14 @@ impl BudgetGuard {
     }
 
     pub fn session_cost(&self) -> f64 {
-        self.inner
-            .lock()
-            .map(|s| s.session_cost)
-            .unwrap_or(0.0)
+        match self.inner.lock() {
+            Ok(state) => state.session_cost,
+            Err(poisoned) => {
+                // Lock was poisoned by a panic; recover the data
+                eprintln!("Warning: BudgetGuard lock was poisoned, recovering state");
+                poisoned.into_inner().session_cost
+            }
+        }
     }
 
     pub fn allow_ai(&self, config: &mut crate::config::Config) -> Result<(), String> {

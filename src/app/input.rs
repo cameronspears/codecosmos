@@ -314,7 +314,7 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent, ctx: &RuntimeContext) -> R
                                                     continue;
                                                 }
 
-                                                let batch_size = 16;
+                                                let batch_size = suggest::llm::SUMMARY_BATCH_SIZE;
                                                 let batches: Vec<_> =
                                                     files.chunks(batch_size).collect();
 

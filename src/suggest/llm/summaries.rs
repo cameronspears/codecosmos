@@ -8,6 +8,17 @@ use crate::index::{CodebaseIndex, SymbolKind};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+// ═══════════════════════════════════════════════════════════════════════════
+//  BATCH PROCESSING CONSTANTS
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Number of files to process in a single LLM batch request.
+/// Larger batches reduce API overhead but increase per-request latency.
+pub const SUMMARY_BATCH_SIZE: usize = 16;
+
+/// Number of concurrent batch requests for summary generation.
+const SUMMARY_CONCURRENCY: usize = 4;
+
 /// Result from a single batch of file summaries
 pub struct SummaryBatchResult {
     pub summaries: HashMap<PathBuf, String>,
@@ -199,10 +210,8 @@ pub async fn generate_summaries_for_files(
     Option<Usage>,
     Vec<PathBuf>,
 )> {
-    // Large batch size for fewer API calls
-    let batch_size = 16;
-    // Higher concurrency for faster processing (Speed preset handles this well)
-    let concurrency = 4;
+    let batch_size = SUMMARY_BATCH_SIZE;
+    let concurrency = SUMMARY_CONCURRENCY;
 
     let batches: Vec<_> = files.chunks(batch_size).collect();
 

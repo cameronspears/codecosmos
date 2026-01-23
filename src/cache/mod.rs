@@ -738,12 +738,23 @@ impl Cache {
 
 }
 
+/// Write content atomically by writing to a temp file first, then renaming.
+///
+/// # Platform Notes
+/// - **Unix**: Uses atomic `rename()` which is guaranteed to be atomic by POSIX.
+/// - **Windows**: Uses a backup-and-restore pattern since `rename()` can fail if the
+///   destination exists. This is NOT truly atomic - if the process crashes between
+///   the backup rename and the final rename, the file may be left in an inconsistent
+///   state. The backup file (.bak) can be used for recovery. For cache files, this
+///   trade-off is acceptable as the cache can be regenerated.
 fn write_atomic(path: &Path, content: &str) -> anyhow::Result<()> {
     let tmp_path = path.with_extension("tmp");
     fs::write(&tmp_path, content)?;
+
     #[cfg(windows)]
     {
         let backup_path = path.with_extension("bak");
+        // Clean up any stale backup from a previous crash
         if backup_path.exists() {
             let _ = fs::remove_file(&backup_path);
         }
@@ -754,22 +765,28 @@ fn write_atomic(path: &Path, content: &str) -> anyhow::Result<()> {
             }
         }
         if let Err(err) = fs::rename(&tmp_path, path) {
+            // Attempt rollback on failure
             if backup_path.exists() {
                 let _ = fs::rename(&backup_path, path);
             }
             let _ = fs::remove_file(&tmp_path);
             return Err(err.into());
         }
+        // Clean up backup on success
         if backup_path.exists() {
             let _ = fs::remove_file(&backup_path);
         }
         return Ok(());
     }
-    if let Err(err) = fs::rename(&tmp_path, path) {
-        let _ = fs::remove_file(&tmp_path);
-        return Err(err.into());
+
+    #[cfg(not(windows))]
+    {
+        if let Err(err) = fs::rename(&tmp_path, path) {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(err.into());
+        }
+        Ok(())
     }
-    Ok(())
 }
 
 

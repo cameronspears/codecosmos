@@ -11,22 +11,12 @@ pub mod summaries;
 
 pub use analysis::{analyze_codebase, ask_question};
 pub use client::is_available;
-#[allow(unused_imports)]
-pub use fix::{
-    generate_fix_content,
-    generate_fix_preview,
-    generate_multi_file_fix,
-    AppliedFix,
-    FixPreview,
-    FixScope,
-    MultiFileAppliedFix,
-};
+pub use fix::{generate_fix_content, generate_fix_preview, generate_multi_file_fix, FixPreview, FixScope};
 pub use models::{Model, Usage};
-#[allow(unused_imports)]
-pub use review::{fix_review_findings, verify_changes, ReviewFinding, VerificationReview};
-#[allow(unused_imports)]
+pub use review::{fix_review_findings, verify_changes, ReviewFinding};
 pub use summaries::{
     discover_project_context,
     generate_summaries_for_files,
     prioritize_files_for_summary,
+    SUMMARY_BATCH_SIZE,
 };

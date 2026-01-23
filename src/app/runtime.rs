@@ -323,8 +323,7 @@ pub async fn run_tui(
                         continue;
                     }
 
-                    // Use large batch size (16 files) for faster processing
-                    let batch_size = 16;
+                    let batch_size = suggest::llm::SUMMARY_BATCH_SIZE;
                     let batches: Vec<_> = files.chunks(batch_size).collect();
 
                     // Process batches sequentially (llm.rs handles internal parallelism)

@@ -10,6 +10,16 @@ use crate::suggest::Suggestion;
 use std::collections::HashSet;
 use std::path::PathBuf;
 
+// ═══════════════════════════════════════════════════════════════════════════
+//  THRESHOLDS AND CONSTANTS
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Complexity threshold above which a file is considered a "hotspot"
+const HIGH_COMPLEXITY_THRESHOLD: f64 = 20.0;
+
+/// Lines of code threshold above which a file is considered a "god module"
+const GOD_MODULE_LOC_THRESHOLD: usize = 500;
+
 /// Ask cosmos a general question about the codebase
 /// Uses the Smart model for thoughtful, well-reasoned responses in plain English
 pub async fn ask_question(
@@ -219,10 +229,14 @@ fn build_codebase_context(
 
     // File hotspots (largest/most complex)
     let mut hotspots = index.files.values().collect::<Vec<_>>();
-    hotspots.sort_by(|a, b| b.complexity.partial_cmp(&a.complexity).unwrap());
+    hotspots.sort_by(|a, b| {
+        b.complexity
+            .partial_cmp(&a.complexity)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     let hot: Vec<_> = hotspots
         .iter()
-        .filter(|f| f.complexity > 20.0 || f.loc > 500)
+        .filter(|f| f.complexity > HIGH_COMPLEXITY_THRESHOLD || f.loc > GOD_MODULE_LOC_THRESHOLD)
         .take(10)
         .collect();
 
