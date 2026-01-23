@@ -116,21 +116,43 @@ impl Config {
         Ok(())
     }
 
-    /// Get the OpenRouter API key (from config or environment)
+    /// Get the OpenRouter API key (from environment or keychain)
     pub fn get_api_key(&mut self) -> Option<String> {
         // Environment variable takes precedence
         if let Ok(key) = std::env::var("OPENROUTER_API_KEY") {
             return Some(key);
         }
 
-        if let Ok(Some(key)) = read_keyring_key() {
-            return Some(key);
+        // Try keychain
+        match read_keyring_key() {
+            Ok(Some(key)) => return Some(key),
+            Ok(None) => {} // No key stored, continue
+            Err(err) => {
+                eprintln!(
+                    "  Warning: Failed to read API key from system keychain: {}",
+                    err
+                );
+                eprintln!("  Tip: Set the OPENROUTER_API_KEY environment variable as a workaround.");
+            }
         }
 
+        // Legacy: migrate plaintext key to keychain if present
         if let Some(key) = self.openrouter_api_key.clone() {
-            if write_keyring_key(&key).is_ok() {
-                self.openrouter_api_key = None;
-                let _ = self.save();
+            eprintln!("  Migrating API key from config file to system keychain...");
+            match write_keyring_key(&key) {
+                Ok(()) => {
+                    // Verify migration succeeded
+                    if let Ok(Some(stored)) = read_keyring_key() {
+                        if stored == key {
+                            self.openrouter_api_key = None;
+                            let _ = self.save();
+                            eprintln!("  + API key migrated successfully.");
+                        }
+                    }
+                }
+                Err(err) => {
+                    eprintln!("  Warning: Failed to migrate API key to keychain: {}", err);
+                }
             }
             return Some(key);
         }
@@ -140,18 +162,42 @@ impl Config {
 
     /// Set and save the API key
     pub fn set_api_key(&mut self, key: &str) -> Result<(), String> {
-        match write_keyring_key(key) {
-            Ok(()) => {
+        // Try to write to keychain
+        if let Err(write_err) = write_keyring_key(key) {
+            return Err(format!(
+                "Failed to store API key in system keychain: {}. \
+                 You can set the OPENROUTER_API_KEY environment variable instead.",
+                write_err
+            ));
+        }
+
+        // Verify the write succeeded by reading it back
+        match read_keyring_key() {
+            Ok(Some(stored_key)) if stored_key == key => {
+                // Successfully verified - clear any legacy plaintext key from config
                 self.openrouter_api_key = None;
                 self.save()
             }
-            Err(err) => {
-                eprintln!(
-                    "  Warning: Failed to store API key in system keychain ({}). Falling back to config file.",
-                    err
-                );
-                self.openrouter_api_key = Some(key.to_string());
-                self.save()
+            Ok(Some(_)) => {
+                Err(
+                    "API key verification failed: stored key doesn't match. \
+                     You can set the OPENROUTER_API_KEY environment variable instead."
+                        .to_string(),
+                )
+            }
+            Ok(None) => {
+                Err(
+                    "API key verification failed: key was not persisted to keychain. \
+                     You can set the OPENROUTER_API_KEY environment variable instead."
+                        .to_string(),
+                )
+            }
+            Err(read_err) => {
+                Err(format!(
+                    "API key verification failed: couldn't read back from keychain ({}). \
+                     You can set the OPENROUTER_API_KEY environment variable instead.",
+                    read_err
+                ))
             }
         }
     }
@@ -161,9 +207,17 @@ impl Config {
         if std::env::var("OPENROUTER_API_KEY").is_ok() {
             return true;
         }
-        if let Ok(Some(_)) = read_keyring_key() {
-            return true;
+        match read_keyring_key() {
+            Ok(Some(_)) => return true,
+            Ok(None) => {} // No key stored
+            Err(err) => {
+                eprintln!(
+                    "  Warning: Failed to check system keychain for API key: {}",
+                    err
+                );
+            }
         }
+        // Legacy: check for plaintext key in config (will be migrated on get_api_key)
         self.openrouter_api_key.is_some()
     }
 
