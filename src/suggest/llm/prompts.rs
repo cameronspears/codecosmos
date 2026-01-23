@@ -32,6 +32,8 @@ CRITICAL RULES FOR EDITS:
 - Multiple edits are applied in order - each must be unique in the file at application time
 - Preserve indentation exactly - spaces and tabs matter
 - Do NOT include line numbers in old_string or new_string
+- Make the SMALLEST change that fixes the issue
+- Avoid refactors, reformatting, or unrelated edits
 
 EXAMPLE - Adding a null check:
 {
@@ -71,6 +73,8 @@ CRITICAL RULES FOR EDITS:
 - Preserve indentation exactly - spaces and tabs matter
 - Do NOT include line numbers in old_string or new_string
 - Include ALL files that need changes - don't leave any file half-refactored
+- Make the SMALLEST change that fixes the issue
+- Avoid refactors, reformatting, or unrelated edits
 
 MULTI-FILE CONSISTENCY:
 - Ensure renamed symbols match across all files
@@ -121,6 +125,7 @@ OUTPUT FORMAT (JSON):
 
 RULES:
 - verified: boolean true if issue exists, false if it doesn't exist or was already fixed
+- Be conservative: if you cannot confirm from the code, set verified to false
 - friendly_title: A short, non-technical topic name (2-4 words). NO file names, NO function names.
 - problem_summary: Describe what HAPPENS (behavior) not HOW it works (code). Write for someone who doesn't know programming. 1-2 sentences max.
 - outcome: Describe what will be DIFFERENT after the fix. Focus on the result, not the implementation. 1 sentence.

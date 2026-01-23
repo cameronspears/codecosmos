@@ -210,6 +210,71 @@ pub(crate) fn normalize_generated_content(content: String) -> String {
     normalized
 }
 
+const MAX_LCS_MATRIX_CELLS: usize = 2_000_000;
+
+/// Estimate how many lines changed between two versions of a file.
+pub fn estimate_changed_lines(old: &str, new: &str) -> usize {
+    if old == new {
+        return 0;
+    }
+    let old_lines: Vec<&str> = old.lines().collect();
+    let new_lines: Vec<&str> = new.lines().collect();
+
+    if old_lines.is_empty() {
+        return new_lines.len();
+    }
+    if new_lines.is_empty() {
+        return old_lines.len();
+    }
+
+    let cell_count = old_lines.len().saturating_mul(new_lines.len());
+    let lcs = if cell_count <= MAX_LCS_MATRIX_CELLS {
+        lcs_len(&old_lines, &new_lines)
+    } else {
+        prefix_suffix_lcs_len(&old_lines, &new_lines)
+    };
+
+    old_lines.len() + new_lines.len() - 2 * lcs
+}
+
+fn lcs_len(old: &[&str], new: &[&str]) -> usize {
+    let m = new.len();
+    let mut prev = vec![0usize; m + 1];
+    let mut curr = vec![0usize; m + 1];
+
+    for old_line in old {
+        for (j, new_line) in new.iter().enumerate() {
+            curr[j + 1] = if old_line == new_line {
+                prev[j] + 1
+            } else {
+                prev[j + 1].max(curr[j])
+            };
+        }
+        prev.copy_from_slice(&curr);
+        curr.fill(0);
+    }
+
+    prev[m]
+}
+
+fn prefix_suffix_lcs_len(old: &[&str], new: &[&str]) -> usize {
+    let mut prefix = 0usize;
+    let max_prefix = old.len().min(new.len());
+    while prefix < max_prefix && old[prefix] == new[prefix] {
+        prefix += 1;
+    }
+
+    let mut suffix = 0usize;
+    let max_suffix = (old.len() - prefix).min(new.len() - prefix);
+    while suffix < max_suffix
+        && old[old.len() - 1 - suffix] == new[new.len() - 1 - suffix]
+    {
+        suffix += 1;
+    }
+
+    prefix + suffix
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 //  MULTI-FILE FIX GENERATION
 // ═══════════════════════════════════════════════════════════════════════════
@@ -617,5 +682,26 @@ mod tests {
         }];
         let err = apply_edits_with_context("content", &edits, "file").unwrap_err();
         assert!(err.to_string().contains("old_string is empty"));
+    }
+
+    #[test]
+    fn test_estimate_changed_lines_identical() {
+        let before = "a\nb\nc\n";
+        let after = "a\nb\nc\n";
+        assert_eq!(estimate_changed_lines(before, after), 0);
+    }
+
+    #[test]
+    fn test_estimate_changed_lines_replace_line() {
+        let before = "a\nb\nc\n";
+        let after = "a\nb\nx\n";
+        assert_eq!(estimate_changed_lines(before, after), 2);
+    }
+
+    #[test]
+    fn test_estimate_changed_lines_insert_line() {
+        let before = "a\nb\n";
+        let after = "a\nb\nc\n";
+        assert_eq!(estimate_changed_lines(before, after), 1);
     }
 }

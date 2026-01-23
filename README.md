@@ -177,6 +177,10 @@ Press `O` to see your config file location. Config options:
 
 - **Privacy preview** (`P`) — Preview what gets sent to AI before sending
 - **Summarize changed only** (`T`) — Only summarize modified files and their dependencies
+- **Surgical mode** — Only apply small, verified changes (default on)
+  - `surgical_max_changed_lines` — Max changed lines per file (default: 20)
+  - `surgical_max_files` — Max files per apply (default: 1)
+  - Set `surgical_mode: false` to allow larger changes
 
 ## Project Structure
 

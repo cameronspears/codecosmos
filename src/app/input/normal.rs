@@ -329,6 +329,29 @@ pub(super) fn handle_normal_mode(
                                             .find(|s| s.id == sid)
                                             .cloned()
                                         {
+                                            let surgical_mode = app.config.surgical_mode;
+                                            let surgical_max_files =
+                                                app.config.surgical_max_files.max(1);
+                                            let surgical_max_changed_lines =
+                                                app.config.surgical_max_changed_lines;
+
+                                            if surgical_mode {
+                                                if !preview.verified {
+                                                    app.show_toast(
+                                                        "Apply failed: surgical mode requires a confirmed issue.",
+                                                    );
+                                                    return Ok(());
+                                                }
+                                                let file_count = state.file_count();
+                                                if file_count > surgical_max_files {
+                                                    app.show_toast(&format!(
+                                                        "Apply failed: surgical mode allows {} file(s).",
+                                                        surgical_max_files
+                                                    ));
+                                                    return Ok(());
+                                                }
+                                            }
+
                                             if let Err(e) = app.config.allow_ai(app.session_cost) {
                                                 app.show_toast(&e);
                                                 return Ok(());
@@ -526,6 +549,46 @@ pub(super) fn handle_normal_mode(
                                                         .await
                                                         {
                                                             Ok(multi_fix) => {
+                                                                if surgical_mode {
+                                                                    let file_count =
+                                                                        multi_fix.file_edits.len();
+                                                                    if file_count > surgical_max_files {
+                                                                        let _ = tx_apply.send(
+                                                                            BackgroundMessage::DirectFixError(
+                                                                                format!(
+                                                                                    "Surgical mode: {} files changed (max {}).",
+                                                                                    file_count, surgical_max_files
+                                                                                ),
+                                                                            ),
+                                                                        );
+                                                                        return;
+                                                                    }
+                                                                    for file_edit in &multi_fix.file_edits {
+                                                                        let original = file_inputs
+                                                                            .iter()
+                                                                            .find(|f| f.path == file_edit.path)
+                                                                            .map(|f| f.content.as_str())
+                                                                            .unwrap_or("");
+                                                                        let changed_lines =
+                                                                            suggest::llm::fix::estimate_changed_lines(
+                                                                                original,
+                                                                                &file_edit.new_content,
+                                                                            );
+                                                                        if changed_lines
+                                                                            > surgical_max_changed_lines
+                                                                        {
+                                                                            let _ = tx_apply.send(
+                                                                                BackgroundMessage::DirectFixError(
+                                                                                    format!(
+                                                                                        "Surgical mode: {} lines changed (max {}).",
+                                                                                        changed_lines, surgical_max_changed_lines
+                                                                                    ),
+                                                                                ),
+                                                                            );
+                                                                            return;
+                                                                        }
+                                                                    }
+                                                                }
                                                                 // Backup all files first
                                                                 let mut backups: Vec<(
                                                                     PathBuf,
@@ -774,6 +837,26 @@ pub(super) fn handle_normal_mode(
                                                         .await
                                                         {
                                                             Ok(applied_fix) => {
+                                                                if surgical_mode {
+                                                                    let changed_lines =
+                                                                        suggest::llm::fix::estimate_changed_lines(
+                                                                            &content,
+                                                                            &applied_fix.new_content,
+                                                                        );
+                                                                    if changed_lines
+                                                                        > surgical_max_changed_lines
+                                                                    {
+                                                                        let _ = tx_apply.send(
+                                                                            BackgroundMessage::DirectFixError(
+                                                                                format!(
+                                                                                    "Surgical mode: {} lines changed (max {}).",
+                                                                                    changed_lines, surgical_max_changed_lines
+                                                                                ),
+                                                                            ),
+                                                                        );
+                                                                        return;
+                                                                    }
+                                                                }
                                                                 let backup_path = full_path
                                                                     .with_extension("cosmos.bak");
                                                                 if let Some(parent) = full_path.parent() {

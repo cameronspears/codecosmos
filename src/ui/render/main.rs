@@ -756,6 +756,41 @@ fn render_verify_content<'a>(
         ]));
         content.push(Line::from(""));
 
+        if app.config.surgical_mode {
+            let max_files = app.config.surgical_max_files.max(1);
+            let max_lines = app.config.surgical_max_changed_lines;
+            let line_text = if max_lines == 0 {
+                "Surgical mode: no edits allowed.".to_string()
+            } else {
+                format!(
+                    "Surgical mode: up to {} line{} in {} file{}.",
+                    max_lines,
+                    if max_lines == 1 { "" } else { "s" },
+                    max_files,
+                    if max_files == 1 { "" } else { "s" }
+                )
+            };
+            content.push(Line::from(vec![Span::styled(
+                format!("  {}", line_text),
+                Style::default().fg(Theme::GREY_500),
+            )]));
+
+            if !preview.verified {
+                content.push(Line::from(vec![Span::styled(
+                    "  Surgical mode blocks unconfirmed fixes.",
+                    Style::default().fg(Theme::BADGE_BUG),
+                )]));
+            }
+
+            if state.file_count() > max_files {
+                content.push(Line::from(vec![Span::styled(
+                    "  Surgical mode blocks multi-file changes.",
+                    Style::default().fg(Theme::BADGE_BUG),
+                )]));
+            }
+            content.push(Line::from(""));
+        }
+
         // The fix (outcome-focused)
         content.push(Line::from(vec![Span::styled(
             "  The fix:",

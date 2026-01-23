@@ -8,7 +8,7 @@ use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub openrouter_api_key: Option<String>,
     /// Optional max USD spend per Cosmos session (best-effort; enforced before new AI actions)
@@ -24,6 +24,15 @@ pub struct Config {
     /// If true, show a preview of what will be sent before inquiry actions
     #[serde(default = "default_privacy_preview")]
     pub privacy_preview: bool,
+    /// If true, only allow small, verified, surgical edits
+    #[serde(default = "default_surgical_mode")]
+    pub surgical_mode: bool,
+    /// Max files allowed in a surgical apply
+    #[serde(default = "default_surgical_max_files")]
+    pub surgical_max_files: usize,
+    /// Max changed lines allowed per file in a surgical apply
+    #[serde(default = "default_surgical_max_changed_lines")]
+    pub surgical_max_changed_lines: usize,
 }
 
 const KEYRING_SERVICE: &str = "codecosmos";
@@ -49,6 +58,35 @@ fn write_keyring_key(key: &str) -> Result<(), keyring::Error> {
 
 fn default_privacy_preview() -> bool {
     true
+}
+
+fn default_surgical_mode() -> bool {
+    true
+}
+
+fn default_surgical_max_files() -> usize {
+    1
+}
+
+fn default_surgical_max_changed_lines() -> usize {
+    20
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            openrouter_api_key: None,
+            max_session_cost_usd: None,
+            max_tokens_per_day: None,
+            tokens_used_today: 0,
+            tokens_used_date: None,
+            summarize_changed_only: false,
+            privacy_preview: default_privacy_preview(),
+            surgical_mode: default_surgical_mode(),
+            surgical_max_files: default_surgical_max_files(),
+            surgical_max_changed_lines: default_surgical_max_changed_lines(),
+        }
+    }
 }
 
 impl Config {
@@ -362,6 +400,9 @@ mod tests {
     fn test_config_default() {
         let config = Config::default();
         assert!(config.openrouter_api_key.is_none());
+        assert!(config.surgical_mode);
+        assert_eq!(config.surgical_max_files, 1);
+        assert_eq!(config.surgical_max_changed_lines, 20);
     }
 }
 
