@@ -24,7 +24,7 @@ fn strip_markdown_fences(text: &str) -> &str {
 }
 
 /// Extract a JSON fragment between matching delimiters
-fn extract_json_fragment<'a>(text: &'a str, open: char, close: char) -> Option<&'a str> {
+fn extract_json_fragment(text: &str, open: char, close: char) -> Option<&str> {
     let start = text.find(open)?;
     let end = text.rfind(close)?;
     if start <= end {

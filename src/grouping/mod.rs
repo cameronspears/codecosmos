@@ -34,7 +34,7 @@ pub fn display_name_with_context(path: &Path) -> String {
         .unwrap_or("?");
     
     // Check if this is a generic filename that needs context
-    if GENERIC_FILENAMES.iter().any(|g| filename == *g) {
+    if GENERIC_FILENAMES.contains(&filename) {
         // Get parent directory name
         if let Some(parent) = path.parent().and_then(|p| p.file_name()).and_then(|n| n.to_str()) {
             // Skip unhelpful parent names

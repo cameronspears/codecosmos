@@ -14,11 +14,10 @@ use std::path::PathBuf;
 //  THRESHOLDS AND CONSTANTS
 // ═══════════════════════════════════════════════════════════════════════════
 
+use crate::index::GOD_MODULE_LOC_THRESHOLD;
+
 /// Complexity threshold above which a file is considered a "hotspot"
 const HIGH_COMPLEXITY_THRESHOLD: f64 = 20.0;
-
-/// Lines of code threshold above which a file is considered a "god module"
-const GOD_MODULE_LOC_THRESHOLD: usize = 500;
 
 /// Ask cosmos a general question about the codebase
 /// Uses the Smart model for thoughtful, well-reasoned responses in plain English

@@ -16,10 +16,10 @@ use walkdir::WalkDir;
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Number of lines above which a function is considered "long"
-const LONG_FUNCTION_THRESHOLD: usize = 50;
+pub const LONG_FUNCTION_THRESHOLD: usize = 50;
 
 /// Number of lines above which a file is considered a "god module"
-const GOD_MODULE_LOC_THRESHOLD: usize = 500;
+pub const GOD_MODULE_LOC_THRESHOLD: usize = 500;
 
 /// Supported programming languages
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -88,8 +88,6 @@ pub enum SymbolKind {
     Variable,
 }
 
-impl SymbolKind {
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Visibility {
@@ -679,7 +677,7 @@ impl CodebaseIndex {
         let content = std::fs::read_to_string(path)?;
         let metadata = std::fs::metadata(path)?;
         let modified = metadata.modified()
-            .map(|t| DateTime::<Utc>::from(t))
+            .map(DateTime::<Utc>::from)
             .unwrap_or_else(|_| Utc::now());
 
         let loc = content.lines().count();

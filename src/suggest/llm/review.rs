@@ -108,7 +108,7 @@ fn add_line_numbers(content: &str) -> String {
 /// Takes the content and findings to address, returns fixed content.
 /// On later iterations, includes original content and fix history for better context.
 pub async fn fix_review_findings(
-    path: &PathBuf,
+    path: &std::path::Path,
     content: &str,
     original_content: Option<&str>,
     findings: &[ReviewFinding],

@@ -226,7 +226,7 @@ pub async fn generate_summaries_for_files(
         let futures: Vec<_> = batch_group
             .iter()
             .map(|batch| {
-                let batch_files: Vec<PathBuf> = batch.iter().cloned().collect();
+                let batch_files: Vec<PathBuf> = batch.to_vec();
                 async move {
                     let result = generate_summary_batch(index, &batch_files, project_context).await;
                     (batch_files, result)

@@ -36,14 +36,14 @@ pub fn parse_markdown(text: &str, max_width: usize) -> Vec<Line<'static>> {
         // Handle different line types
         if line.is_empty() {
             lines.push(Line::from(""));
-        } else if line.starts_with("# ") {
-            lines.push(render_h1(&line[2..], max_width));
-        } else if line.starts_with("## ") {
-            lines.push(render_h2(&line[3..], max_width));
-        } else if line.starts_with("### ") {
-            lines.push(render_h3(&line[4..], max_width));
-        } else if line.starts_with("- ") || line.starts_with("* ") {
-            let wrapped = wrap_and_parse_inline(&line[2..], max_width.saturating_sub(4));
+        } else if let Some(content) = line.strip_prefix("# ") {
+            lines.push(render_h1(content, max_width));
+        } else if let Some(content) = line.strip_prefix("## ") {
+            lines.push(render_h2(content, max_width));
+        } else if let Some(content) = line.strip_prefix("### ") {
+            lines.push(render_h3(content, max_width));
+        } else if let Some(content) = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
+            let wrapped = wrap_and_parse_inline(content, max_width.saturating_sub(4));
             for (i, styled_line) in wrapped.into_iter().enumerate() {
                 let prefix = if i == 0 { "  • " } else { "    " };
                 let mut spans = vec![Span::styled(prefix, Style::default().fg(Theme::GREY_400))];
@@ -69,9 +69,9 @@ pub fn parse_markdown(text: &str, max_width: usize) -> Vec<Line<'static>> {
                 // Regular paragraph
                 lines.extend(wrap_and_parse_inline(line, max_width));
             }
-        } else if line.starts_with("> ") {
+        } else if let Some(content) = line.strip_prefix("> ") {
             // Block quote
-            let wrapped = wrap_and_parse_inline(&line[2..], max_width.saturating_sub(4));
+            let wrapped = wrap_and_parse_inline(content, max_width.saturating_sub(4));
             for styled_line in wrapped {
                 let mut spans = vec![Span::styled("  │ ", Style::default().fg(Theme::GREY_500))];
                 spans.extend(styled_line.spans);
@@ -90,7 +90,7 @@ pub fn parse_markdown(text: &str, max_width: usize) -> Vec<Line<'static>> {
 fn render_h1(text: &str, _max_width: usize) -> Line<'static> {
     Line::from(vec![
         Span::styled(
-            format!("{}", text),
+            text.to_string(),
             Style::default()
                 .fg(Theme::WHITE)
                 .add_modifier(Modifier::BOLD)
@@ -102,7 +102,7 @@ fn render_h1(text: &str, _max_width: usize) -> Line<'static> {
 fn render_h2(text: &str, _max_width: usize) -> Line<'static> {
     Line::from(vec![
         Span::styled(
-            format!("{}", text),
+            text.to_string(),
             Style::default()
                 .fg(Theme::GREY_100)
                 .add_modifier(Modifier::BOLD)

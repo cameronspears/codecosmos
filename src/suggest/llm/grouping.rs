@@ -98,7 +98,7 @@ pub async fn classify_grouping_candidates(
     Ok((suggestions, total_usage))
 }
 
-fn build_file_context(path: &PathBuf, file: &crate::index::FileIndex) -> FileContext {
+fn build_file_context(path: &std::path::Path, file: &crate::index::FileIndex) -> FileContext {
     let exports = file.summary.exports.iter().take(6).cloned().collect();
     let symbols = file
         .symbols
