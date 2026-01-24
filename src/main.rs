@@ -14,7 +14,6 @@ mod onboarding;
 mod suggest;
 mod ui;
 mod app;
-mod build_info;
 mod util;
 
 // Keep these for compatibility during transition
@@ -50,62 +49,36 @@ struct Args {
     /// Show stats and exit (no TUI)
     #[arg(long)]
     stats: bool,
-
-    /// Show build info and exit
-    #[arg(long)]
-    build_info: bool,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    if args.build_info {
-        build_info::print_build_info();
-        return Ok(());
-    }
-
-    if let Some(info) = build_info::stale_build_notice() {
-        eprintln!("  ! This binary looks stale.");
-        eprintln!("  ! Built from {}, but source repo is now {}.", info.build, info.current);
-        eprintln!("  ! Rebuild with: cargo build --release");
-        eprintln!();
-    }
-
     // Handle --setup flag (BYOK mode)
     if args.setup {
         return setup_api_key();
     }
 
-    // Check for first run and show onboarding
+    // Check for first run and run setup
     if onboarding::is_first_run() {
-        match onboarding::run_onboarding() {
-            Ok(true) => {
-                // Setup completed, verify API key is accessible
-                let mut config = config::Config::load();
-                match config.get_api_key() {
-                    Some(_) => {
-                        eprintln!("  + API key verified and ready to use");
-                        eprintln!();
-                    }
-                    None => {
-                        eprintln!("  ! Warning: API key was saved but cannot be read back.");
-                        eprintln!("  ! This may be due to keychain access issues.");
-                        eprintln!("  ! Workaround: Set OPENROUTER_API_KEY environment variable.");
-                        eprintln!();
-                        eprintln!("  Press Enter to continue...");
-                        let mut _input = String::new();
-                        let _ = std::io::stdin().read_line(&mut _input);
-                    }
-                }
-            }
-            Ok(false) => {
-                // Setup skipped, continue to TUI
+        onboarding::run_onboarding().map_err(|e| anyhow::anyhow!("{}", e))?;
+
+        // Setup completed, verify API key is accessible
+        let mut config = config::Config::load();
+        match config.get_api_key() {
+            Some(_) => {
+                eprintln!("  + API key verified and ready to use");
                 eprintln!();
             }
-            Err(e) => {
-                eprintln!("  Onboarding error: {}", e);
-                eprintln!("  Continuing without setup...");
+            None => {
+                eprintln!("  ! Warning: API key was saved but cannot be read back.");
+                eprintln!("  ! This may be due to keychain access issues.");
+                eprintln!("  ! Workaround: Set OPENROUTER_API_KEY environment variable.");
+                eprintln!();
+                eprintln!("  Press Enter to continue...");
+                let mut _input = String::new();
+                let _ = std::io::stdin().read_line(&mut _input);
             }
         }
     }

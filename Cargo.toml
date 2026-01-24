@@ -39,9 +39,6 @@ unicode-width = "0.2"
 fs2 = "0.4.3"
 keyring = { version = "3.6.3", features = ["apple-native", "windows-native", "linux-native"] }
 
-[build-dependencies]
-chrono = "0.4"
-
 [[bin]]
 name = "cosmos"
 path = "src/main.rs"

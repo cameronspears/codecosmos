@@ -332,13 +332,14 @@ pub fn setup_api_key_interactive() -> Result<String, String> {
 
     println!();
     println!("  ┌─────────────────────────────────────────────────────────┐");
-    println!("  │  OPENROUTER SETUP                                       │");
+    println!("  │  COSMOS SETUP                                           │");
     println!("  └─────────────────────────────────────────────────────────┘");
     println!();
     println!("  Cosmos uses OpenRouter for AI-powered suggestions.");
     println!("  Uses a 4-tier model system optimized for cost and quality.");
     println!();
-    println!("  1. Get a free API key at: https://openrouter.ai/keys");
+    println!("  1. Create an API key at: https://openrouter.ai/keys");
+    println!("     You'll need to add funds in OpenRouter to use Cosmos.");
     println!("  2. Paste it below (saved in your system keychain when available)");
     println!();
     print!("  API Key: ");

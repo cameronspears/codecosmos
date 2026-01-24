@@ -223,7 +223,6 @@ Arguments:
 Options:
       --setup             Set up OpenRouter API key
       --stats             Show stats and exit (no TUI)
-      --build-info        Show build info and exit
   -h, --help              Print help
   -V, --version           Print version
 
