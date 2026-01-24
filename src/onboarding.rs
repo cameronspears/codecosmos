@@ -29,7 +29,7 @@ pub fn run_onboarding() -> Result<(), String> {
             Err(err) if err == "No API key provided" => {
                 println!();
                 println!("  An API key is required to continue.");
-                print!("  Press Enter to try again...");
+                print!("  Press Enter to try again, or Ctrl+C to exit...");
                 io::stdout().flush().map_err(|e| e.to_string())?;
                 let mut _input = String::new();
                 let _ = io::stdin().read_line(&mut _input);
