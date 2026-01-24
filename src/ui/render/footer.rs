@@ -88,7 +88,14 @@ pub(super) fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
                     30 // Esc back  ? help  q quit
                 }
             }
-            WorkflowStep::Review => 50, // ␣ select  ↵ fix  Esc back  ? help  q quit
+            WorkflowStep::Review => {
+                // Review passed (no findings) has shorter footer
+                if app.review_state.findings.is_empty() && !app.review_state.summary.is_empty() {
+                    38 // ↵ ship  Esc back  ? help  q quit
+                } else {
+                    50 // ␣ select  ↵ fix  Esc back  ? help  q quit
+                }
+            }
             WorkflowStep::Ship => match app.ship_state.step {
                 ShipStep::Confirm => 45, // ↵ ship  Esc back  ? help  q quit
                 ShipStep::Done => 50,    // ↵ open  Esc done  ? help  q quit
@@ -185,24 +192,43 @@ pub(super) fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
                 }
             }
             WorkflowStep::Review => {
-                spans.push(Span::styled(
-                    " ␣ ",
-                    Style::default().fg(Theme::GREY_900).bg(Theme::GREY_500),
-                ));
-                spans.push(Span::styled(
-                    " select ",
-                    Style::default().fg(Theme::GREY_500),
-                ));
-                spans.push(Span::styled(
-                    " ↵ ",
-                    Style::default().fg(Theme::GREY_900).bg(Theme::GREEN),
-                ));
-                spans.push(Span::styled(" fix ", Style::default().fg(Theme::GREY_300)));
-                spans.push(Span::styled(
-                    " Esc ",
-                    Style::default().fg(Theme::GREY_900).bg(Theme::GREY_600),
-                ));
-                spans.push(Span::styled(" back ", Style::default().fg(Theme::GREY_600)));
+                // Check if review passed (no findings) - in this case, show "ship" instead of "fix"
+                let review_passed =
+                    app.review_state.findings.is_empty() && !app.review_state.summary.is_empty();
+
+                if review_passed {
+                    // Review passed - only action is to continue to ship
+                    spans.push(Span::styled(
+                        " ↵ ",
+                        Style::default().fg(Theme::GREY_900).bg(Theme::GREEN),
+                    ));
+                    spans.push(Span::styled(" ship ", Style::default().fg(Theme::GREY_300)));
+                    spans.push(Span::styled(
+                        " Esc ",
+                        Style::default().fg(Theme::GREY_900).bg(Theme::GREY_600),
+                    ));
+                    spans.push(Span::styled(" back ", Style::default().fg(Theme::GREY_600)));
+                } else {
+                    // Review has findings - show selection and fix options
+                    spans.push(Span::styled(
+                        " ␣ ",
+                        Style::default().fg(Theme::GREY_900).bg(Theme::GREY_500),
+                    ));
+                    spans.push(Span::styled(
+                        " select ",
+                        Style::default().fg(Theme::GREY_500),
+                    ));
+                    spans.push(Span::styled(
+                        " ↵ ",
+                        Style::default().fg(Theme::GREY_900).bg(Theme::GREEN),
+                    ));
+                    spans.push(Span::styled(" fix ", Style::default().fg(Theme::GREY_300)));
+                    spans.push(Span::styled(
+                        " Esc ",
+                        Style::default().fg(Theme::GREY_900).bg(Theme::GREY_600),
+                    ));
+                    spans.push(Span::styled(" back ", Style::default().fg(Theme::GREY_600)));
+                }
             }
             WorkflowStep::Ship => match app.ship_state.step {
                 ShipStep::Confirm => {
