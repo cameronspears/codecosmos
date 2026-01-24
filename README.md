@@ -6,8 +6,6 @@ Cosmos lives *outside* your editing loop. It reads git context, surfaces high-le
 
 **Monochromatic. Minimal. Meaningful.**
 
-![Cosmos Main Interface](assets/main-interface.png)
-
 ## What It Does
 
 - **Indexes your codebase** using tree-sitter (Rust, TypeScript, JavaScript, Python, Go)
@@ -106,8 +104,6 @@ cosmos --setup
 | `M` | Repo memory (store decisions) |
 | `1-8` | Jump to architectural layer |
 
-![Apply Workflow](assets/apply-workflow.png)
-
 ## Workflows
 
 ### Apply Flow
@@ -146,8 +142,6 @@ Cosmos caches aggressively to minimize LLM costs:
 - **Decisions** — Repo memory stores your preferences
 
 On subsequent runs, unchanged files load instantly from cache.
-
-![Codebase View](assets/codebase-view.png)
 
 ## Suggestion Types
 
@@ -191,7 +185,6 @@ cosmos/
 │   ├── safe_apply.rs    # Safety checks before applying
 │   ├── suggest/         # Suggestion engine (LLM + static rules)
 │   └── ui/              # TUI components (ratatui)
-└── assets/              # Screenshots
 ```
 
 ## Design Philosophy
