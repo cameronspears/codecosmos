@@ -1064,12 +1064,7 @@ fn render_review_content<'a>(
         lines.push(Line::from(vec![
             Span::styled("  ", Style::default()),
             Span::styled(" ↵ ", Style::default().fg(Theme::GREY_900).bg(Theme::GREEN)),
-            Span::styled(" Continue to Ship  ", Style::default().fg(Theme::GREY_300)),
-            Span::styled(
-                " r ",
-                Style::default().fg(Theme::GREY_900).bg(Theme::GREY_500),
-            ),
-            Span::styled(" Re-review", Style::default().fg(Theme::GREY_400)),
+            Span::styled(" Continue to Ship", Style::default().fg(Theme::GREY_300)),
         ]));
         return;
     }
