@@ -284,7 +284,59 @@ OUTPUT: A JSON object with three keys:
 For "terms": only include 3-8 domain-specific terms per batch. Skip generic programming terms (like "Controller", "Service", "Handler"). Focus on business/domain concepts that need explanation.
 For "terms_by_file": include only the terms that come from each specific file. If a file has no terms, omit it from "terms_by_file"."#;
 
-const REVIEW_SYSTEM_INITIAL: &str = r#"You are a skeptical senior code reviewer. Your job is to find bugs, security issues, and problems that the implementing developer might have missed.
+use super::review::FixContext;
+
+const REVIEW_SYSTEM_WITH_CONTEXT: &str = r#"You are reviewing a code change that was just applied. Your job is to verify whether the fix was done correctly.
+
+THE FIX WAS SUPPOSED TO:
+{fix_context}
+
+FOCUS YOUR REVIEW ON:
+1. Does this fix actually solve the stated problem?
+2. Was the fix implemented correctly without introducing new bugs?
+3. Are there any edge cases the fix doesn't handle?
+4. Did the fix break anything that was working before?
+
+DO NOT report issues with:
+- Code that existed BEFORE this fix (that's not what we're reviewing)
+- Unrelated parts of the file that weren't modified
+- Style/formatting preferences
+- "Nice to have" improvements outside the scope of this fix
+
+OUTPUT FORMAT (JSON):
+{
+  "summary": "Brief assessment of whether the fix was done correctly",
+  "pass": true,
+  "findings": [
+    {
+      "file": "path/to/file.rs",
+      "line": 42,
+      "severity": "warning",
+      "category": "bug",
+      "title": "Short title for this issue",
+      "description": "Clear explanation of what's wrong with the fix and how it should be corrected. Write in plain English - explain the problem as if talking to someone who isn't looking at the code.",
+      "recommended": true
+    }
+  ]
+}
+
+SEVERITY LEVELS:
+- critical: The fix doesn't work or introduces a serious bug
+- warning: The fix works but has a problem that should be addressed
+- suggestion: Minor issue or edge case to consider
+
+RECOMMENDED FIELD:
+- true: This issue should be fixed before shipping
+- false: This is a suggestion that could be deferred
+
+RULES FOR DESCRIPTIONS:
+- Write 2-3 sentences explaining the problem clearly
+- Describe WHAT happens (the behavior) not just WHAT the code does
+- Explain WHY it's a problem and what could go wrong
+- Use plain English - avoid jargon like "null pointer", "exception", "undefined"
+- If the fix is correct and complete, return an empty findings array"#;
+
+const REVIEW_SYSTEM_GENERIC: &str = r#"You are a skeptical senior code reviewer. Your job is to find bugs, security issues, and problems that the implementing developer might have missed.
 
 BE ADVERSARIAL: Assume the code has bugs until proven otherwise. Look for:
 - Logic errors and edge cases
@@ -343,9 +395,25 @@ RULES:
 - Don't pile on - 2-3 high-quality findings are better than 10 marginal ones
 - Return empty findings array if the code is genuinely solid"#;
 
-pub fn review_system_prompt(iteration: u32, fixed_titles: &[String]) -> String {
+pub fn review_system_prompt(iteration: u32, fixed_titles: &[String], fix_context: Option<&FixContext>) -> String {
     if iteration <= 1 {
-        REVIEW_SYSTEM_INITIAL.to_string()
+        // For initial review, use context-aware prompt if we have fix context
+        if let Some(ctx) = fix_context {
+            let context_text = format!(
+                "Problem: {}\n\nIntended outcome: {}\n\nWhat was changed: {}{}",
+                ctx.problem_summary,
+                ctx.outcome,
+                ctx.description,
+                if ctx.modified_areas.is_empty() {
+                    String::new()
+                } else {
+                    format!("\n\nModified areas: {}", ctx.modified_areas.join(", "))
+                }
+            );
+            REVIEW_SYSTEM_WITH_CONTEXT.replace("{fix_context}", &context_text)
+        } else {
+            REVIEW_SYSTEM_GENERIC.to_string()
+        }
     } else {
         format!(r#"You are verifying that previously reported issues were fixed correctly.
 

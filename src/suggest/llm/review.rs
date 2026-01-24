@@ -7,6 +7,20 @@ use super::prompts::{review_fix_system_prompt, review_system_prompt};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// Context about what a fix was supposed to accomplish
+/// Used to help the reviewer evaluate whether the fix was done correctly
+#[derive(Debug, Clone, Default)]
+pub struct FixContext {
+    /// What the problem was (in plain English)
+    pub problem_summary: String,
+    /// What the fix was supposed to achieve
+    pub outcome: String,
+    /// Technical description of what was changed
+    pub description: String,
+    /// Which areas/functions were modified
+    pub modified_areas: Vec<String>,
+}
+
 // ============================================================================
 // Deep Verification Review (Sweet Spot Flow)
 // ============================================================================
@@ -46,12 +60,17 @@ pub struct VerificationReview {
 ///
 /// On re-reviews (iteration > 1), the prompt is adjusted to focus on verifying fixes
 /// rather than finding entirely new issues.
+///
+/// The `fix_context` parameter (when provided) tells the reviewer what the fix was
+/// supposed to accomplish, allowing it to evaluate whether the fix was done correctly
+/// rather than just finding any bugs in the code.
 pub async fn verify_changes(
     files_with_content: &[(PathBuf, String, String)], // (path, old_content, new_content)
     iteration: u32,
     fixed_titles: &[String],
+    fix_context: Option<&FixContext>,
 ) -> anyhow::Result<VerificationReview> {
-    let system = review_system_prompt(iteration, fixed_titles);
+    let system = review_system_prompt(iteration, fixed_titles, fix_context);
 
     // Build the diff context
     let mut changes_text = String::new();

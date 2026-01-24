@@ -985,7 +985,7 @@ fn render_review_content<'a>(
         lines.push(Line::from(vec![
             Span::styled("    ", Style::default()),
             Span::styled(format!("{} ", spinner), Style::default().fg(Theme::WHITE)),
-            Span::styled("Reviewing changes...", Style::default().fg(Theme::GREY_300)),
+            Span::styled("Reviewing your changes...", Style::default().fg(Theme::GREY_300)),
         ]));
         return;
     }
@@ -1074,36 +1074,22 @@ fn render_review_content<'a>(
         return;
     }
 
-    // Show findings
+    // Show findings with a clear, readable layout
     if !state.findings.is_empty() {
         let selected_count = state.selected.len();
         let total_findings = state.findings.len();
+        let text_width = inner_width.saturating_sub(6);
 
-        // Reserve lines for header (file name, empty line, findings count, empty line = 4 lines)
-        let visible_findings = visible_height.saturating_sub(4);
-
+        // Summary line
         lines.push(Line::from(vec![
             Span::styled(
-                format!("  {} findings", total_findings),
+                format!("  {} issue{} found", total_findings, if total_findings == 1 { "" } else { "s" }),
                 Style::default().fg(Theme::WHITE),
             ),
-            Span::styled(" · ", Style::default().fg(Theme::GREY_600)),
-            Span::styled(
-                format!("{} selected", selected_count),
-                Style::default().fg(if selected_count > 0 {
-                    Theme::WHITE
-                } else {
-                    Theme::GREY_500
-                }),
-            ),
-            if total_findings > visible_findings {
+            if selected_count > 0 {
                 Span::styled(
-                    format!(
-                        " · ↕ {}/{}",
-                        state.scroll + 1,
-                        total_findings.saturating_sub(visible_findings) + 1
-                    ),
-                    Style::default().fg(Theme::GREY_500),
+                    format!(" · {} to fix", selected_count),
+                    Style::default().fg(Theme::GREEN),
                 )
             } else {
                 Span::styled("", Style::default())
@@ -1111,72 +1097,134 @@ fn render_review_content<'a>(
         ]));
         lines.push(Line::from(""));
 
-        for (i, finding) in state
-            .findings
-            .iter()
-            .enumerate()
-            .skip(state.scroll)
-            .take(visible_findings)
-        {
-            let is_selected = state.selected.contains(&i);
-            let is_cursor = i == state.cursor;
+        // Calculate how much space we have for the selected finding's details
+        // Reserve: header (3 lines) + separator (1) + hint (1) + some findings list
+        let min_list_height = 3.min(total_findings);
+        let detail_budget = visible_height.saturating_sub(6 + min_list_height);
 
-            let checkbox = if is_selected { "[×]" } else { "[ ]" };
-            let cursor_indicator = if is_cursor { "›" } else { " " };
-
-            let title_style = if is_cursor {
-                Style::default()
-                    .fg(Theme::WHITE)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Theme::GREY_200)
+        // Show the currently selected finding in detail first (if any)
+        if let Some(current_finding) = state.findings.get(state.cursor) {
+            // Severity indicator
+            let severity_color = match current_finding.severity.as_str() {
+                "critical" => Theme::RED,
+                "warning" => Theme::YELLOW,
+                _ => Theme::GREY_400,
+            };
+            let severity_label = match current_finding.severity.as_str() {
+                "critical" => "Critical",
+                "warning" => "Warning",
+                "suggestion" => "Suggestion",
+                _ => "Note",
             };
 
-            // Wrap the title to use full available width (cursor + checkbox + padding = ~8 chars)
-            let title_width = inner_width.saturating_sub(8);
-            let wrapped_title = wrap_text(&finding.title, title_width);
-
-            // First line with cursor and checkbox
             lines.push(Line::from(vec![
+                Span::styled("  ", Style::default()),
                 Span::styled(
-                    format!(" {} ", cursor_indicator),
-                    Style::default().fg(if is_cursor {
-                        Theme::WHITE
-                    } else {
-                        Theme::GREY_700
-                    }),
-                ),
-                Span::styled(
-                    format!("{} ", checkbox),
-                    Style::default().fg(if is_selected {
-                        Theme::WHITE
-                    } else {
-                        Theme::GREY_500
-                    }),
-                ),
-                Span::styled(
-                    wrapped_title.first().cloned().unwrap_or_default(),
-                    title_style,
+                    format!(" {} ", severity_label),
+                    Style::default().fg(Theme::GREY_900).bg(severity_color),
                 ),
             ]));
+            lines.push(Line::from(""));
 
-            // Continue wrapped title lines (indented to align with title start)
-            for title_line in wrapped_title.iter().skip(1) {
+            // Title - prominent and bold
+            for title_line in wrap_text(&current_finding.title, text_width) {
                 lines.push(Line::from(vec![Span::styled(
-                    format!("        {}", title_line),
-                    title_style,
+                    format!("  {}", title_line),
+                    Style::default()
+                        .fg(Theme::WHITE)
+                        .add_modifier(Modifier::BOLD),
                 )]));
             }
+            lines.push(Line::from(""));
 
-            // Show description for cursor item (more lines, better formatting)
-            if is_cursor && !finding.description.is_empty() {
-                let desc_width = inner_width.saturating_sub(10);
-                for desc_line in wrap_text(&finding.description, desc_width).iter().take(4) {
+            // Description - the full explanation, clearly laid out
+            if !current_finding.description.is_empty() {
+                let desc_lines = wrap_text(&current_finding.description, text_width);
+                // Show as many description lines as we have budget for
+                let max_desc_lines = detail_budget.saturating_sub(4); // Reserve space for severity + title
+                for desc_line in desc_lines.iter().take(max_desc_lines.max(6)) {
                     lines.push(Line::from(vec![Span::styled(
-                        format!("        {}", desc_line),
-                        Style::default().fg(Theme::GREY_400),
+                        format!("  {}", desc_line),
+                        Style::default().fg(Theme::GREY_200),
                     )]));
                 }
+                // If truncated, show indicator
+                if desc_lines.len() > max_desc_lines.max(6) {
+                    lines.push(Line::from(vec![Span::styled(
+                        "  ...",
+                        Style::default().fg(Theme::GREY_500),
+                    )]));
+                }
+            }
+
+            // Selection status
+            lines.push(Line::from(""));
+            let is_selected = state.selected.contains(&state.cursor);
+            if is_selected {
+                lines.push(Line::from(vec![
+                    Span::styled("  ", Style::default()),
+                    Span::styled("[×]", Style::default().fg(Theme::GREEN)),
+                    Span::styled(" Selected for fixing", Style::default().fg(Theme::GREEN)),
+                ]));
+            } else {
+                lines.push(Line::from(vec![
+                    Span::styled("  ", Style::default()),
+                    Span::styled("[ ]", Style::default().fg(Theme::GREY_500)),
+                    Span::styled(" Not selected", Style::default().fg(Theme::GREY_500)),
+                ]));
+            }
+        }
+
+        // Separator
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![Span::styled(
+            "  ─────────────────────────────────",
+            Style::default().fg(Theme::GREY_700),
+        )]));
+
+        // Show list of all findings (compact) if there's more than one
+        if total_findings > 1 {
+            lines.push(Line::from(vec![Span::styled(
+                format!("  All issues ({}/{}):", state.cursor + 1, total_findings),
+                Style::default().fg(Theme::GREY_400),
+            )]));
+
+            // Show a compact list of all findings
+            let remaining_height = visible_height.saturating_sub(lines.len() + 2);
+            for (i, finding) in state.findings.iter().enumerate().take(remaining_height) {
+                let is_cursor = i == state.cursor;
+                let is_selected = state.selected.contains(&i);
+                
+                let indicator = if is_cursor { "›" } else { " " };
+                let checkbox = if is_selected { "×" } else { " " };
+                
+                // Truncate title to fit on one line
+                let max_title_len = text_width.saturating_sub(8);
+                let title = if finding.title.len() > max_title_len {
+                    format!("{}...", &finding.title[..max_title_len.saturating_sub(3)])
+                } else {
+                    finding.title.clone()
+                };
+
+                let title_style = if is_cursor {
+                    Style::default().fg(Theme::WHITE)
+                } else {
+                    Style::default().fg(Theme::GREY_400)
+                };
+
+                lines.push(Line::from(vec![
+                    Span::styled(format!("  {}", indicator), Style::default().fg(if is_cursor { Theme::WHITE } else { Theme::GREY_700 })),
+                    Span::styled(format!("[{}] ", checkbox), Style::default().fg(if is_selected { Theme::GREEN } else { Theme::GREY_600 })),
+                    Span::styled(title, title_style),
+                ]));
+            }
+            
+            // Scroll hint if needed
+            if total_findings > remaining_height {
+                lines.push(Line::from(vec![Span::styled(
+                    format!("  ↕ Use ↑↓ to see more ({} hidden)", total_findings - remaining_height),
+                    Style::default().fg(Theme::GREY_500),
+                )]));
             }
         }
     }

@@ -20,7 +20,7 @@ pub use fix::{
     FixScope,
 };
 pub use models::{Model, Usage};
-pub use review::{fix_review_findings, verify_changes, ReviewFinding};
+pub use review::{fix_review_findings, verify_changes, FixContext, ReviewFinding};
 pub use summaries::{
     discover_project_context,
     generate_summaries_for_files,

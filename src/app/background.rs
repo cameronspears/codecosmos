@@ -382,8 +382,17 @@ pub fn drain_messages(
                     app.show_toast(&e);
                 } else {
                     let tx_verify = ctx.tx.clone();
+                    
+                    // Build fix context so the reviewer knows what the fix was supposed to do
+                    let fix_context = suggest::llm::FixContext {
+                        problem_summary: problem_summary.clone(),
+                        outcome: outcome.clone(),
+                        description: description.clone(),
+                        modified_areas: Vec::new(), // Could be extracted from fix response if needed
+                    };
+                    
                     spawn_background(ctx.tx.clone(), "verification", async move {
-                        match suggest::llm::verify_changes(&files_with_content, 1, &[]).await {
+                        match suggest::llm::verify_changes(&files_with_content, 1, &[], Some(&fix_context)).await {
                             Ok(review) => {
                                 let _ = tx_verify.send(BackgroundMessage::VerificationComplete {
                                     findings: review.findings,
@@ -522,10 +531,13 @@ pub fn drain_messages(
                         let tx_verify = ctx.tx.clone();
                         spawn_background(ctx.tx.clone(), "re_verification", async move {
                             let files_with_content = vec![(fp, original_content, new_content)];
+                            // For re-reviews, we pass None for fix_context since we're now
+                            // verifying the fix to the reviewer's findings, not the original fix
                             match suggest::llm::verify_changes(
                                 &files_with_content,
                                 iteration,
                                 &fixed_titles,
+                                None,
                             )
                             .await
                             {
