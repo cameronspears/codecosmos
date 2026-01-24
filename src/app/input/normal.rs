@@ -528,9 +528,7 @@ pub(super) fn handle_normal_mode(
                                                             Ok(multi_fix) => {
                                                                 // Apply all edits
                                                                 let mut file_changes: Vec<(
-                                                                    PathBuf,
-                                                                    String,
-                                                                    bool,
+                                                                    PathBuf, String,
                                                                 )> = Vec::new();
                                                                 for file_edit in &multi_fix.file_edits {
                                                                     let resolved = match resolve_repo_path_allow_new(
@@ -554,11 +552,6 @@ pub(super) fn handle_normal_mode(
                                                                         }
                                                                     };
                                                                     let full_path = resolved.absolute;
-                                                                    let was_new_file = file_inputs
-                                                                        .iter()
-                                                                        .find(|f| f.path == resolved.relative)
-                                                                        .map(|f| f.is_new)
-                                                                        .unwrap_or(false);
 
                                                                     if let Some(parent) = full_path.parent() {
                                                                         let _ = std::fs::create_dir_all(parent);
@@ -585,15 +578,12 @@ pub(super) fn handle_normal_mode(
                                                                                     .modified_areas
                                                                                     .join(", ")
                                                                             );
-                                                                            file_changes.push((
-                                                                                resolved.relative,
-                                                                                diff,
-                                                                                was_new_file,
-                                                                            ));
+                                                                            file_changes
+                                                                                .push((resolved.relative, diff));
                                                                         }
                                                                         Err(e) => {
                                                                             // Rollback via git restore
-                                                                            for (path, _, _) in &file_changes {
+                                                                            for (path, _) in &file_changes {
                                                                                 let _ = git_ops::restore_file(&repo_path, path);
                                                                             }
                                                                             let _ = tx_apply.send(
@@ -717,9 +707,7 @@ pub(super) fn handle_normal_mode(
                                                                             BackgroundMessage::DirectFixApplied {
                                                                                 suggestion_id: sid,
                                                                                 file_changes: vec![(
-                                                                                    rel_path,
-                                                                                    diff,
-                                                                                    is_new_file,
+                                                                                    rel_path, diff,
                                                                                 )],
                                                                                 description: applied_fix.description,
                                                                                 usage: applied_fix.usage,

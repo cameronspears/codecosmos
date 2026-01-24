@@ -329,9 +329,7 @@ pub fn drain_messages(
                 // Convert file_changes to FileChange structs for multi-file support
                 let ui_file_changes: Vec<ui::FileChange> = file_changes
                     .iter()
-                    .map(|(path, diff, was_new_file)| {
-                        ui::FileChange::new(path.clone(), diff.clone(), *was_new_file)
-                    })
+                    .map(|(path, diff)| ui::FileChange::new(path.clone(), diff.clone()))
                     .collect();
 
                 // Track as pending change with multi-file support
@@ -348,7 +346,7 @@ pub fn drain_messages(
                 // Read original (from git HEAD) and new content for verification (all files)
                 let files_with_content: Vec<(PathBuf, String, String)> = file_changes
                     .iter()
-                    .map(|(path, _diff, _was_new)| {
+                    .map(|(path, _diff)| {
                         // Get original from git HEAD (empty string for new files)
                         let original = crate::git_ops::read_file_from_head(&app.repo_path, path)
                             .unwrap_or(None)
@@ -363,7 +361,7 @@ pub fn drain_messages(
                 // Transition to Review workflow step (use first file for display)
                 let first_file = file_changes
                     .first()
-                    .map(|(p, _, _)| p.clone())
+                    .map(|(p, _)| p.clone())
                     .unwrap_or_default();
                 let first_original = files_with_content
                     .first()

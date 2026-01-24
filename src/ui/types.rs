@@ -303,16 +303,11 @@ impl Toast {
 pub struct FileChange {
     pub path: PathBuf,
     pub diff: String,
-    pub was_new_file: bool,
 }
 
 impl FileChange {
-    pub fn new(path: PathBuf, diff: String, was_new_file: bool) -> Self {
-        Self {
-            path,
-            diff,
-            was_new_file,
-        }
+    pub fn new(path: PathBuf, diff: String) -> Self {
+        Self { path, diff }
     }
 }
 
