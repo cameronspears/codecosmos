@@ -219,6 +219,7 @@ async fn call_llm_with_fallback(
         Ok(response) => Ok(response),
         Err(err) => {
             let message = err.to_string();
+            // Handle context limit by trying with smaller excerpt
             if is_context_limit_error(&message) && user_full != user_excerpt {
                 call_llm_with_usage(system, user_excerpt, model, json_mode).await
             } else {

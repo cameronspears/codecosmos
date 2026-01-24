@@ -27,6 +27,16 @@ struct ChatRequest {
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     response_format: Option<ResponseFormat>,
+    /// OpenRouter provider configuration for automatic fallback
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider: Option<ProviderConfig>,
+}
+
+/// OpenRouter provider configuration
+#[derive(Serialize)]
+struct ProviderConfig {
+    /// Allow OpenRouter to try other providers if the primary fails
+    allow_fallbacks: bool,
 }
 
 #[derive(Serialize)]
@@ -45,6 +55,19 @@ struct Message {
 struct ChatResponse {
     choices: Vec<Choice>,
     usage: Option<Usage>,
+}
+
+/// OpenRouter error response (can come with 200 status for upstream errors)
+#[derive(Deserialize)]
+struct ErrorResponse {
+    error: ApiError,
+}
+
+#[derive(Deserialize)]
+struct ApiError {
+    message: String,
+    #[serde(default)]
+    code: Option<i32>,
 }
 
 #[derive(Deserialize)]
@@ -152,6 +175,10 @@ pub(crate) async fn call_llm_with_usage(
         max_tokens: model.max_tokens(),
         stream: false,
         response_format,
+        // Enable OpenRouter's automatic provider fallback
+        provider: Some(ProviderConfig {
+            allow_fallbacks: true,
+        }),
     };
 
     let mut last_error = String::new();
@@ -212,6 +239,32 @@ pub(crate) async fn call_llm_with_usage(
         };
 
         if status.is_success() {
+            // OpenRouter sometimes returns errors with 200 status (upstream provider issues)
+            // Check for error response first
+            if let Ok(err_resp) = serde_json::from_str::<ErrorResponse>(&text) {
+                let is_retryable = err_resp
+                    .error
+                    .code
+                    .map(|c| c >= 500 || c == 429)
+                    .unwrap_or(true); // Assume retryable if no code
+
+                if is_retryable && retry_count < MAX_RETRIES {
+                    retry_count += 1;
+                    let retry_after = backoff_secs(retry_count);
+                    eprintln!(
+                        "  OpenRouter upstream error. Retrying in {}s (attempt {}/{})",
+                        retry_after, retry_count, MAX_RETRIES
+                    );
+                    tokio::time::sleep(tokio::time::Duration::from_secs(retry_after)).await;
+                    continue;
+                }
+
+                return Err(anyhow::anyhow!(
+                    "OpenRouter error: {}",
+                    truncate_str(&err_resp.error.message, 200)
+                ));
+            }
+
             let parsed: ChatResponse = serde_json::from_str(&text).map_err(|e| {
                 anyhow::anyhow!("Failed to parse OpenRouter response: {}\n{}", e, text)
             })?;
