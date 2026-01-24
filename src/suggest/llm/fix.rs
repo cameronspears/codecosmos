@@ -7,6 +7,7 @@ use super::prompt_utils::format_repo_memory_section;
 use super::prompts::{FIX_CONTENT_SYSTEM, FIX_PREVIEW_SYSTEM, MULTI_FILE_FIX_SYSTEM};
 use crate::suggest::Suggestion;
 use serde::Deserialize;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -504,10 +505,7 @@ pub async fn generate_fix_preview(
     let memory_section =
         format_repo_memory_section(repo_memory.as_deref(), "Repo conventions / decisions");
 
-    let preview_content = suggestion
-        .line
-        .and_then(|line| truncate_content_around_line(content, line, MAX_PREVIEW_CHARS))
-        .unwrap_or_else(|| truncate_content(content, MAX_PREVIEW_CHARS));
+    let preview_content = select_preview_content(content, suggestion);
     let user = format!(
         "File: {}\nIssue: {}\n{}{}{}\n\nCurrent Code:\n```\n{}\n```",
         path.display(),
@@ -524,6 +522,206 @@ pub async fn generate_fix_preview(
     let (parsed, _correction_usage): (serde_json::Value, _) =
         parse_json_with_retry(&response.content, "fix preview").await?;
     build_fix_preview(parsed, modifier.map(String::from))
+}
+
+fn select_preview_content(content: &str, suggestion: &Suggestion) -> String {
+    if content.trim().is_empty() {
+        return String::new();
+    }
+
+    let lines: Vec<&str> = content.lines().collect();
+    if lines.is_empty() {
+        return truncate_content(content, MAX_PREVIEW_CHARS);
+    }
+
+    let hint_tokens =
+        extract_hint_tokens(&suggestion.summary, suggestion.detail.as_deref(), &suggestion.file);
+    let anchor_line = choose_preview_anchor_line(&lines, suggestion.line, &hint_tokens);
+
+    truncate_content_around_line(content, anchor_line, MAX_PREVIEW_CHARS)
+        .unwrap_or_else(|| truncate_content(content, MAX_PREVIEW_CHARS))
+}
+
+fn choose_preview_anchor_line(
+    lines: &[&str],
+    suggestion_line: Option<usize>,
+    hint_tokens: &[String],
+) -> usize {
+    let valid_suggestion_line =
+        suggestion_line.filter(|line| *line > 0 && *line <= lines.len());
+
+    if let Some((best_line, best_score)) = find_best_anchor_line(lines, hint_tokens) {
+        if let Some(suggested) = valid_suggestion_line {
+            let suggested_score = score_line_window(lines, suggested, hint_tokens);
+            if best_score > suggested_score {
+                return best_line;
+            }
+            if suggested_score > 0 {
+                return suggested;
+            }
+        }
+        if best_score > 0 {
+            return best_line;
+        }
+    }
+
+    if let Some(suggested) = valid_suggestion_line {
+        return suggested;
+    }
+
+    find_first_impl_or_fn_line(lines).unwrap_or(1)
+}
+
+fn find_best_anchor_line(lines: &[&str], hint_tokens: &[String]) -> Option<(usize, usize)> {
+    find_best_line_for_tokens(lines, hint_tokens, true)
+        .or_else(|| find_best_line_for_tokens(lines, hint_tokens, false))
+}
+
+fn find_best_line_for_tokens(
+    lines: &[&str],
+    hint_tokens: &[String],
+    anchor_only: bool,
+) -> Option<(usize, usize)> {
+    if hint_tokens.is_empty() {
+        return None;
+    }
+
+    let mut best: Option<(usize, usize)> = None;
+    for (idx, line) in lines.iter().enumerate() {
+        if anchor_only && !is_anchor_line(line) {
+            continue;
+        }
+        let score = score_line_window(lines, idx + 1, hint_tokens);
+        if score == 0 {
+            continue;
+        }
+        match best {
+            Some((_, best_score)) if best_score >= score => {}
+            _ => best = Some((idx + 1, score)),
+        }
+    }
+
+    best
+}
+
+fn score_line_window(lines: &[&str], line: usize, hint_tokens: &[String]) -> usize {
+    if hint_tokens.is_empty() || line == 0 || line > lines.len() {
+        return 0;
+    }
+    let idx = line.saturating_sub(1);
+    let start = idx.saturating_sub(1);
+    let end = (idx + 1).min(lines.len().saturating_sub(1));
+
+    let mut window = String::new();
+    for l in &lines[start..=end] {
+        window.push_str(l);
+        window.push(' ');
+    }
+    let lower = window.to_lowercase();
+    hint_tokens
+        .iter()
+        .filter(|token| lower.contains(token.as_str()))
+        .count()
+}
+
+fn is_anchor_line(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    trimmed.starts_with("fn ")
+        || trimmed.starts_with("async fn ")
+        || trimmed.starts_with("pub fn ")
+        || trimmed.starts_with("pub async fn ")
+        || trimmed.starts_with("pub(crate) fn ")
+        || trimmed.starts_with("impl ")
+        || trimmed.starts_with("impl<")
+        || trimmed.starts_with("pub struct ")
+        || trimmed.starts_with("struct ")
+        || trimmed.starts_with("pub enum ")
+        || trimmed.starts_with("enum ")
+        || trimmed.starts_with("pub trait ")
+        || trimmed.starts_with("trait ")
+        || trimmed.starts_with("pub type ")
+        || trimmed.starts_with("type ")
+}
+
+fn find_first_impl_or_fn_line(lines: &[&str]) -> Option<usize> {
+    lines
+        .iter()
+        .position(|line| {
+            let trimmed = line.trim_start();
+            trimmed.starts_with("impl ")
+                || trimmed.starts_with("impl<")
+                || trimmed.starts_with("fn ")
+                || trimmed.starts_with("pub fn ")
+                || trimmed.starts_with("pub(crate) fn ")
+                || trimmed.starts_with("pub async fn ")
+                || trimmed.starts_with("async fn ")
+        })
+        .map(|idx| idx + 1)
+}
+
+fn extract_hint_tokens(summary: &str, detail: Option<&str>, path: &Path) -> Vec<String> {
+    let mut tokens = Vec::new();
+    if let Some(detail) = detail {
+        tokens.extend(extract_backtick_tokens(detail));
+        tokens.extend(extract_identifier_tokens(detail));
+    }
+    tokens.extend(extract_identifier_tokens(summary));
+    tokens.extend(extract_path_tokens(path));
+
+    let mut seen: HashSet<String> = HashSet::new();
+    tokens
+        .into_iter()
+        .map(|token| token.to_lowercase())
+        .filter(|token| token.len() >= 3 && !is_stopword(token))
+        .filter(|token| seen.insert(token.clone()))
+        .collect()
+}
+
+fn extract_backtick_tokens(text: &str) -> Vec<String> {
+    let re = regex::Regex::new(r"`([^`]+)`").unwrap_or_else(|_| regex::Regex::new("$^").unwrap());
+    let id_re =
+        regex::Regex::new(r"[A-Za-z_][A-Za-z0-9_]*").unwrap_or_else(|_| regex::Regex::new("$^").unwrap());
+    let mut tokens = Vec::new();
+    for caps in re.captures_iter(text) {
+        let raw = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+        for ident in id_re.find_iter(raw) {
+            tokens.push(ident.as_str().to_string());
+        }
+    }
+    tokens
+}
+
+fn extract_identifier_tokens(text: &str) -> Vec<String> {
+    let re =
+        regex::Regex::new(r"[A-Za-z_][A-Za-z0-9_]*").unwrap_or_else(|_| regex::Regex::new("$^").unwrap());
+    re.find_iter(text)
+        .map(|m| m.as_str().to_string())
+        .collect()
+}
+
+fn extract_path_tokens(path: &Path) -> Vec<String> {
+    let mut tokens = Vec::new();
+    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+        tokens.extend(extract_identifier_tokens(stem));
+    }
+    if let Some(parent) = path.parent().and_then(|p| p.file_name()).and_then(|s| s.to_str()) {
+        tokens.extend(extract_identifier_tokens(parent));
+    }
+    tokens
+}
+
+fn is_stopword(token: &str) -> bool {
+    matches!(
+        token,
+        "a" | "an" | "the" | "and" | "or" | "but" | "if" | "when" | "while" | "with"
+            | "without" | "for" | "from" | "to" | "of" | "in" | "on" | "at" | "by" | "as"
+            | "is" | "are" | "was" | "were" | "be" | "been" | "being" | "this" | "that"
+            | "these" | "those" | "it" | "its" | "they" | "them" | "their" | "we" | "our"
+            | "you" | "your" | "should" | "could" | "would" | "can" | "may" | "might"
+            | "will" | "do" | "does" | "did" | "done" | "use" | "uses" | "used" | "using"
+            | "file" | "files" | "code" | "system" | "method" | "function" | "module"
+            | "line" | "lines" | "path" | "paths" | "mod"
+    )
 }
 
 fn build_fix_preview(
@@ -673,5 +871,44 @@ mod tests {
         let updated = "line1\n".to_string();
         let normalized = normalize_generated_content(original, updated.clone(), true);
         assert_eq!(normalized, updated);
+    }
+
+    #[test]
+    fn test_choose_preview_anchor_prefers_hint_match() {
+        let content = [
+            "line1",
+            "pub struct FileSummary {",
+            "}",
+            "impl CodebaseIndex {",
+            "    fn scan(&self) {}",
+            "}",
+        ]
+        .join("\n");
+        let lines: Vec<&str> = content.lines().collect();
+        let hint_tokens = vec!["index".to_string()];
+
+        let line = choose_preview_anchor_line(&lines, Some(2), &hint_tokens);
+        assert_eq!(line, 4);
+    }
+
+    #[test]
+    fn test_choose_preview_anchor_falls_back_to_suggestion_line() {
+        let content = ["line1", "pub struct FileSummary {", "}", "impl CodebaseIndex {"]
+            .join("\n");
+        let lines: Vec<&str> = content.lines().collect();
+        let hint_tokens = vec!["missingtoken".to_string()];
+
+        let line = choose_preview_anchor_line(&lines, Some(2), &hint_tokens);
+        assert_eq!(line, 2);
+    }
+
+    #[test]
+    fn test_choose_preview_anchor_uses_first_impl_when_missing_suggestion() {
+        let content = ["line1", "pub struct FileSummary {", "}", "impl CodebaseIndex {"]
+            .join("\n");
+        let lines: Vec<&str> = content.lines().collect();
+
+        let line = choose_preview_anchor_line(&lines, None, &[]);
+        assert_eq!(line, 4);
     }
 }
