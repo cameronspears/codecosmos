@@ -1,6 +1,6 @@
-//! Configuration management for codecosmos
+//! Configuration management for cosmos
 //!
-//! Stores settings in ~/.config/codecosmos/config.json
+//! Stores settings in ~/.config/cosmos/config.json
 
 use keyring::Entry;
 use serde::{Deserialize, Serialize};
@@ -28,7 +28,7 @@ pub struct Config {
     pub privacy_preview: bool,
 }
 
-const KEYRING_SERVICE: &str = "codecosmos";
+const KEYRING_SERVICE: &str = "cosmos";
 const KEYRING_USERNAME: &str = "openrouter_api_key";
 
 type KeyringReadResult = Result<Option<String>, String>;
@@ -111,7 +111,7 @@ fn default_privacy_preview() -> bool {
 impl Config {
     /// Get the config directory path
     fn config_dir() -> Option<PathBuf> {
-        dirs::config_dir().map(|p| p.join("codecosmos"))
+        dirs::config_dir().map(|p| p.join("cosmos"))
     }
 
     /// Get the config file path
@@ -322,7 +322,7 @@ impl Config {
     pub fn config_location() -> String {
         Self::config_path()
             .map(|p| p.display().to_string())
-            .unwrap_or_else(|| "~/.config/codecosmos/config.json".to_string())
+            .unwrap_or_else(|| "~/.config/cosmos/config.json".to_string())
     }
 }
 
@@ -335,7 +335,7 @@ pub fn setup_api_key_interactive() -> Result<String, String> {
     println!("  │  OPENROUTER SETUP                                       │");
     println!("  └─────────────────────────────────────────────────────────┘");
     println!();
-    println!("  codecosmos uses OpenRouter for AI-powered suggestions.");
+    println!("  Cosmos uses OpenRouter for AI-powered suggestions.");
     println!("  Uses a 4-tier model system optimized for cost and quality.");
     println!();
     println!("  1. Get a free API key at: https://openrouter.ai/keys");

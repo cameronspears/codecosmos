@@ -269,8 +269,8 @@ pub fn commit(repo_path: &Path, message: &str) -> Result<String> {
     
     // Get author info from git config
     let config = repo.config()?;
-    let name = config.get_string("user.name").unwrap_or_else(|_| "codecosmos".to_string());
-    let email = config.get_string("user.email").unwrap_or_else(|_| "codecosmos@local".to_string());
+    let name = config.get_string("user.name").unwrap_or_else(|_| "cosmos".to_string());
+    let email = config.get_string("user.email").unwrap_or_else(|_| "cosmos@local".to_string());
     
     let sig = Signature::now(&name, &email)?;
     
@@ -588,7 +588,7 @@ mod tests {
 
     #[test]
     fn test_current_status() {
-        // Test on the codecosmos repo itself
+        // Test on the cosmos repo itself
         let repo_path = env::current_dir().unwrap();
         let status = current_status(&repo_path);
         assert!(status.is_ok());
