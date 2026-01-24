@@ -552,6 +552,74 @@ pub fn create_pr(repo_path: &Path, title: &str, body: &str) -> Result<String> {
     }
 }
 
+/// Read file content from HEAD (without modifying the working directory).
+/// Returns None if the file doesn't exist in HEAD (new file).
+pub fn read_file_from_head(repo_path: &Path, file_path: &Path) -> Result<Option<String>> {
+    let repo = Repository::open(repo_path)?;
+
+    // Get HEAD commit
+    let head = repo.head()?;
+    let commit = head.peel_to_commit()?;
+    let tree = commit.tree()?;
+
+    // Try to find the file in HEAD
+    match tree.get_path(file_path) {
+        Ok(entry) => {
+            let blob = repo.find_blob(entry.id())?;
+            let content = blob.content();
+            // Convert to string (assuming UTF-8)
+            let text = String::from_utf8_lossy(content).to_string();
+            Ok(Some(text))
+        }
+        Err(_) => {
+            // File doesn't exist in HEAD - it's a new file
+            Ok(None)
+        }
+    }
+}
+
+/// Restore a file to its state at HEAD (undo uncommitted changes)
+/// For new files that don't exist in HEAD, this will remove the file.
+pub fn restore_file(repo_path: &Path, file_path: &Path) -> Result<()> {
+    let repo = Repository::open(repo_path)?;
+
+    // Get HEAD commit
+    let head = repo.head()?;
+    let commit = head.peel_to_commit()?;
+    let tree = commit.tree()?;
+
+    // Try to find the file in HEAD
+    match tree.get_path(file_path) {
+        Ok(entry) => {
+            // File exists in HEAD - restore it
+            let blob = repo.find_blob(entry.id())?;
+            let content = blob.content();
+            let full_path = repo_path.join(file_path);
+            std::fs::write(&full_path, content)
+                .with_context(|| format!("Failed to restore {}", file_path.display()))?;
+
+            // Unstage the file (reset index entry to HEAD)
+            let mut index = repo.index()?;
+            index.add_path(file_path)?;
+            index.write()?;
+        }
+        Err(_) => {
+            // File doesn't exist in HEAD - it's a new file, remove it
+            let full_path = repo_path.join(file_path);
+            if full_path.exists() {
+                std::fs::remove_file(&full_path)
+                    .with_context(|| format!("Failed to remove new file {}", file_path.display()))?;
+            }
+            // Remove from index if staged
+            let mut index = repo.index()?;
+            let _ = index.remove_path(file_path);
+            index.write()?;
+        }
+    }
+
+    Ok(())
+}
+
 /// Open a URL in the default browser
 pub fn open_url(url: &str) -> Result<()> {
     #[cfg(target_os = "macos")]

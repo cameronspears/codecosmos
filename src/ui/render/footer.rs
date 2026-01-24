@@ -239,6 +239,15 @@ pub(super) fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
         },
     }
 
+    // Undo hint (shown when there are pending changes)
+    if !app.pending_changes.is_empty() {
+        spans.push(Span::styled(
+            " u ",
+            Style::default().fg(Theme::GREY_900).bg(Theme::YELLOW),
+        ));
+        spans.push(Span::styled(" undo ", Style::default().fg(Theme::GREY_400)));
+    }
+
     // Help and quit (always shown)
     spans.push(Span::styled(
         " ? ",

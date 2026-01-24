@@ -212,16 +212,11 @@ impl App {
 
     /// Clear all pending changes (after commit)
     pub fn clear_pending_changes(&mut self) {
-        for change in &self.pending_changes {
-            for file_change in &change.files {
-                let _ = std::fs::remove_file(&file_change.backup_path);
-            }
-        }
         self.pending_changes.clear();
         self.cosmos_branch = None;
     }
 
-    /// Undo the most recent applied change by restoring all backup files.
+    /// Undo the most recent applied change by restoring files from git.
     /// Supports multi-file changes - restores all files atomically.
     /// Removes it from the pending queue.
     pub fn undo_last_pending_change(&mut self) -> Result<(), String> {
@@ -230,45 +225,16 @@ impl App {
             .pop()
             .ok_or_else(|| "No pending changes to undo".to_string())?;
 
-        // Verify all backups exist before restoring any
-        let missing_backup = change
-            .files
-            .iter()
-            .find(|f| !f.backup_path.exists())
-            .map(|f| f.path.display().to_string());
+        // Collect paths to restore (to avoid borrow issues)
+        let files_to_restore: Vec<_> = change.files.iter().map(|f| f.path.clone()).collect();
 
-        if let Some(missing_file) = missing_backup {
-            // Put the change back since we couldn't undo
-            self.pending_changes.push(change);
-            return Err(format!(
-                "Backup file not found for {}: cannot undo",
-                missing_file
-            ));
-        }
-
-        // Restore all files from their backups
-        for file_change in &change.files {
-            let target = self.repo_path.join(&file_change.path);
-            if file_change.was_new_file {
-                if target.exists() {
-                    std::fs::remove_file(&target).map_err(|e| {
-                        format!(
-                            "Failed to remove new file {}: {}",
-                            file_change.path.display(),
-                            e
-                        )
-                    })?;
-                }
-            } else {
-                std::fs::copy(&file_change.backup_path, &target).map_err(|e| {
-                    format!(
-                        "Failed to restore backup for {}: {}",
-                        file_change.path.display(),
-                        e
-                    )
-                })?;
+        // Restore all files from git HEAD
+        for path in &files_to_restore {
+            if let Err(e) = crate::git_ops::restore_file(&self.repo_path, path) {
+                // Put the change back since we couldn't fully undo
+                self.pending_changes.push(change);
+                return Err(format!("Failed to restore {}: {}", path.display(), e));
             }
-            let _ = std::fs::remove_file(&file_change.backup_path);
         }
 
         // Mark suggestion as not applied (so it can be re-applied if desired).

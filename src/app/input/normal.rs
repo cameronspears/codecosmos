@@ -526,79 +526,8 @@ pub(super) fn handle_normal_mode(
                                                         .await
                                                         {
                                                             Ok(multi_fix) => {
-                                                                // Backup all files first
-                                                                let mut backups: Vec<(
-                                                                    PathBuf,
-                                                                    PathBuf,
-                                                                    PathBuf,
-                                                                    bool,
-                                                                )> = Vec::new();
-                                                                for file_edit in &multi_fix.file_edits {
-                                                                    let resolved = match resolve_repo_path_allow_new(
-                                                                        &repo_path,
-                                                                        &file_edit.path,
-                                                                    ) {
-                                                                        Ok(resolved) => resolved,
-                                                                        Err(e) => {
-                                                                            let _ = tx_apply.send(
-                                                                                BackgroundMessage::DirectFixError(
-                                                                                    format!(
-                                                                                        "Unsafe path {}: {}",
-                                                                                        file_edit
-                                                                                            .path
-                                                                                            .display(),
-                                                                                        e
-                                                                                    ),
-                                                                                ),
-                                                                            );
-                                                                            return;
-                                                                        }
-                                                                    };
-                                                                    let full_path = resolved.absolute;
-                                                                    let backup_path = full_path
-                                                                        .with_extension("cosmos.bak");
-                                                                    if let Some(parent) = full_path.parent() {
-                                                                        let _ = std::fs::create_dir_all(parent);
-                                                                    }
-                                                                    let was_new_file = file_inputs
-                                                                        .iter()
-                                                                        .find(|f| f.path == resolved.relative)
-                                                                        .map(|f| f.is_new)
-                                                                        .unwrap_or(false);
-                                                                    let backup_result = if was_new_file {
-                                                                        std::fs::write(&backup_path, "")
-                                                                    } else {
-                                                                        std::fs::copy(&full_path, &backup_path)
-                                                                            .map(|_| ())
-                                                                    };
-                                                                    if let Err(e) = backup_result {
-                                                                        // Rollback any backups we made
-                                                                        for (_, bp, _, _) in &backups {
-                                                                            let _ =
-                                                                                std::fs::remove_file(bp);
-                                                                        }
-                                                                        let _ = tx_apply.send(
-                                                                            BackgroundMessage::DirectFixError(
-                                                                                format!(
-                                                                                    "Failed to backup {}: {}",
-                                                                                    file_edit.path.display(),
-                                                                                    e
-                                                                                ),
-                                                                            ),
-                                                                        );
-                                                                        return;
-                                                                    }
-                                                                    backups.push((
-                                                                        resolved.relative,
-                                                                        full_path,
-                                                                        backup_path,
-                                                                        was_new_file,
-                                                                    ));
-                                                                }
-
                                                                 // Apply all edits
                                                                 let mut file_changes: Vec<(
-                                                                    PathBuf,
                                                                     PathBuf,
                                                                     String,
                                                                     bool,
@@ -625,12 +554,10 @@ pub(super) fn handle_normal_mode(
                                                                         }
                                                                     };
                                                                     let full_path = resolved.absolute;
-                                                                    let backup_path = full_path
-                                                                        .with_extension("cosmos.bak");
-                                                                    let was_new_file = backups
+                                                                    let was_new_file = file_inputs
                                                                         .iter()
-                                                                        .find(|(path, _, _, _)| path == &resolved.relative)
-                                                                        .map(|(_, _, _, is_new)| *is_new)
+                                                                        .find(|f| f.path == resolved.relative)
+                                                                        .map(|f| f.is_new)
                                                                         .unwrap_or(false);
 
                                                                     if let Some(parent) = full_path.parent() {
@@ -660,25 +587,14 @@ pub(super) fn handle_normal_mode(
                                                                             );
                                                                             file_changes.push((
                                                                                 resolved.relative,
-                                                                                backup_path,
                                                                                 diff,
                                                                                 was_new_file,
                                                                             ));
                                                                         }
                                                                         Err(e) => {
-                                                                            // Rollback all changes
-                                                                            for (_path, full, backup, is_new) in &backups {
-                                                                                if *is_new {
-                                                                                    let _ = std::fs::remove_file(full);
-                                                                                } else {
-                                                                                    let _ =
-                                                                                        std::fs::copy(
-                                                                                            backup,
-                                                                                            full,
-                                                                                        );
-                                                                                }
-                                                                                let _ =
-                                                                                    std::fs::remove_file(backup);
+                                                                            // Rollback via git restore
+                                                                            for (path, _, _) in &file_changes {
+                                                                                let _ = git_ops::restore_file(&repo_path, path);
                                                                             }
                                                                             let _ = tx_apply.send(
                                                                                 BackgroundMessage::DirectFixError(
@@ -774,29 +690,6 @@ pub(super) fn handle_normal_mode(
                                                         .await
                                                         {
                                                             Ok(applied_fix) => {
-                                                                let backup_path = full_path
-                                                                    .with_extension("cosmos.bak");
-                                                                if let Some(parent) = full_path.parent() {
-                                                                    let _ = std::fs::create_dir_all(parent);
-                                                                }
-                                                                let backup_result = if is_new_file {
-                                                                    std::fs::write(&backup_path, "")
-                                                                } else {
-                                                                    std::fs::copy(&full_path, &backup_path)
-                                                                        .map(|_| ())
-                                                                };
-                                                                if let Err(e) = backup_result {
-                                                                    let _ = tx_apply.send(
-                                                                        BackgroundMessage::DirectFixError(
-                                                                            format!(
-                                                                                "Failed to create backup: {}",
-                                                                                e
-                                                                            ),
-                                                                        ),
-                                                                    );
-                                                                    return;
-                                                                }
-
                                                                 if let Some(parent) = full_path.parent() {
                                                                     let _ = std::fs::create_dir_all(parent);
                                                                 }
@@ -805,12 +698,12 @@ pub(super) fn handle_normal_mode(
                                                                     &applied_fix.new_content,
                                                                 ) {
                                                                     Ok(_) => {
-                                                                        let rel_path = rel_path
+                                                                        let rel_path_str = rel_path
                                                                             .to_string_lossy()
                                                                             .to_string();
                                                                         let _ = git_ops::stage_file(
                                                                             &repo_path,
-                                                                            &rel_path,
+                                                                            &rel_path_str,
                                                                         );
 
                                                                         let diff = format!(
@@ -824,8 +717,7 @@ pub(super) fn handle_normal_mode(
                                                                             BackgroundMessage::DirectFixApplied {
                                                                                 suggestion_id: sid,
                                                                                 file_changes: vec![(
-                                                                                    rel_path.into(),
-                                                                                    backup_path,
+                                                                                    rel_path,
                                                                                     diff,
                                                                                     is_new_file,
                                                                                 )],
@@ -843,17 +735,8 @@ pub(super) fn handle_normal_mode(
                                                                         );
                                                                     }
                                                                     Err(e) => {
-                                                                        if is_new_file {
-                                                                            let _ = std::fs::remove_file(&full_path);
-                                                                        } else {
-                                                                            let _ = std::fs::copy(
-                                                                                &backup_path,
-                                                                                &full_path,
-                                                                            );
-                                                                        }
-                                                                        let _ = std::fs::remove_file(
-                                                                            &backup_path,
-                                                                        );
+                                                                        // Rollback via git restore
+                                                                        let _ = git_ops::restore_file(&repo_path, &rel_path);
                                                                         let _ = tx_apply.send(
                                                                             BackgroundMessage::DirectFixError(
                                                                                 format!(
@@ -1082,9 +965,9 @@ pub(super) fn handle_normal_mode(
             }
         }
         KeyCode::Char('u') => {
-            // Undo the last applied change (restore backup)
+            // Undo the last applied change (restore from git)
             match app.undo_last_pending_change() {
-                Ok(()) => app.show_toast("Undone (restored backup)"),
+                Ok(()) => app.show_toast("Change undone"),
                 Err(e) => app.show_toast(&e),
             }
         }

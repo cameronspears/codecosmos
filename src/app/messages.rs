@@ -42,8 +42,8 @@ pub enum BackgroundMessage {
     /// Supports both single-file and multi-file changes
     DirectFixApplied {
         suggestion_id: Uuid,
-        /// All file changes (path, backup_path, diff, was_new_file)
-        file_changes: Vec<(PathBuf, PathBuf, String, bool)>,
+        /// All file changes (path, diff, was_new_file)
+        file_changes: Vec<(PathBuf, String, bool)>,
         description: String,
         usage: Option<suggest::llm::Usage>,
         branch_name: String,
