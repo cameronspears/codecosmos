@@ -14,6 +14,7 @@ mod onboarding;
 mod suggest;
 mod ui;
 mod app;
+mod build_info;
 mod util;
 
 // Keep these for compatibility during transition
@@ -49,11 +50,27 @@ struct Args {
     /// Show stats and exit (no TUI)
     #[arg(long)]
     stats: bool,
+
+    /// Show build info and exit
+    #[arg(long)]
+    build_info: bool,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+
+    if args.build_info {
+        build_info::print_build_info();
+        return Ok(());
+    }
+
+    if let Some(info) = build_info::stale_build_notice() {
+        eprintln!("  ! This binary looks stale.");
+        eprintln!("  ! Built from {}, but source repo is now {}.", info.build, info.current);
+        eprintln!("  ! Rebuild with: cargo build --release");
+        eprintln!();
+    }
 
     // Handle --setup flag (BYOK mode)
     if args.setup {
