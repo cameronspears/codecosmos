@@ -18,14 +18,14 @@ Cosmos lives *outside* your editing loop. It reads git context, surfaces high-le
 ## Installation
 
 **Requirements:**
-- **Rust nightly** (1.85+) — Required due to transitive dependencies using Edition 2024
+- **Rust stable** (1.88+)
 - Git
 - Optional: GitHub CLI for PR creation (https://cli.github.com)
 
 ```bash
-# Install Rust nightly (if not already installed)
-rustup install nightly
-rustup default nightly
+# Install Rust stable (if not already installed)
+rustup install stable
+rustup default stable
 
 # Clone and build
 git clone <your-repo-url>
@@ -37,10 +37,6 @@ cargo install --path . --locked
 # Or run directly
 cargo run --release
 ```
-
-> **Note:** This project requires Rust nightly due to the `arboard` clipboard crate's
-> dependency chain requiring Edition 2024. We plan to move to stable Rust once
-> Edition 2024 is stabilized.
 
 ## Optional AI Setup (Fastest Path)
 
