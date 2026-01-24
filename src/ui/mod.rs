@@ -219,6 +219,7 @@ impl App {
     /// Undo the most recent applied change by restoring files from git.
     /// Supports multi-file changes - restores all files atomically.
     /// Removes it from the pending queue.
+    /// If this was the last pending change, returns to main branch and suggestions step.
     pub fn undo_last_pending_change(&mut self) -> Result<(), String> {
         let change = self
             .pending_changes
@@ -239,6 +240,23 @@ impl App {
 
         // Mark suggestion as not applied (so it can be re-applied if desired).
         self.suggestions.unmark_applied(change.suggestion_id);
+
+        // If no more pending changes, reset to main branch and suggestions step
+        if self.pending_changes.is_empty() {
+            // Switch back to main branch
+            if let Ok(main_name) = crate::git_ops::get_main_branch_name(&self.repo_path) {
+                let _ = crate::git_ops::checkout_branch(&self.repo_path, &main_name);
+            }
+
+            // Clear cosmos branch tracking
+            self.cosmos_branch = None;
+
+            // Return to suggestions workflow step
+            self.workflow_step = WorkflowStep::Suggestions;
+            self.verify_state = VerifyState::default();
+            self.review_state = ReviewState::default();
+            self.ship_state = ShipState::default();
+        }
 
         Ok(())
     }
