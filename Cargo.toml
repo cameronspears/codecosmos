@@ -6,7 +6,7 @@ rust-version = "1.88"
 description = "A contemplative vibe coding companion for your codebase"
 license = "MIT"
 repository = "https://github.com/cameronspears/cosmos"
-keywords = ["tui", "git", "ide", "cli", "ai", "vibe-coding"]
+keywords = ["tui", "git", "cli", "ai", "vibe-coding"]
 categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
