@@ -860,9 +860,17 @@ impl App {
     // ═══════════════════════════════════════════════════════════════════════════
 
     /// Show the startup check overlay when there's unsaved work
-    pub fn show_startup_check(&mut self, changed_count: usize) {
+    pub fn show_startup_check(
+        &mut self,
+        changed_count: usize,
+        current_branch: String,
+        main_branch: String,
+    ) {
         self.overlay = Overlay::StartupCheck {
             changed_count,
+            current_branch,
+            main_branch,
+            scroll: 0,
             confirming_discard: false,
         };
     }
@@ -882,7 +890,8 @@ impl App {
         match &mut self.overlay {
             Overlay::Help { scroll }
             | Overlay::InquiryPreview { scroll, .. }
-            | Overlay::FileDetail { scroll, .. } => {
+            | Overlay::FileDetail { scroll, .. }
+            | Overlay::StartupCheck { scroll, .. } => {
                 *scroll += 1;
             }
             _ => {}
@@ -894,7 +903,8 @@ impl App {
         match &mut self.overlay {
             Overlay::Help { scroll }
             | Overlay::InquiryPreview { scroll, .. }
-            | Overlay::FileDetail { scroll, .. } => {
+            | Overlay::FileDetail { scroll, .. }
+            | Overlay::StartupCheck { scroll, .. } => {
                 *scroll = scroll.saturating_sub(1);
             }
             _ => {}

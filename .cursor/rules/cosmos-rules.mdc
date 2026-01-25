@@ -59,3 +59,24 @@ constraints unless they clearly improve safety or user outcomes.
 ## UX text
 - Plain English, avoid jargon.
 - Provide actionable guidance and safe defaults.
+
+## Git commits
+- Use conventional commits for all commit messages. This enables
+  automatic versioning and changelog generation via Release Please.
+- Format: `type(scope): description` (scope is optional)
+- Types:
+  - `feat:` — new feature (bumps minor version)
+  - `fix:` — bug fix (bumps patch version)
+  - `docs:` — documentation only
+  - `style:` — formatting, no code change
+  - `refactor:` — code change that neither fixes nor adds
+  - `perf:` — performance improvement
+  - `test:` — adding or updating tests
+  - `chore:` — maintenance, dependencies, CI
+- For breaking changes, add `!` after type: `feat!: remove old API`
+- Keep the first line under 72 characters.
+- Examples:
+  - `feat: add ritual mode for time-boxed sessions`
+  - `fix(ui): prevent crash on empty suggestion list`
+  - `docs: update installation instructions`
+  - `chore: update dependencies`

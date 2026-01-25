@@ -115,6 +115,12 @@ pub enum Overlay {
     StartupCheck {
         /// Number of files with uncommitted changes
         changed_count: usize,
+        /// Current git branch name (or "detached")
+        current_branch: String,
+        /// Default/main branch name
+        main_branch: String,
+        /// Scroll position within the overlay
+        scroll: usize,
         /// True when showing "are you sure?" confirmation for discard
         confirming_discard: bool,
     },

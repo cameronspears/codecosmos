@@ -65,9 +65,19 @@ pub fn render(frame: &mut Frame, app: &App) {
         }
         Overlay::StartupCheck {
             changed_count,
+            current_branch,
+            main_branch,
+            scroll,
             confirming_discard,
         } => {
-            render_startup_check(frame, *changed_count, *confirming_discard);
+            render_startup_check(
+                frame,
+                *changed_count,
+                current_branch,
+                main_branch,
+                *scroll,
+                *confirming_discard,
+            );
         }
         Overlay::None => {}
     }

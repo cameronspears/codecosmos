@@ -117,6 +117,12 @@ pub(super) fn handle_overlay_input(
                 KeyCode::Esc | KeyCode::Char('q') => {
                     app.close_overlay();
                 }
+                KeyCode::Down => {
+                    app.overlay_scroll_down();
+                }
+                KeyCode::Up => {
+                    app.overlay_scroll_up();
+                }
                 KeyCode::Char('y') if confirming => {
                     // Discard changes and continue
                     app.close_overlay();

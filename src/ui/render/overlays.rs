@@ -2,6 +2,7 @@ use crate::ui::helpers::{centered_rect, truncate, wrap_text};
 use crate::ui::markdown;
 use crate::ui::theme::Theme;
 use ratatui::{
+    layout::{Constraint, Direction, Layout},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
@@ -580,10 +581,44 @@ pub(super) fn render_reset_overlay(
     frame.render_widget(paragraph, area);
 }
 
-pub(super) fn render_startup_check(frame: &mut Frame, changed_count: usize, confirming_discard: bool) {
+pub(super) fn render_startup_check(
+    frame: &mut Frame,
+    changed_count: usize,
+    current_branch: &str,
+    main_branch: &str,
+    scroll: usize,
+    confirming_discard: bool,
+) {
     let area = centered_rect(55, 45, frame.area());
     frame.render_widget(Clear, area);
 
+    let title = if confirming_discard {
+        " Confirm "
+    } else {
+        " Startup Check "
+    };
+
+    // Outer block with border
+    let outer_block = Block::default()
+        .title(title)
+        .title_style(Style::default().fg(Theme::GREY_100))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Theme::ACCENT))
+        .style(Style::default().bg(Theme::GREY_800));
+
+    let inner_area = outer_block.inner(area);
+    frame.render_widget(outer_block, area);
+
+    // Split inner area: scrollable body + fixed footer
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(2)])
+        .split(inner_area);
+
+    let body_area = layout[0];
+    let footer_area = layout[1];
+
+    // Build body content
     let mut lines: Vec<Line> = Vec::new();
 
     if confirming_discard {
@@ -620,8 +655,13 @@ pub(super) fn render_startup_check(frame: &mut Frame, changed_count: usize, conf
     } else {
         // Main startup check dialog
         lines.push(Line::from(""));
+        let headline = if changed_count == 0 && current_branch != main_branch {
+            "  You're on a non-main branch"
+        } else {
+            "  You have unsaved work"
+        };
         lines.push(Line::from(Span::styled(
-            "  You have unsaved work",
+            headline,
             Style::default()
                 .fg(Theme::WHITE)
                 .add_modifier(Modifier::BOLD),
@@ -632,13 +672,23 @@ pub(super) fn render_startup_check(frame: &mut Frame, changed_count: usize, conf
             Style::default().fg(Theme::GREY_300),
         )));
         lines.push(Line::from(Span::styled(
-            format!(
-                "  You have {} file{} with changes.",
-                changed_count,
-                if changed_count == 1 { "" } else { "s" }
-            ),
+            if changed_count == 0 {
+                "  No uncommitted changes found.".to_string()
+            } else {
+                format!(
+                    "  You have {} file{} with changes.",
+                    changed_count,
+                    if changed_count == 1 { "" } else { "s" }
+                )
+            },
             Style::default().fg(Theme::GREY_300),
         )));
+        if current_branch != main_branch {
+            lines.push(Line::from(Span::styled(
+                format!("  Branch: {} (main: {})", current_branch, main_branch),
+                Style::default().fg(Theme::GREY_400),
+            )));
+        }
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             "  ─────────────────────────────────────────────────",
@@ -689,53 +739,29 @@ pub(super) fn render_startup_check(frame: &mut Frame, changed_count: usize, conf
             Span::styled("  Continue as-is", Style::default().fg(Theme::GREY_100)),
         ]));
         lines.push(Line::from(""));
-
-        // Footer
-        lines.push(Line::from(Span::styled(
-            "  ─────────────────────────────────────────────────",
-            Style::default().fg(Theme::GREY_600),
-        )));
-        lines.push(Line::from(vec![
-            Span::styled("   ", Style::default()),
-            Span::styled(
-                " s ",
-                Style::default().fg(Theme::GREY_900).bg(Theme::GREY_400),
-            ),
-            Span::styled(" save  ", Style::default().fg(Theme::GREY_400)),
-            Span::styled(
-                " d ",
-                Style::default().fg(Theme::GREY_900).bg(Theme::GREY_400),
-            ),
-            Span::styled(" discard  ", Style::default().fg(Theme::GREY_400)),
-            Span::styled(
-                " c ",
-                Style::default().fg(Theme::GREY_900).bg(Theme::GREY_400),
-            ),
-            Span::styled(" continue  ", Style::default().fg(Theme::GREY_400)),
-            Span::styled(
-                " Esc ",
-                Style::default().fg(Theme::GREY_900).bg(Theme::GREY_400),
-            ),
-            Span::styled(" quit", Style::default().fg(Theme::GREY_400)),
-        ]));
-        lines.push(Line::from(""));
     }
 
-    let title = if confirming_discard {
-        " Confirm "
-    } else {
-        " Startup Check "
-    };
-    let block = Block::default()
-        .title(title)
-        .title_style(Style::default().fg(Theme::GREY_100))
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Theme::ACCENT))
-        .style(Style::default().bg(Theme::GREY_800));
+    // Render scrollable body
+    let body = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .scroll((scroll as u16, 0));
+    frame.render_widget(body, body_area);
 
-    let paragraph = Paragraph::new(lines)
-        .block(block)
-        .wrap(Wrap { trim: false });
-
-    frame.render_widget(paragraph, area);
+    // Render fixed footer with scroll hint
+    let footer_lines = vec![
+        Line::from(Span::styled(
+            "  ─────────────────────────────────────────────────",
+            Style::default().fg(Theme::GREY_600),
+        )),
+        Line::from(vec![
+            Span::styled("   ", Style::default()),
+            Span::styled(
+                " ↑↓ ",
+                Style::default().fg(Theme::GREY_900).bg(Theme::GREY_400),
+            ),
+            Span::styled(" scroll ", Style::default().fg(Theme::GREY_400)),
+        ]),
+    ];
+    let footer = Paragraph::new(footer_lines);
+    frame.render_widget(footer, footer_area);
 }

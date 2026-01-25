@@ -1,227 +1,201 @@
 # *c o s m o s*
 
-A **terminal-first codebase steward** for solo developers.
+An AI-powered assistant that reviews your code and suggests improvements — right in your terminal.
 
-Cosmos lives *outside* your editing loop. It reads git context, surfaces high-leverage improvements, and ships fixes as branches + PRs — all from the terminal.
+Cosmos reads your project, finds things that could be better, and helps you fix them. No complex setup. No IDE required. Just run it and go.
 
-**Monochromatic. Minimal. Meaningful.**
+## What Cosmos Does
 
-## What It Does
+- **Scans your code** and finds areas that could be improved
+- **Explains issues in plain English** — no jargon
+- **Suggests fixes** and lets you preview changes before applying
+- **Creates pull requests** so changes go through your normal review process
 
-- **Indexes your codebase** using tree-sitter (Rust, TypeScript, JavaScript, Python, Go)
-- **Suggests improvements** via AI with smart tiering (Opus 4.5 for depth, fast models for speed)
-- **Ships fixes safely** — preview changes, apply to a branch, create PRs
-- **Remembers context** — caches summaries, tracks your decisions
+**Supported languages:** JavaScript, TypeScript, Python, Rust, Go
+
+---
 
 ## Installation
 
-**Requirements:**
-- **Rust stable** (1.88+)
-- Git
-- Optional: GitHub CLI for PR creation (https://cli.github.com)
+### Mac
 
+1. Go to the [**Releases page**](https://github.com/cameronspears/cosmos/releases/latest)
+2. Download **cosmos-macos-installer.pkg**
+3. Double-click the downloaded file to install
+4. When prompted, enter your password to complete installation
+
+That's it — Cosmos is now installed.
+
+### Windows
+
+1. Go to the [**Releases page**](https://github.com/cameronspears/cosmos/releases/latest)
+2. Download **cosmos-windows-installer.exe**
+3. Run the installer
+4. If Windows shows a security prompt, click "More info" then "Run anyway"
+5. Follow the installation wizard
+
+That's it — Cosmos is now installed.
+
+### Linux
+
+**Ubuntu/Debian:**
+
+Open Terminal and run:
 ```bash
-# Install Rust stable (if not already installed)
-rustup install stable
-rustup default stable
-
-# Clone and build
-git clone <your-repo-url>
-cd cosmos
-
-# From source
-cargo install --path . --locked
-
-# Or run directly
-cargo run --release
+curl -fsSL https://raw.githubusercontent.com/cameronspears/cosmos/main/install.sh | bash
 ```
 
-## Optional AI Setup (Fastest Path)
+**Other distributions:**
+
+Same command works on most Linux systems.
+
+---
+
+## Getting Started
+
+### Step 1: Open your project in Terminal
+
+Cosmos needs to run from inside your project folder. Here's how:
+
+**Mac:**
+1. Open the **Terminal** app (search for "Terminal" in Spotlight)
+2. Type `cd ` (with a space after it)
+3. Drag your project folder from Finder into the Terminal window
+4. Press Enter
+
+**Windows:**
+1. Open **PowerShell** (search for it in Start menu)
+2. Type `cd ` (with a space after it)
+3. Type the path to your project, like `C:\Users\YourName\Projects\my-app`
+4. Press Enter
+
+**Example:**
+```bash
+cd /Users/yourname/Projects/my-website
+```
+
+### Step 2: Run Cosmos
+
+Once you're in your project folder, just type:
 
 ```bash
-# Option A: one-liner (non-interactive)
-export OPENROUTER_API_KEY=sk-...
 cosmos
+```
 
-# Option B: guided setup
+### Step 3: Set up AI features (first time only)
+
+The first time you run Cosmos, it will ask you to set up an API key. This is what powers the AI suggestions.
+
+1. Cosmos will show you a link to get a free API key
+2. Follow the link, create an account, and copy your key
+3. Paste the key when Cosmos asks for it
+
+Your key is saved securely on your computer. You won't need to enter it again.
+
+---
+
+## Using Cosmos
+
+When Cosmos starts, you'll see a list of suggestions for your project.
+
+### Navigation
+
+| Key | What it does |
+|-----|--------------|
+| `↑` `↓` | Move up and down the list |
+| `Enter` | View details or apply a suggestion |
+| `Tab` | Switch between panels |
+| `?` | Show help |
+| `q` | Quit Cosmos |
+
+### Working with suggestions
+
+1. **Browse suggestions** — Use arrow keys to look through the list
+2. **View details** — Press `Enter` on any suggestion to see more
+3. **Apply a fix** — When viewing a suggestion, press `Enter` to preview and apply the fix
+4. **Undo** — Press `u` to undo the last change you applied
+
+### Other features
+
+| Key | What it does |
+|-----|--------------|
+| `/` | Search through suggestions |
+| `i` | Ask Cosmos a question about your code |
+| `g` | Toggle between grouped and flat view |
+| `Esc` | Go back or cancel |
+
+---
+
+## How Fixes Work
+
+When you apply a suggestion:
+
+1. **Preview** — Cosmos shows you exactly what will change
+2. **Apply** — Creates a new branch with the fix
+3. **Review** — Cosmos checks the fix for any issues
+4. **Ship** — Commit, push, and create a pull request
+
+This keeps your main code safe. All changes go through your normal review process.
+
+---
+
+## Suggestion Priority
+
+Cosmos marks suggestions by importance:
+
+| Icon | Meaning |
+|------|---------|
+| `!!` | High priority — significant improvement |
+| `!` | Medium priority — worth considering |
+| (blank) | Low priority — minor enhancement |
+
+---
+
+## Troubleshooting
+
+### "Command not found" when running cosmos
+
+Make sure you're running the command in Terminal (Mac/Linux) or PowerShell (Windows). If you just installed Cosmos, try closing and reopening your terminal.
+
+### Cosmos shows no suggestions
+
+Make sure you're running Cosmos from inside a project folder that contains code files. Cosmos works with JavaScript, TypeScript, Python, Rust, and Go files.
+
+### API key issues
+
+If Cosmos can't find your API key, you can set it up again:
+
+```bash
 cosmos --setup
 ```
 
-## Quick Start
+---
+
+## Quick Reference
 
 ```bash
-# Launch the TUI
+# Run Cosmos in current folder
 cosmos
 
-# Point at a specific project
-cosmos /path/to/project
+# Run Cosmos on a specific project
+cosmos /path/to/your/project
 
-# Time-boxed improvement session (ritual mode)
-cosmos ritual --minutes 15
+# Set up or change your API key
+cosmos --setup
 
-# Show stats without TUI
+# Show project statistics (no interactive mode)
 cosmos --stats
-
-# Set up AI features (BYOK mode)
-cosmos --setup
 ```
 
-## Keyboard Controls
+---
 
-| Key | Action |
-|-----|--------|
-| `↑/k` `↓/j` | Navigate |
-| `Tab` | Switch panels |
-| `Enter` | Expand/collapse groups, view details |
-| `/` | Search |
-| `?` | Toggle help |
+## Privacy
 
-### Actions
+- Your code is sent to the AI service only when generating suggestions
+- Your API key is stored securely in your system's keychain
+- Cosmos caches results locally to minimize API usage and costs
 
-| Key | Action |
-|-----|--------|
-| `a` | Apply suggestion (generates preview first) |
-| `i` | Inquiry — ask AI a question about your code |
-| `u` | Undo last applied change |
-| `r` | Refresh context |
-
-### Git & Shipping
-
-| Key | Action |
-|-----|--------|
-| `s` | Ship — commit + push + create PR |
-| `c` | Git status (stage/unstage files) |
-| `m` | Switch to main branch |
-| `b` | Branch workflow |
-
-### Modes & Views
-
-| Key | Action |
-|-----|--------|
-| `R` | Ritual mode — curated time-boxed session |
-| `g` | Toggle flat/grouped view |
-| `S` | Cycle sort mode |
-| `M` | Repo memory (store decisions) |
-| `1-8` | Jump to architectural layer |
-
-## Workflows
-
-### Apply Flow
-
-When you press `a` on a suggestion:
-
-1. **Preview** — AI verifies the issue and shows a human-readable plan
-2. **Confirm** — Press `y` to apply, `n` to cancel, `m` to modify
-3. **Apply** — Creates a fix branch, applies the change, runs safety checks
-4. **Ship** — Press `s` to commit, push, and create a PR in one motion
-
-### Ritual Mode
-
-A focused, time-boxed improvement session:
-
-```bash
-cosmos ritual --minutes 10
-```
-
-Presents a curated queue of suggestions. Work through them one by one. Mark as done or skip.
-
-### Ship Workflow
-
-After applying changes, press `s` to:
-1. Stage modified files
-2. Commit with auto-generated message
-3. Push to remote
-4. Create a PR via GitHub CLI
-
-## Smart Caching
-
-Cosmos caches aggressively to minimize LLM costs:
-
-- **File summaries** — Cached by content hash, regenerated only when files change
-- **Suggestions** — Persisted between sessions
-- **Decisions** — Repo memory stores your preferences
-
-On subsequent runs, unchanged files load instantly from cache.
-
-## Suggestion Types
-
-| Icon | Priority |
-|------|----------|
-| ● | High — significant improvement |
-| ◐ | Medium — worth considering |
-| ○ | Low — minor enhancement |
-
-**Categories:** Improvement, BugFix, Optimization, Quality, Feature
-
-## AI Setup (BYOK Mode)
-
-```bash
-cosmos --setup
-```
-
-Guides you through getting an [OpenRouter API key](https://openrouter.ai/keys). Your key is saved locally.
-
-## Configuration
-
-Press `O` to see your config file location. Config options:
-
-- **Privacy preview** (`P`) — Preview what gets sent to AI before sending
-- **Summarize changed only** (`T`) — Only summarize modified files and their dependencies
-
-## Project Structure
-
-```
-cosmos/
-├── src/
-│   ├── main.rs          # Entry point, CLI, event loop
-│   ├── cache/           # Smart caching (summaries, suggestions)
-│   ├── config.rs        # User configuration
-│   ├── context/         # Git-aware work context
-│   ├── git_ops.rs       # Git operations (branch, commit, PR)
-│   ├── grouping/        # Architectural layer detection
-│   ├── history.rs       # Suggestion history (SQLite)
-│   ├── index/           # AST-based codebase indexing
-│   ├── onboarding.rs    # First-run experience
-│   ├── safe_apply.rs    # Safety checks before applying
-│   ├── suggest/         # Suggestion engine (LLM + static rules)
-│   └── ui/              # TUI components (ratatui)
-```
-
-## Design Philosophy
-
-**Contemplative pace:**
-- Suggestions, not demands
-- Preview before applying
-- Undo always available
-
-**Cost-conscious:**
-- Free static analysis first
-- Smart caching eliminates redundant LLM calls
-- Tiered models (fast for summaries, powerful for suggestions)
-
-**Git-native:**
-- Knows what you're working on from uncommitted changes
-- Ships fixes as proper branches with PRs
-- One-key undo to restore backups
-
-## CLI Reference
-
-```
-Usage: cosmos [OPTIONS] [PATH]
-       cosmos ritual [PATH] --minutes <N>
-
-Arguments:
-  [PATH]  Path to the repository [default: .]
-
-Options:
-      --setup             Set up OpenRouter API key
-      --stats             Show stats and exit (no TUI)
-  -h, --help              Print help
-  -V, --version           Print version
-
-Ritual Mode:
-      --minutes <N>       Session length in minutes [default: 10]
-```
+---
 
 ## License
 

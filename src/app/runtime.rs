@@ -64,7 +64,7 @@ pub async fn run_tui(
 
         // Show overlay if not on main or has uncommitted changes
         if !is_on_main || changed_count > 0 {
-            app.show_startup_check(changed_count);
+            app.show_startup_check(changed_count, status.branch.clone(), main_branch);
         }
     }
 
