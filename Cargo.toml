@@ -12,7 +12,7 @@ categories = ["command-line-utilities", "development-tools"]
 [dependencies]
 ratatui = "0.29"
 crossterm = "0.28"
-git2 = "0.19"
+git2 = { version = "0.19", default-features = false }
 walkdir = "2"
 regex = "1"
 chrono = { version = "0.4", features = ["serde"] }
