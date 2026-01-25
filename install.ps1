@@ -16,16 +16,24 @@ Write-Host "  |      Installing cosmos              |"
 Write-Host "  +-------------------------------------+"
 Write-Host ""
 
-# Check for Rust
-$cargoPath = "$env:USERPROFILE\.cargo\bin\cargo.exe"
-$hasRust = (Get-Command cargo -ErrorAction SilentlyContinue) -or (Test-Path $cargoPath)
+# Check for Rust - prefer PATH, fall back to user install location
+$cargoInPath = Get-Command cargo -ErrorAction SilentlyContinue
+$cargoUserPath = "$env:USERPROFILE\.cargo\bin\cargo.exe"
 
-if ($hasRust) {
+if ($cargoInPath) {
+    # Cargo is in PATH (e.g., CI environments, or user has it in PATH)
+    $cargoCmd = "cargo"
     Write-Success "Rust is already installed"
-    
-    # Try to get version
     try {
         $rustVersion = & rustc --version 2>$null
+        Write-Host "     $rustVersion"
+    } catch {}
+} elseif (Test-Path $cargoUserPath) {
+    # Cargo installed in user directory but not in PATH
+    $cargoCmd = $cargoUserPath
+    Write-Success "Rust is already installed"
+    try {
+        $rustVersion = & "$env:USERPROFILE\.cargo\bin\rustc.exe" --version 2>$null
         Write-Host "     $rustVersion"
     } catch {}
 } else {
@@ -43,16 +51,17 @@ if ($hasRust) {
     
     Write-Step "Running Rust installer..."
     Write-Host ""
-    Write-Host "  A new window will open. Accept the default options (just press Enter)."
+    Write-Host "  Accept the default options (just press Enter) when prompted."
     Write-Host ""
     
     Start-Process -FilePath $rustupInit -ArgumentList "-y" -Wait
     
     # Update PATH for current session
     $env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"
+    $cargoCmd = $cargoUserPath
     
     # Verify installation
-    if (Test-Path $cargoPath) {
+    if (Test-Path $cargoUserPath) {
         Write-Success "Rust installed successfully"
     } else {
         Write-Err "Failed to install Rust"
@@ -71,22 +80,29 @@ Write-Host "  This compiles cosmos for your system. It may take a few minutes."
 Write-Host ""
 
 # Install cosmos via cargo
-try {
-    & "$env:USERPROFILE\.cargo\bin\cargo.exe" install cosmos-tui
-    Write-Success "cosmos installed successfully!"
-} catch {
+$installSuccess = $false
+
+# Try crates.io first
+& $cargoCmd install cosmos-tui 2>&1
+if ($LASTEXITCODE -eq 0) {
+    $installSuccess = $true
+} else {
     Write-Warn "crates.io install failed, trying from GitHub..."
-    try {
-        & "$env:USERPROFILE\.cargo\bin\cargo.exe" install --git "https://github.com/$REPO" --locked
-        Write-Success "cosmos installed successfully!"
-    } catch {
-        Write-Err "Installation failed"
-        Write-Host ""
-        Write-Host "  Please try manually: cargo install cosmos-tui"
-        Write-Host ""
-        exit 1
+    & $cargoCmd install --git "https://github.com/$REPO" --locked 2>&1
+    if ($LASTEXITCODE -eq 0) {
+        $installSuccess = $true
     }
 }
+
+if (-not $installSuccess) {
+    Write-Err "Installation failed"
+    Write-Host ""
+    Write-Host "  Please try manually: cargo install cosmos-tui"
+    Write-Host ""
+    exit 1
+}
+
+Write-Success "cosmos installed successfully!"
 
 Write-Host ""
 Write-Host "  +-------------------------------------+"
