@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.1](https://github.com/cameronspears/cosmos/compare/v0.1.0...v0.1.1) (2026-01-25)
+
+
+### Bug Fixes
+
+* **build:** use rustls-tls to fix cross-compilation failures ([9029516](https://github.com/cameronspears/cosmos/commit/902951606b32238bfd003ef7397730e5a20633f5))
+
 ## 0.1.0 (2026-01-25)
 
 
