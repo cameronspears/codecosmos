@@ -665,6 +665,180 @@ pub(super) fn render_startup_check(
     frame.render_widget(footer, footer_area);
 }
 
+pub(super) fn render_welcome(frame: &mut Frame) {
+    let area = centered_rect(60, 70, frame.area());
+    frame.render_widget(Clear, area);
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    // Header
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled(
+            "  Welcome to ",
+            Style::default()
+                .fg(Theme::WHITE)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "Cosmos",
+            Style::default()
+                .fg(Theme::GREEN)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]));
+    lines.push(Line::from(""));
+
+    // Intro
+    lines.push(Line::from(vec![Span::styled(
+        "  Cosmos analyzes your codebase and suggests improvements.",
+        Style::default().fg(Theme::GREY_300),
+    )]));
+    lines.push(Line::from(""));
+
+    // Layout explanation
+    lines.push(Line::from(vec![
+        Span::styled("  ", Style::default()),
+        Span::styled(
+            "Left panel",
+            Style::default()
+                .fg(Theme::WHITE)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            " - Your codebase structure",
+            Style::default().fg(Theme::GREY_400),
+        ),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("  ", Style::default()),
+        Span::styled(
+            "Right panel",
+            Style::default()
+                .fg(Theme::WHITE)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            " - AI suggestions for improvements",
+            Style::default().fg(Theme::GREY_400),
+        ),
+    ]));
+    lines.push(Line::from(""));
+
+    // Workflow explanation
+    lines.push(Line::from(vec![Span::styled(
+        "  How it works:",
+        Style::default()
+            .fg(Theme::WHITE)
+            .add_modifier(Modifier::BOLD),
+    )]));
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("    1. ", Style::default().fg(Theme::GREEN)),
+        Span::styled("Select", Style::default().fg(Theme::WHITE)),
+        Span::styled(
+            " a suggestion with arrow keys",
+            Style::default().fg(Theme::GREY_400),
+        ),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("    2. ", Style::default().fg(Theme::GREEN)),
+        Span::styled("Press Enter", Style::default().fg(Theme::WHITE)),
+        Span::styled(
+            " to verify the change",
+            Style::default().fg(Theme::GREY_400),
+        ),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("    3. ", Style::default().fg(Theme::GREEN)),
+        Span::styled("Review", Style::default().fg(Theme::WHITE)),
+        Span::styled(" the preview, then ", Style::default().fg(Theme::GREY_400)),
+        Span::styled("Enter", Style::default().fg(Theme::WHITE)),
+        Span::styled(" to apply", Style::default().fg(Theme::GREY_400)),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("    4. ", Style::default().fg(Theme::GREEN)),
+        Span::styled("Ship", Style::default().fg(Theme::WHITE)),
+        Span::styled(
+            " creates a PR for you",
+            Style::default().fg(Theme::GREY_400),
+        ),
+    ]));
+    lines.push(Line::from(""));
+
+    // Key shortcuts
+    lines.push(Line::from(vec![Span::styled(
+        "  Quick keys:",
+        Style::default()
+            .fg(Theme::WHITE)
+            .add_modifier(Modifier::BOLD),
+    )]));
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("    ", Style::default()),
+        Span::styled(
+            " Tab ",
+            Style::default().fg(Theme::GREY_900).bg(Theme::GREY_300),
+        ),
+        Span::styled(
+            " Switch between panels",
+            Style::default().fg(Theme::GREY_400),
+        ),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("    ", Style::default()),
+        Span::styled(
+            "  i  ",
+            Style::default().fg(Theme::GREY_900).bg(Theme::GREY_300),
+        ),
+        Span::styled(
+            " Ask a question about your code",
+            Style::default().fg(Theme::GREY_400),
+        ),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("    ", Style::default()),
+        Span::styled(
+            "  ?  ",
+            Style::default().fg(Theme::GREY_900).bg(Theme::GREY_300),
+        ),
+        Span::styled(
+            " Show all keyboard shortcuts",
+            Style::default().fg(Theme::GREY_400),
+        ),
+    ]));
+    lines.push(Line::from(""));
+    lines.push(Line::from(""));
+
+    // Dismiss prompt
+    lines.push(Line::from(vec![
+        Span::styled("  Press ", Style::default().fg(Theme::GREY_500)),
+        Span::styled(
+            " Enter ",
+            Style::default().fg(Theme::GREY_900).bg(Theme::GREEN),
+        ),
+        Span::styled(" or ", Style::default().fg(Theme::GREY_500)),
+        Span::styled(
+            " Esc ",
+            Style::default().fg(Theme::GREY_900).bg(Theme::GREY_300),
+        ),
+        Span::styled(" to get started", Style::default().fg(Theme::GREY_500)),
+    ]));
+
+    let block = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .title(" Getting Started ")
+                .title_style(Style::default().fg(Theme::GREY_100))
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Theme::GREY_400))
+                .style(Style::default().bg(Theme::GREY_900)),
+        )
+        .wrap(Wrap { trim: false });
+
+    frame.render_widget(block, area);
+}
+
 pub(super) fn render_update_overlay(
     frame: &mut Frame,
     current_version: &str,

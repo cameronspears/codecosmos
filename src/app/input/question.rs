@@ -25,6 +25,17 @@ pub(super) fn handle_question_input(
     Ok(())
 }
 
+/// Compute a context hash for cache validation
+/// Uses file count and suggestion count as a simple indicator of codebase state
+fn compute_context_hash(app: &App) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    app.index.files.len().hash(&mut hasher);
+    app.suggestions.suggestions.len().hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
 /// Submit a question to the LLM
 fn submit_question(app: &mut App, ctx: &RuntimeContext) -> Result<()> {
     // If input is empty, use the selected suggestion first
@@ -36,11 +47,24 @@ fn submit_question(app: &mut App, ctx: &RuntimeContext) -> Result<()> {
         return Ok(());
     }
 
-    // Send question directly to LLM
+    // Check cache first
+    let context_hash = compute_context_hash(app);
+    if let Some(cached_answer) = app.question_cache.get(&question, &context_hash) {
+        // Cache hit! Use cached answer directly
+        let _ = ctx.tx.send(BackgroundMessage::QuestionResponse {
+            answer: cached_answer.to_string(),
+            usage: None, // No usage for cached response
+        });
+        return Ok(());
+    }
+
+    // Cache miss - send question to LLM
     let index_clone = ctx.index.clone();
     let context_clone = app.context.clone();
     let tx_question = ctx.tx.clone();
     let repo_memory_context = app.repo_memory.to_prompt_context(12, 900);
+    let question_for_cache = question.clone();
+    let context_hash_for_cache = context_hash;
 
     app.loading = LoadingState::Answering;
 
@@ -52,7 +76,13 @@ fn submit_question(app: &mut App, ctx: &RuntimeContext) -> Result<()> {
         };
         match suggest::llm::ask_question(&index_clone, &context_clone, &question, mem).await {
             Ok((answer, usage)) => {
-                let _ = tx_question.send(BackgroundMessage::QuestionResponse { answer, usage });
+                // Send response with cache metadata for storage
+                let _ = tx_question.send(BackgroundMessage::QuestionResponseWithCache {
+                    question: question_for_cache,
+                    answer,
+                    usage,
+                    context_hash: context_hash_for_cache,
+                });
             }
             Err(e) => {
                 let _ = tx_question.send(BackgroundMessage::Error(e.to_string()));

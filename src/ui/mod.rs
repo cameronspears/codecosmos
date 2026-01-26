@@ -72,6 +72,9 @@ pub struct App {
     // Domain glossary (auto-extracted terminology)
     pub glossary: crate::cache::DomainGlossary,
 
+    // Question answer cache
+    pub question_cache: crate::cache::QuestionCache,
+
     // Cost tracking
     pub session_cost: f64,            // Total USD spent this session
     pub session_tokens: u32,          // Total tokens used this session
@@ -162,6 +165,7 @@ impl App {
             llm_summaries: std::collections::HashMap::new(),
             repo_memory: crate::cache::RepoMemory::default(),
             glossary: crate::cache::DomainGlossary::default(),
+            question_cache: crate::cache::QuestionCache::default(),
             session_cost: 0.0,
             session_tokens: 0,
             active_model: None,

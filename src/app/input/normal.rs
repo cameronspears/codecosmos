@@ -3,12 +3,185 @@ use crate::app::messages::BackgroundMessage;
 use crate::app::RuntimeContext;
 use crate::git_ops;
 use crate::suggest;
+use crate::suggest::llm::FixPreview;
+use crate::suggest::Suggestion;
 use crate::ui::{ActivePanel, App, LoadingState, Overlay, ShipStep, WorkflowStep};
 use crate::util::{hash_bytes, resolve_repo_path_allow_new};
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use uuid::Uuid;
+
+// =============================================================================
+// Apply Fix Validation (WorkflowStep::Verify Enter key handling)
+// =============================================================================
+
+/// Errors that can occur when validating the apply fix action.
+/// Each variant has a user-friendly message.
+#[derive(Debug, Clone)]
+pub enum ApplyError {
+    /// Preview is still loading or hasn't been generated yet
+    PreviewNotReady,
+    /// Fix is already being applied
+    AlreadyApplying,
+    /// Internal state is missing (should never happen in normal use)
+    MissingState(&'static str),
+    /// The suggestion was removed from the list (rare edge case)
+    SuggestionNotFound,
+    /// Failed to check git status
+    GitStatusFailed(String),
+    /// Working tree has uncommitted changes
+    DirtyWorkingTree,
+    /// Files have changed since the preview was generated
+    FilesChanged(Vec<PathBuf>),
+    /// Path resolution failed (security check)
+    UnsafePath(PathBuf, String),
+    /// File read failed
+    FileReadFailed(PathBuf, String),
+}
+
+impl ApplyError {
+    /// Returns a user-friendly message for display in toasts
+    pub fn user_message(&self) -> String {
+        match self {
+            Self::PreviewNotReady => "Preview not ready. Please wait for verification.".into(),
+            Self::AlreadyApplying => "Already applying fix...".into(),
+            Self::MissingState(what) => format!("Internal error: missing {}. Try again.", what),
+            Self::SuggestionNotFound => "Suggestion no longer exists. Select another.".into(),
+            Self::GitStatusFailed(e) => format!("Git error: {}. Check repo state.", e),
+            Self::DirtyWorkingTree => {
+                "Working tree has changes. Commit or stash before applying.".into()
+            }
+            Self::FilesChanged(paths) => {
+                let names: Vec<String> = paths
+                    .iter()
+                    .take(3)
+                    .map(|p| p.display().to_string())
+                    .collect();
+                let more = paths.len().saturating_sub(3);
+                let suffix = if more > 0 {
+                    format!(" (+{} more)", more)
+                } else {
+                    String::new()
+                };
+                format!(
+                    "Files changed: {}{}. Re-verify first.",
+                    names.join(", "),
+                    suffix
+                )
+            }
+            Self::UnsafePath(path, e) => format!("Unsafe path {}: {}", path.display(), e),
+            Self::FileReadFailed(path, e) => format!("Failed to read {}: {}", path.display(), e),
+        }
+    }
+}
+
+/// Context needed to apply a fix, validated and ready to use
+pub struct ApplyContext {
+    pub preview: FixPreview,
+    pub suggestion: Suggestion,
+    pub suggestion_id: Uuid,
+    pub file_path: PathBuf,
+    pub repo_path: PathBuf,
+    pub repo_memory_context: String,
+}
+
+/// Validates all preconditions for applying a fix from the Verify step.
+/// Returns an ApplyContext if all conditions are met, or an ApplyError describing what failed.
+fn validate_apply_fix(app: &App) -> std::result::Result<ApplyContext, ApplyError> {
+    // Guard 1: Check if already loading/applying (align with footer UI)
+    if app.loading == LoadingState::GeneratingFix {
+        return Err(ApplyError::AlreadyApplying);
+    }
+
+    // Guard 2: Check if preview is still loading
+    if app.verify_state.loading {
+        return Err(ApplyError::PreviewNotReady);
+    }
+
+    // Get preview
+    let preview = app
+        .verify_state
+        .preview
+        .clone()
+        .ok_or(ApplyError::PreviewNotReady)?;
+
+    // Get suggestion_id
+    let suggestion_id = app
+        .verify_state
+        .suggestion_id
+        .ok_or(ApplyError::MissingState("suggestion_id"))?;
+
+    // Get file_path
+    let file_path = app
+        .verify_state
+        .file_path
+        .clone()
+        .ok_or(ApplyError::MissingState("file_path"))?;
+
+    // Get additional files
+    let additional_files = app.verify_state.additional_files.clone();
+
+    // Find suggestion in list
+    let suggestion = app
+        .suggestions
+        .suggestions
+        .iter()
+        .find(|s| s.id == suggestion_id)
+        .cloned()
+        .ok_or(ApplyError::SuggestionNotFound)?;
+
+    // Check git status
+    let status = git_ops::current_status(&app.repo_path)
+        .map_err(|e| ApplyError::GitStatusFailed(e.to_string()))?;
+
+    let changed_count = status.staged.len() + status.modified.len() + status.untracked.len();
+    if changed_count > 0 {
+        return Err(ApplyError::DirtyWorkingTree);
+    }
+
+    // Validate file hashes haven't changed since preview
+    let mut all_files = vec![file_path.clone()];
+    all_files.extend(additional_files.clone());
+
+    let mut changed_files = Vec::new();
+    for target in &all_files {
+        let resolved = resolve_repo_path_allow_new(&app.repo_path, target)
+            .map_err(|e| ApplyError::UnsafePath(target.clone(), e.to_string()))?;
+
+        let bytes = match std::fs::read(&resolved.absolute) {
+            Ok(content) => content,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(e) => {
+                return Err(ApplyError::FileReadFailed(
+                    resolved.relative.clone(),
+                    e.to_string(),
+                ))
+            }
+        };
+
+        let current_hash = hash_bytes(&bytes);
+        match app.verify_state.preview_hashes.get(&resolved.relative) {
+            Some(expected) if expected == &current_hash => {}
+            _ => changed_files.push(resolved.relative.clone()),
+        }
+    }
+
+    if !changed_files.is_empty() {
+        return Err(ApplyError::FilesChanged(changed_files));
+    }
+
+    // All validations passed
+    Ok(ApplyContext {
+        preview,
+        suggestion,
+        suggestion_id,
+        file_path,
+        repo_path: app.repo_path.clone(),
+        repo_memory_context: app.repo_memory.to_prompt_context(12, 900),
+    })
+}
 
 /// Handle key events in normal mode (no special input active)
 pub(super) fn handle_normal_mode(app: &mut App, key: KeyEvent, ctx: &RuntimeContext) -> Result<()> {
@@ -300,130 +473,38 @@ pub(super) fn handle_normal_mode(app: &mut App, key: KeyEvent, ctx: &RuntimeCont
                             }
                             WorkflowStep::Verify => {
                                 // Apply the fix and move to Review
-                                if let Some(preview) = app.verify_state.preview.clone() {
-                                    let state = &app.verify_state;
-                                    let suggestion_id = state.suggestion_id;
-                                    let file_path = state.file_path.clone();
-                                    let tx_apply = ctx.tx.clone();
-                                    let repo_path = app.repo_path.clone();
-                                    let repo_memory_context =
-                                        app.repo_memory.to_prompt_context(12, 900);
+                                // Use validate_apply_fix to check all preconditions
+                                match validate_apply_fix(app) {
+                                    Ok(apply_ctx) => {
+                                        // All validations passed - start applying
+                                        app.loading = LoadingState::GeneratingFix;
 
-                                    if let (Some(sid), Some(fp)) =
-                                        (suggestion_id, file_path.clone())
-                                    {
-                                        if let Some(suggestion) = app
-                                            .suggestions
-                                            .suggestions
-                                            .iter()
-                                            .find(|s| s.id == sid)
-                                            .cloned()
-                                        {
-                                            if let Ok(status) =
-                                                git_ops::current_status(&app.repo_path)
-                                            {
-                                                let changed_count = status.staged.len()
-                                                    + status.modified.len()
-                                                    + status.untracked.len();
-                                                if changed_count > 0 {
-                                                    app.show_toast(
-                                                        "Working tree has uncommitted changes. Commit or stash before applying a fix.",
-                                                    );
-                                                    return Ok(());
-                                                }
-                                            }
+                                        let tx_apply = ctx.tx.clone();
+                                        let repo_path = apply_ctx.repo_path;
+                                        let preview = apply_ctx.preview;
+                                        let suggestion = apply_ctx.suggestion;
+                                        let sid = apply_ctx.suggestion_id;
+                                        let fp = apply_ctx.file_path;
+                                        let repo_memory_context = apply_ctx.repo_memory_context;
 
-                                            let mut changed_files = Vec::new();
-                                            let mut all_files = Vec::new();
-                                            all_files.push(fp.clone());
-                                            all_files
-                                                .extend(app.verify_state.additional_files.clone());
-                                            for target in &all_files {
-                                                let resolved = match resolve_repo_path_allow_new(
-                                                    &app.repo_path,
-                                                    target,
-                                                ) {
-                                                    Ok(resolved) => resolved,
-                                                    Err(e) => {
-                                                        app.show_toast(&format!(
-                                                            "Unsafe path {}: {}",
-                                                            target.display(),
-                                                            e
-                                                        ));
-                                                        return Ok(());
-                                                    }
-                                                };
-                                                let bytes = match std::fs::read(&resolved.absolute)
-                                                {
-                                                    Ok(content) => content,
-                                                    Err(e)
-                                                        if e.kind()
-                                                            == std::io::ErrorKind::NotFound =>
-                                                    {
-                                                        Vec::new()
-                                                    }
-                                                    Err(e) => {
-                                                        app.show_toast(&format!(
-                                                            "Failed to read {}: {}",
-                                                            resolved.relative.display(),
-                                                            e
-                                                        ));
-                                                        return Ok(());
-                                                    }
-                                                };
-                                                let current_hash = hash_bytes(&bytes);
-                                                match app
-                                                    .verify_state
-                                                    .preview_hashes
-                                                    .get(&resolved.relative)
-                                                {
-                                                    Some(expected) if expected == &current_hash => {
-                                                    }
-                                                    _ => changed_files
-                                                        .push(resolved.relative.clone()),
-                                                }
-                                            }
-                                            if !changed_files.is_empty() {
-                                                let names: Vec<String> = changed_files
-                                                    .iter()
-                                                    .take(3)
-                                                    .map(|p| p.display().to_string())
-                                                    .collect();
-                                                let more = changed_files.len().saturating_sub(3);
-                                                let suffix = if more > 0 {
-                                                    format!(" (and {} more)", more)
-                                                } else {
-                                                    String::new()
-                                                };
-                                                app.show_toast(&format!(
-                                                    "Files changed since preview: {}{}",
-                                                    names.join(", "),
-                                                    suffix
-                                                ));
-                                                return Ok(());
-                                            }
+                                        background::spawn_background(
+                                            ctx.tx.clone(),
+                                            "apply_fix",
+                                            async move {
+                                                // Create branch from main
+                                                let branch_name = git_ops::generate_fix_branch_name(
+                                                    &suggestion.id.to_string(),
+                                                    &suggestion.summary,
+                                                );
 
-                                            app.loading = LoadingState::GeneratingFix;
-
-                                            background::spawn_background(
-                                                ctx.tx.clone(),
-                                                "apply_fix",
-                                                async move {
-                                                    // Create branch from main
-                                                    let branch_name =
-                                                        git_ops::generate_fix_branch_name(
-                                                            &suggestion.id.to_string(),
-                                                            &suggestion.summary,
-                                                        );
-
-                                                    let created_branch =
-                                                        match git_ops::create_fix_branch_from_main(
-                                                            &repo_path,
-                                                            &branch_name,
-                                                        ) {
-                                                            Ok(name) => name,
-                                                            Err(e) => {
-                                                                let _ = tx_apply.send(
+                                                let created_branch =
+                                                    match git_ops::create_fix_branch_from_main(
+                                                        &repo_path,
+                                                        &branch_name,
+                                                    ) {
+                                                        Ok(name) => name,
+                                                        Err(e) => {
+                                                            let _ = tx_apply.send(
                                                                     BackgroundMessage::DirectFixError(
                                                                         format!(
                                                                             "Failed to create fix branch: {}",
@@ -431,34 +512,33 @@ pub(super) fn handle_normal_mode(app: &mut App, key: KeyEvent, ctx: &RuntimeCont
                                                                         ),
                                                                     ),
                                                                 );
-                                                                return;
-                                                            }
-                                                        };
+                                                            return;
+                                                        }
+                                                    };
 
-                                                    let mem =
-                                                        if repo_memory_context.trim().is_empty() {
-                                                            None
-                                                        } else {
-                                                            Some(repo_memory_context)
-                                                        };
+                                                let mem = if repo_memory_context.trim().is_empty() {
+                                                    None
+                                                } else {
+                                                    Some(repo_memory_context)
+                                                };
 
-                                                    // Check if this is a multi-file suggestion
-                                                    if suggestion.is_multi_file() {
-                                                        // Multi-file fix
-                                                        let all_files = suggestion.affected_files();
+                                                // Check if this is a multi-file suggestion
+                                                if suggestion.is_multi_file() {
+                                                    // Multi-file fix
+                                                    let all_files = suggestion.affected_files();
 
-                                                        // Read all file contents
-                                                        let mut file_inputs: Vec<
-                                                            suggest::llm::FileInput,
-                                                        > = Vec::new();
-                                                        for file_path in &all_files {
-                                                            let resolved =
-                                                                match resolve_repo_path_allow_new(
-                                                                    &repo_path, file_path,
-                                                                ) {
-                                                                    Ok(resolved) => resolved,
-                                                                    Err(e) => {
-                                                                        let _ = tx_apply.send(
+                                                    // Read all file contents
+                                                    let mut file_inputs: Vec<
+                                                        suggest::llm::FileInput,
+                                                    > = Vec::new();
+                                                    for file_path in &all_files {
+                                                        let resolved =
+                                                            match resolve_repo_path_allow_new(
+                                                                &repo_path, file_path,
+                                                            ) {
+                                                                Ok(resolved) => resolved,
+                                                                Err(e) => {
+                                                                    let _ = tx_apply.send(
                                                                             BackgroundMessage::DirectFixError(
                                                                                 format!(
                                                                                     "Unsafe path {}: {}",
@@ -467,12 +547,11 @@ pub(super) fn handle_normal_mode(app: &mut App, key: KeyEvent, ctx: &RuntimeCont
                                                                                 ),
                                                                             ),
                                                                         );
-                                                                        return;
-                                                                    }
-                                                                };
-                                                            let is_new =
-                                                                !resolved.absolute.exists();
-                                                            let content = match std::fs::read_to_string(
+                                                                    return;
+                                                                }
+                                                            };
+                                                        let is_new = !resolved.absolute.exists();
+                                                        let content = match std::fs::read_to_string(
                                                                 &resolved.absolute,
                                                             ) {
                                                                 Ok(content) => content,
@@ -495,34 +574,30 @@ pub(super) fn handle_normal_mode(app: &mut App, key: KeyEvent, ctx: &RuntimeCont
                                                                     return;
                                                                 }
                                                             };
-                                                            file_inputs.push(
-                                                                suggest::llm::FileInput {
-                                                                    path: resolved.relative,
-                                                                    content,
-                                                                    is_new,
-                                                                },
-                                                            );
-                                                        }
+                                                        file_inputs.push(suggest::llm::FileInput {
+                                                            path: resolved.relative,
+                                                            content,
+                                                            is_new,
+                                                        });
+                                                    }
 
-                                                        // Generate multi-file fix
-                                                        match suggest::llm::generate_multi_file_fix(
-                                                            &file_inputs,
-                                                            &suggestion,
-                                                            &preview,
-                                                            mem,
-                                                        )
-                                                        .await
-                                                        {
-                                                            Ok(multi_fix) => {
-                                                                // Apply all edits
-                                                                let mut file_changes: Vec<(
-                                                                    PathBuf,
-                                                                    String,
-                                                                )> = Vec::new();
-                                                                for file_edit in
-                                                                    &multi_fix.file_edits
-                                                                {
-                                                                    let resolved = match resolve_repo_path_allow_new(
+                                                    // Generate multi-file fix
+                                                    match suggest::llm::generate_multi_file_fix(
+                                                        &file_inputs,
+                                                        &suggestion,
+                                                        &preview,
+                                                        mem,
+                                                    )
+                                                    .await
+                                                    {
+                                                        Ok(multi_fix) => {
+                                                            // Apply all edits
+                                                            let mut file_changes: Vec<(
+                                                                PathBuf,
+                                                                String,
+                                                            )> = Vec::new();
+                                                            for file_edit in &multi_fix.file_edits {
+                                                                let resolved = match resolve_repo_path_allow_new(
                                                                         &repo_path,
                                                                         &file_edit.path,
                                                                     ) {
@@ -542,52 +617,48 @@ pub(super) fn handle_normal_mode(app: &mut App, key: KeyEvent, ctx: &RuntimeCont
                                                                             return;
                                                                         }
                                                                     };
-                                                                    let full_path =
-                                                                        resolved.absolute;
+                                                                let full_path = resolved.absolute;
 
-                                                                    if let Some(parent) =
-                                                                        full_path.parent()
-                                                                    {
-                                                                        let _ =
-                                                                            std::fs::create_dir_all(
-                                                                                parent,
-                                                                            );
+                                                                if let Some(parent) =
+                                                                    full_path.parent()
+                                                                {
+                                                                    let _ = std::fs::create_dir_all(
+                                                                        parent,
+                                                                    );
+                                                                }
+                                                                match std::fs::write(
+                                                                    &full_path,
+                                                                    &file_edit.new_content,
+                                                                ) {
+                                                                    Ok(_) => {
+                                                                        // Stage the file
+                                                                        let rel_path = resolved
+                                                                            .relative
+                                                                            .to_string_lossy()
+                                                                            .to_string();
+                                                                        let _ = git_ops::stage_file(
+                                                                            &repo_path, &rel_path,
+                                                                        );
+
+                                                                        let diff = format!(
+                                                                            "Modified: {}",
+                                                                            file_edit
+                                                                                .modified_areas
+                                                                                .join(", ")
+                                                                        );
+                                                                        file_changes.push((
+                                                                            resolved.relative,
+                                                                            diff,
+                                                                        ));
                                                                     }
-                                                                    match std::fs::write(
-                                                                        &full_path,
-                                                                        &file_edit.new_content,
-                                                                    ) {
-                                                                        Ok(_) => {
-                                                                            // Stage the file
-                                                                            let rel_path = resolved
-                                                                                .relative
-                                                                                .to_string_lossy()
-                                                                                .to_string();
-                                                                            let _ =
-                                                                                git_ops::stage_file(
-                                                                                    &repo_path,
-                                                                                    &rel_path,
-                                                                                );
-
-                                                                            let diff = format!(
-                                                                                "Modified: {}",
-                                                                                file_edit
-                                                                                    .modified_areas
-                                                                                    .join(", ")
-                                                                            );
-                                                                            file_changes.push((
-                                                                                resolved.relative,
-                                                                                diff,
-                                                                            ));
+                                                                    Err(e) => {
+                                                                        // Rollback via git restore
+                                                                        for (path, _) in
+                                                                            &file_changes
+                                                                        {
+                                                                            let _ = git_ops::restore_file(&repo_path, path);
                                                                         }
-                                                                        Err(e) => {
-                                                                            // Rollback via git restore
-                                                                            for (path, _) in
-                                                                                &file_changes
-                                                                            {
-                                                                                let _ = git_ops::restore_file(&repo_path, path);
-                                                                            }
-                                                                            let _ = tx_apply.send(
+                                                                        let _ = tx_apply.send(
                                                                                 BackgroundMessage::DirectFixError(
                                                                                     format!(
                                                                                         "Failed to write {}: {}",
@@ -596,12 +667,12 @@ pub(super) fn handle_normal_mode(app: &mut App, key: KeyEvent, ctx: &RuntimeCont
                                                                                     ),
                                                                                 ),
                                                                             );
-                                                                            return;
-                                                                        }
+                                                                        return;
                                                                     }
                                                                 }
+                                                            }
 
-                                                                let _ = tx_apply.send(
+                                                            let _ = tx_apply.send(
                                                                     BackgroundMessage::DirectFixApplied {
                                                                         suggestion_id: sid,
                                                                         file_changes,
@@ -618,99 +689,97 @@ pub(super) fn handle_normal_mode(app: &mut App, key: KeyEvent, ctx: &RuntimeCont
                                                                         outcome: preview.outcome.clone(),
                                                                     },
                                                                 );
-                                                            }
-                                                            Err(e) => {
-                                                                let _ = tx_apply.send(
-                                                                    BackgroundMessage::DirectFixError(
-                                                                        e.to_string(),
-                                                                    ),
-                                                                );
-                                                            }
                                                         }
-                                                    } else {
-                                                        // Single-file fix (original logic)
-                                                        let resolved =
-                                                            match resolve_repo_path_allow_new(
-                                                                &repo_path, &fp,
-                                                            ) {
-                                                                Ok(resolved) => resolved,
-                                                                Err(e) => {
-                                                                    let _ = tx_apply.send(
-                                                                        BackgroundMessage::DirectFixError(
-                                                                            format!(
-                                                                                "Unsafe path {}: {}",
-                                                                                fp.display(),
-                                                                                e
-                                                                            ),
-                                                                        ),
-                                                                    );
-                                                                    return;
-                                                                }
-                                                            };
-                                                        let full_path = resolved.absolute;
-                                                        let rel_path = resolved.relative;
-                                                        let is_new_file = !full_path.exists();
-                                                        let content =
-                                                            match std::fs::read_to_string(&full_path) {
-                                                                Ok(c) => c,
-                                                                Err(e)
-                                                                    if e.kind()
-                                                                        == std::io::ErrorKind::NotFound =>
-                                                                {
-                                                                    String::new()
-                                                                }
-                                                                Err(e) => {
-                                                                    let _ = tx_apply.send(
-                                                                        BackgroundMessage::DirectFixError(
-                                                                            format!(
-                                                                                "Failed to read file: {}",
-                                                                                e
-                                                                            ),
-                                                                        ),
-                                                                    );
-                                                                    return;
-                                                                }
-                                                            };
-
-                                                        match suggest::llm::generate_fix_content(
-                                                            &rel_path,
-                                                            &content,
-                                                            &suggestion,
-                                                            &preview,
-                                                            mem,
-                                                            is_new_file,
-                                                        )
-                                                        .await
+                                                        Err(e) => {
+                                                            let _ = tx_apply.send(
+                                                                BackgroundMessage::DirectFixError(
+                                                                    e.to_string(),
+                                                                ),
+                                                            );
+                                                        }
+                                                    }
+                                                } else {
+                                                    // Single-file fix (original logic)
+                                                    let resolved = match resolve_repo_path_allow_new(
+                                                        &repo_path, &fp,
+                                                    ) {
+                                                        Ok(resolved) => resolved,
+                                                        Err(e) => {
+                                                            let _ = tx_apply.send(
+                                                                BackgroundMessage::DirectFixError(
+                                                                    format!(
+                                                                        "Unsafe path {}: {}",
+                                                                        fp.display(),
+                                                                        e
+                                                                    ),
+                                                                ),
+                                                            );
+                                                            return;
+                                                        }
+                                                    };
+                                                    let full_path = resolved.absolute;
+                                                    let rel_path = resolved.relative;
+                                                    let is_new_file = !full_path.exists();
+                                                    let content = match std::fs::read_to_string(
+                                                        &full_path,
+                                                    ) {
+                                                        Ok(c) => c,
+                                                        Err(e)
+                                                            if e.kind()
+                                                                == std::io::ErrorKind::NotFound =>
                                                         {
-                                                            Ok(applied_fix) => {
-                                                                if let Some(parent) =
-                                                                    full_path.parent()
-                                                                {
-                                                                    let _ = std::fs::create_dir_all(
-                                                                        parent,
+                                                            String::new()
+                                                        }
+                                                        Err(e) => {
+                                                            let _ = tx_apply.send(
+                                                                BackgroundMessage::DirectFixError(
+                                                                    format!(
+                                                                        "Failed to read file: {}",
+                                                                        e
+                                                                    ),
+                                                                ),
+                                                            );
+                                                            return;
+                                                        }
+                                                    };
+
+                                                    match suggest::llm::generate_fix_content(
+                                                        &rel_path,
+                                                        &content,
+                                                        &suggestion,
+                                                        &preview,
+                                                        mem,
+                                                        is_new_file,
+                                                    )
+                                                    .await
+                                                    {
+                                                        Ok(applied_fix) => {
+                                                            if let Some(parent) = full_path.parent()
+                                                            {
+                                                                let _ =
+                                                                    std::fs::create_dir_all(parent);
+                                                            }
+                                                            match std::fs::write(
+                                                                &full_path,
+                                                                &applied_fix.new_content,
+                                                            ) {
+                                                                Ok(_) => {
+                                                                    let rel_path_str = rel_path
+                                                                        .to_string_lossy()
+                                                                        .to_string();
+                                                                    let _ = git_ops::stage_file(
+                                                                        &repo_path,
+                                                                        &rel_path_str,
                                                                     );
-                                                                }
-                                                                match std::fs::write(
-                                                                    &full_path,
-                                                                    &applied_fix.new_content,
-                                                                ) {
-                                                                    Ok(_) => {
-                                                                        let rel_path_str = rel_path
-                                                                            .to_string_lossy()
-                                                                            .to_string();
-                                                                        let _ = git_ops::stage_file(
-                                                                            &repo_path,
-                                                                            &rel_path_str,
-                                                                        );
 
-                                                                        let diff = format!(
-                                                                            "Modified: {}",
-                                                                            applied_fix
-                                                                                .modified_areas
-                                                                                .join(", ")
-                                                                        );
+                                                                    let diff = format!(
+                                                                        "Modified: {}",
+                                                                        applied_fix
+                                                                            .modified_areas
+                                                                            .join(", ")
+                                                                    );
 
-                                                                        let _ = tx_apply.send(
+                                                                    let _ = tx_apply.send(
                                                                             BackgroundMessage::DirectFixApplied {
                                                                                 suggestion_id: sid,
                                                                                 file_changes: vec![(
@@ -728,15 +797,13 @@ pub(super) fn handle_normal_mode(app: &mut App, key: KeyEvent, ctx: &RuntimeCont
                                                                                 outcome: preview.outcome.clone(),
                                                                             },
                                                                         );
-                                                                    }
-                                                                    Err(e) => {
-                                                                        // Rollback via git restore
-                                                                        let _ =
-                                                                            git_ops::restore_file(
-                                                                                &repo_path,
-                                                                                &rel_path,
-                                                                            );
-                                                                        let _ = tx_apply.send(
+                                                                }
+                                                                Err(e) => {
+                                                                    // Rollback via git restore
+                                                                    let _ = git_ops::restore_file(
+                                                                        &repo_path, &rel_path,
+                                                                    );
+                                                                    let _ = tx_apply.send(
                                                                             BackgroundMessage::DirectFixError(
                                                                                 format!(
                                                                                     "Failed to write fix: {}",
@@ -744,21 +811,24 @@ pub(super) fn handle_normal_mode(app: &mut App, key: KeyEvent, ctx: &RuntimeCont
                                                                                 ),
                                                                             ),
                                                                         );
-                                                                    }
                                                                 }
                                                             }
-                                                            Err(e) => {
-                                                                let _ = tx_apply.send(
-                                                                    BackgroundMessage::DirectFixError(
-                                                                        e.to_string(),
-                                                                    ),
-                                                                );
-                                                            }
+                                                        }
+                                                        Err(e) => {
+                                                            let _ = tx_apply.send(
+                                                                BackgroundMessage::DirectFixError(
+                                                                    e.to_string(),
+                                                                ),
+                                                            );
                                                         }
                                                     }
-                                                },
-                                            );
-                                        }
+                                                }
+                                            },
+                                        );
+                                    }
+                                    Err(e) => {
+                                        // Show user-friendly error message
+                                        app.show_toast(&e.user_message());
                                     }
                                 }
                             }
@@ -994,4 +1064,123 @@ pub(super) fn handle_normal_mode(app: &mut App, key: KeyEvent, ctx: &RuntimeCont
     }
 
     Ok(())
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ========================================================================
+    // ApplyError User Message Tests
+    // ========================================================================
+
+    #[test]
+    fn test_apply_error_preview_not_ready() {
+        let err = ApplyError::PreviewNotReady;
+        let msg = err.user_message();
+        assert!(msg.contains("Preview not ready"));
+        assert!(msg.contains("wait"));
+    }
+
+    #[test]
+    fn test_apply_error_already_applying() {
+        let err = ApplyError::AlreadyApplying;
+        let msg = err.user_message();
+        assert!(msg.contains("Already applying"));
+    }
+
+    #[test]
+    fn test_apply_error_missing_state() {
+        let err = ApplyError::MissingState("suggestion_id");
+        let msg = err.user_message();
+        assert!(msg.contains("Internal error"));
+        assert!(msg.contains("suggestion_id"));
+    }
+
+    #[test]
+    fn test_apply_error_suggestion_not_found() {
+        let err = ApplyError::SuggestionNotFound;
+        let msg = err.user_message();
+        assert!(msg.contains("no longer exists"));
+    }
+
+    #[test]
+    fn test_apply_error_git_status_failed() {
+        let err = ApplyError::GitStatusFailed("repository not found".into());
+        let msg = err.user_message();
+        assert!(msg.contains("Git error"));
+        assert!(msg.contains("repository not found"));
+    }
+
+    #[test]
+    fn test_apply_error_dirty_working_tree() {
+        let err = ApplyError::DirtyWorkingTree;
+        let msg = err.user_message();
+        assert!(msg.contains("changes"));
+        assert!(msg.contains("Commit") || msg.contains("stash"));
+    }
+
+    #[test]
+    fn test_apply_error_files_changed_single() {
+        let err = ApplyError::FilesChanged(vec![PathBuf::from("src/main.rs")]);
+        let msg = err.user_message();
+        assert!(msg.contains("Files changed"));
+        assert!(msg.contains("src/main.rs"));
+        assert!(msg.contains("Re-verify"));
+    }
+
+    #[test]
+    fn test_apply_error_files_changed_multiple() {
+        let err = ApplyError::FilesChanged(vec![
+            PathBuf::from("a.rs"),
+            PathBuf::from("b.rs"),
+            PathBuf::from("c.rs"),
+            PathBuf::from("d.rs"),
+        ]);
+        let msg = err.user_message();
+        assert!(msg.contains("a.rs"));
+        assert!(msg.contains("b.rs"));
+        assert!(msg.contains("c.rs"));
+        assert!(msg.contains("+1 more"));
+    }
+
+    #[test]
+    fn test_apply_error_unsafe_path() {
+        let err = ApplyError::UnsafePath(PathBuf::from("../evil"), "path traversal".into());
+        let msg = err.user_message();
+        assert!(msg.contains("Unsafe path"));
+        assert!(msg.contains("../evil"));
+    }
+
+    #[test]
+    fn test_apply_error_file_read_failed() {
+        let err = ApplyError::FileReadFailed(PathBuf::from("missing.rs"), "not found".into());
+        let msg = err.user_message();
+        assert!(msg.contains("Failed to read"));
+        assert!(msg.contains("missing.rs"));
+    }
+
+    // ========================================================================
+    // ApplyError Debug Trait Tests
+    // ========================================================================
+
+    #[test]
+    fn test_apply_error_is_debug() {
+        // Ensure Debug trait is implemented for logging
+        let err = ApplyError::PreviewNotReady;
+        let debug_str = format!("{:?}", err);
+        assert!(debug_str.contains("PreviewNotReady"));
+    }
+
+    #[test]
+    fn test_apply_error_is_clone() {
+        // Ensure Clone trait is implemented
+        let err = ApplyError::DirtyWorkingTree;
+        let cloned = err.clone();
+        assert_eq!(err.user_message(), cloned.user_message());
+    }
 }

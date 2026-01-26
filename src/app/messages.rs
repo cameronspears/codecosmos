@@ -77,6 +77,13 @@ pub enum BackgroundMessage {
         answer: String,
         usage: Option<suggest::llm::Usage>,
     },
+    /// Response to a user question with cache metadata
+    QuestionResponseWithCache {
+        question: String,
+        answer: String,
+        usage: Option<suggest::llm::Usage>,
+        context_hash: String,
+    },
     /// Verification review completed (adversarial review of applied changes)
     VerificationComplete {
         findings: Vec<suggest::llm::ReviewFinding>,

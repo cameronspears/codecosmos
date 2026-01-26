@@ -18,7 +18,7 @@ use header::render_header;
 use main::render_main;
 use overlays::{
     render_file_detail, render_help, render_reset_overlay, render_startup_check,
-    render_update_overlay,
+    render_update_overlay, render_welcome,
 };
 use toast::render_toast;
 
@@ -85,6 +85,9 @@ pub fn render(frame: &mut Frame, app: &App) {
                 *progress,
                 error.as_deref(),
             );
+        }
+        Overlay::Welcome => {
+            render_welcome(frame);
         }
         Overlay::None => {}
     }

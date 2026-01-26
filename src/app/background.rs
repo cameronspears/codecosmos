@@ -137,10 +137,16 @@ pub fn drain_messages(app: &mut App, rx: &mpsc::Receiver<BackgroundMessage>, ctx
                             .await
                             {
                                 Ok((suggestions, usage)) => {
-                                    // Cache the suggestions
+                                    // Cache the suggestions with file hashes for validation
                                     let cache = cache::Cache::new(&cache_clone_path);
+                                    let file_hashes = index_clone.file_hashes();
+                                    let file_count = index_clone.files.len();
                                     let cache_data =
-                                        cache::SuggestionsCache::from_suggestions(&suggestions);
+                                        cache::SuggestionsCache::from_suggestions_with_hashes(
+                                            &suggestions,
+                                            file_hashes,
+                                            file_count,
+                                        );
                                     let _ = cache.save_suggestions_cache(&cache_data);
 
                                     let _ =
@@ -419,6 +425,30 @@ pub fn drain_messages(app: &mut App, rx: &mpsc::Receiver<BackgroundMessage>, ctx
                     app.session_cost += cost;
                     app.session_tokens += u.total_tokens;
                 }
+
+                app.loading = LoadingState::None;
+                // Show the response in the ask cosmos panel
+                app.show_inquiry(answer);
+            }
+            BackgroundMessage::QuestionResponseWithCache {
+                question,
+                answer,
+                usage,
+                context_hash,
+            } => {
+                // Track session cost for display
+                if let Some(u) = &usage {
+                    let cost = u.calculate_cost(suggest::llm::Model::Balanced);
+                    app.session_cost += cost;
+                    app.session_tokens += u.total_tokens;
+                }
+
+                // Store answer in cache
+                app.question_cache
+                    .set(question, answer.clone(), context_hash);
+                // Save cache to disk
+                let cache = cache::Cache::new(&app.repo_path);
+                let _ = cache.save_question_cache(&app.question_cache);
 
                 app.loading = LoadingState::None;
                 // Show the response in the ask cosmos panel

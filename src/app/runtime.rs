@@ -53,6 +53,8 @@ pub async fn run_tui(
     app.repo_memory = cache_manager.load_repo_memory();
     // Load cached domain glossary (auto-extracted terminology)
     app.glossary = cache_manager.load_glossary().unwrap_or_default();
+    // Load cached question answers
+    app.question_cache = cache_manager.load_question_cache().unwrap_or_default();
 
     // Check for unsaved work and show startup overlay if needed
     if let Ok(status) = git_ops::current_status(&repo_path) {
@@ -65,6 +67,13 @@ pub async fn run_tui(
         if !is_on_main || changed_count > 0 {
             app.show_startup_check(changed_count, status.branch.clone(), main_branch);
         }
+    }
+
+    // Show welcome overlay on first run (only if no other overlay is showing)
+    if !cache_manager.has_seen_welcome() && app.overlay == ui::Overlay::None {
+        app.overlay = ui::Overlay::Welcome;
+        // Mark as seen so it doesn't show again
+        let _ = cache_manager.mark_welcome_seen();
     }
 
     // Check if we have API access
@@ -239,10 +248,33 @@ pub async fn run_tui(
     }
 
     // ═══════════════════════════════════════════════════════════════════════
+    //  SUGGESTION CACHING: Try to use cached suggestions if still valid
+    // ═══════════════════════════════════════════════════════════════════════
+
+    let mut suggestions_from_cache = false;
+    if ai_enabled && files_needing_summary.is_empty() {
+        // All summaries cached - check if suggestions are also cached and valid
+        if let Some(cached_suggestions) = cache_manager.load_suggestions_cache() {
+            if cached_suggestions.is_valid(&file_hashes, total_files) {
+                // Cached suggestions are valid - use them!
+                let count = cached_suggestions.suggestions.len();
+                for s in cached_suggestions.suggestions {
+                    app.suggestions.add_llm_suggestion(s);
+                }
+                app.suggestions.sort_with_context(&context);
+                eprintln!("  Loaded {} cached suggestions", count);
+                suggestions_from_cache = true;
+            } else {
+                eprintln!("  Cached suggestions invalid - regenerating");
+            }
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
     //  SEQUENTIAL INIT: Summaries first (builds glossary), then suggestions
     // ═══════════════════════════════════════════════════════════════════════
 
-    if ai_enabled {
+    if ai_enabled && !suggestions_from_cache {
         if !files_needing_summary.is_empty() {
             // Phase 1: Summaries needed - generate them first, suggestions come after
             app.loading = LoadingState::GeneratingSummaries;
@@ -414,9 +446,15 @@ pub async fn run_tui(
                 .await
                 {
                     Ok((suggestions, usage)) => {
-                        // Cache the suggestions
+                        // Cache the suggestions with file hashes for validation
                         let cache = cache::Cache::new(&cache_clone_path);
-                        let cache_data = cache::SuggestionsCache::from_suggestions(&suggestions);
+                        let file_hashes = index_clone.file_hashes();
+                        let file_count = index_clone.files.len();
+                        let cache_data = cache::SuggestionsCache::from_suggestions_with_hashes(
+                            &suggestions,
+                            file_hashes,
+                            file_count,
+                        );
                         let _ = cache.save_suggestions_cache(&cache_data);
 
                         let _ = tx_suggestions.send(BackgroundMessage::SuggestionsReady {

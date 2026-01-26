@@ -222,6 +222,17 @@ pub(super) fn handle_overlay_input(
             return Ok(());
         }
 
+        // Handle Welcome overlay - dismiss with Enter or Esc
+        if let Overlay::Welcome = &app.overlay {
+            match key.code {
+                KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q') => {
+                    app.close_overlay();
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
+
         // Handle other overlays (generic scroll/close)
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => app.close_overlay(),

@@ -356,7 +356,7 @@ fn get_secondary_buttons(app: &App) -> Vec<FooterButton> {
 
 /// Get hint buttons based on current state (lowest priority contextual hints)
 fn get_hint_buttons(app: &App) -> Vec<FooterButton> {
-    match app.active_panel {
+    let mut hints = match app.active_panel {
         ActivePanel::Project => {
             vec![hint_button("/", "search"), hint_button("g", "group")]
         }
@@ -366,7 +366,12 @@ fn get_hint_buttons(app: &App) -> Vec<FooterButton> {
             }
             _ => vec![],
         },
-    }
+    };
+
+    // Always show Tab hint for panel switching (helps new users discover navigation)
+    hints.push(hint_button("Tab", "panel"));
+
+    hints
 }
 
 /// Get optional indicator buttons (undo, update)

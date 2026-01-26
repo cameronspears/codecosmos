@@ -131,6 +131,8 @@ pub enum Overlay {
         /// Error message if update failed
         error: Option<String>,
     },
+    /// Welcome overlay - shown on first run to explain the basics
+    Welcome,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
