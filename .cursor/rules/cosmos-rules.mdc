@@ -26,14 +26,6 @@ constraints unless they clearly improve safety or user outcomes.
 - Keep warnings and lints clean. Do not add #[allow(dead_code)] in
   production code; remove dead code or wire it up.
 
-## TUI integrity
-- Never print to stdout/stderr while the TUI is running. This corrupts
-  the terminal display.
-- Shell commands must use `Stdio::piped()` to capture output (see
-  `run_command_with_timeout` in util.rs).
-- When adding new blocking crates that may use `println!`, wrap calls
-  with stdout/stderr suppression (see `suppress_output` in update.rs).
-
 ## Error handling and self-healing
 - Never leave users with an error they cannot act on.
 - When possible, self-heal: retry, use fallbacks, and preserve progress.
