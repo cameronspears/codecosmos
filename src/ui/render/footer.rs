@@ -62,7 +62,7 @@ pub(super) fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
     let button_area_approx = match app.active_panel {
         ActivePanel::Project => 55, // / search  g group  ␣ expand  ? help  q quit
         ActivePanel::Suggestions => match app.workflow_step {
-            WorkflowStep::Suggestions => 38, // ↵ verify  ? help  q quit
+            WorkflowStep::Suggestions => 48, // i ask  ↵ verify  ? help  q quit
             WorkflowStep::Verify => {
                 if app.verify_state.loading || app.loading == LoadingState::GeneratingFix {
                     30 // Esc cancel  ? help  q quit
@@ -122,6 +122,11 @@ pub(super) fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
         }
         ActivePanel::Suggestions => match app.workflow_step {
             WorkflowStep::Suggestions => {
+                spans.push(Span::styled(
+                    " i ",
+                    Style::default().fg(Theme::GREY_900).bg(Theme::GREY_500),
+                ));
+                spans.push(Span::styled(" ask ", Style::default().fg(Theme::GREY_500)));
                 spans.push(Span::styled(
                     " ↵ ",
                     Style::default().fg(Theme::GREY_900).bg(Theme::GREEN),

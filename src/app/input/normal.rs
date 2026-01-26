@@ -959,7 +959,10 @@ pub(super) fn handle_normal_mode(app: &mut App, key: KeyEvent, ctx: &RuntimeCont
             }
         }
         KeyCode::Char('i') => {
-            if !suggest::llm::is_available() {
+            // Ask Cosmos - only available from home (Suggestions step, not in workflow)
+            if app.workflow_step != WorkflowStep::Suggestions {
+                // Silently ignore during workflow
+            } else if !suggest::llm::is_available() {
                 app.show_toast("Run: cosmos --setup");
             } else {
                 app.start_question();

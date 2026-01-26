@@ -325,6 +325,7 @@ dependencies = [
  "futures",
  "git2",
  "keyring",
+ "libc",
  "ratatui",
  "regex",
  "reqwest",

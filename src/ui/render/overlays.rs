@@ -83,7 +83,7 @@ pub(super) fn render_help(frame: &mut Frame, scroll: usize) {
     help_text.extend(section_start("Actions"));
     help_text.push(section_spacer());
     help_text.push(key_row("↵", "Select / apply"));
-    help_text.push(key_row("a", "Ask Cosmos"));
+    help_text.push(key_row("i", "Ask Cosmos"));
     help_text.push(key_row("?", "Show help"));
     help_text.push(key_row("q", "Quit"));
     help_text.push(section_spacer());

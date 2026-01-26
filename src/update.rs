@@ -90,6 +90,69 @@ fn is_newer_version(latest: &str, current: &str) -> bool {
     }
 }
 
+/// Suppress stdout and stderr while running a closure.
+///
+/// The self_update crate prints status messages directly with println!
+/// which corrupts the TUI display. This function temporarily redirects
+/// stdout/stderr to /dev/null (or NUL on Windows) during the operation.
+#[cfg(unix)]
+fn suppress_output<F, T>(f: F) -> T
+where
+    F: FnOnce() -> T,
+{
+    use std::fs::File;
+    use std::os::unix::io::AsRawFd;
+
+    // Open /dev/null
+    let dev_null = match File::create("/dev/null") {
+        Ok(f) => f,
+        Err(_) => return f(), // Fall back to running unsuppressed
+    };
+
+    // Save original stdout/stderr
+    let stdout_fd = std::io::stdout().as_raw_fd();
+    let stderr_fd = std::io::stderr().as_raw_fd();
+
+    // SAFETY: We're duplicating valid file descriptors
+    let saved_stdout = unsafe { libc::dup(stdout_fd) };
+    let saved_stderr = unsafe { libc::dup(stderr_fd) };
+
+    if saved_stdout < 0 || saved_stderr < 0 {
+        return f(); // Fall back to running unsuppressed
+    }
+
+    // Redirect stdout/stderr to /dev/null
+    // SAFETY: We're redirecting to a valid file descriptor
+    unsafe {
+        libc::dup2(dev_null.as_raw_fd(), stdout_fd);
+        libc::dup2(dev_null.as_raw_fd(), stderr_fd);
+    }
+
+    // Run the closure
+    let result = f();
+
+    // Restore original stdout/stderr
+    // SAFETY: We're restoring valid saved file descriptors
+    unsafe {
+        libc::dup2(saved_stdout, stdout_fd);
+        libc::dup2(saved_stderr, stderr_fd);
+        libc::close(saved_stdout);
+        libc::close(saved_stderr);
+    }
+
+    result
+}
+
+/// Fallback for non-Unix platforms - just run without suppression.
+/// Windows terminals handle this differently and the issue is less pronounced.
+#[cfg(not(unix))]
+fn suppress_output<F, T>(f: F) -> T
+where
+    F: FnOnce() -> T,
+{
+    f()
+}
+
 /// Download and install the latest version from GitHub releases
 ///
 /// This function downloads the appropriate binary for the current platform,
@@ -106,7 +169,8 @@ where
     // Initial progress
     on_progress(5);
 
-    let status = Update::configure()
+    // Build the updater config (this doesn't print anything)
+    let updater = Update::configure()
         .repo_owner(REPO_OWNER)
         .repo_name(REPO_NAME)
         .bin_name(BIN_NAME)
@@ -115,9 +179,12 @@ where
         .show_download_progress(false)
         .no_confirm(true)
         .build()
-        .context("Failed to configure updater")?
-        .update_extended()
-        .context("Failed to download update")?;
+        .context("Failed to configure updater")?;
+
+    // Run the update with stdout/stderr suppressed to prevent the self_update
+    // crate's println! calls from corrupting the TUI display
+    let status =
+        suppress_output(|| updater.update_extended()).context("Failed to download update")?;
 
     // Update complete
     on_progress(100);
