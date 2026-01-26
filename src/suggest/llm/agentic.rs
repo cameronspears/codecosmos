@@ -12,7 +12,6 @@ use std::time::Duration;
 
 const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
 const REQUEST_TIMEOUT_SECS: u64 = 90; // Longer timeout for agentic loops
-const MAX_TOOL_ITERATIONS: usize = 10; // Prevent infinite loops
 
 /// Response from an agentic LLM call
 #[derive(Debug)]
@@ -136,13 +135,11 @@ pub async fn call_llm_agentic(
         },
     ];
 
-    for iteration in 0..MAX_TOOL_ITERATIONS {
-        let response_format = if json_mode && iteration == 0 {
-            // Only request JSON on final response, not during tool calls
-            None
-        } else {
-            None
-        };
+    loop {
+        // Note: json_mode is accepted for API compatibility but not currently used
+        // during the agentic loop since tool calls don't use JSON response format
+        let response_format: Option<ResponseFormat> = None;
+        let _ = json_mode; // Silence unused warning
 
         let request = ChatRequest {
             model: model.id().to_string(),
@@ -226,11 +223,6 @@ pub async fn call_llm_agentic(
 
         return Ok(AgenticResponse { content });
     }
-
-    Err(anyhow::anyhow!(
-        "Agentic loop exceeded maximum iterations ({})",
-        MAX_TOOL_ITERATIONS
-    ))
 }
 
 #[cfg(test)]
