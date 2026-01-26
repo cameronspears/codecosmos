@@ -1,7 +1,5 @@
 # *c o s m o s*
 
-*A contemplative companion for your codebase*
-
 ---
 
 Cosmos is a terminal-based AI code reviewer. Point it at your project, and it will scan for bugs, performance issues, and code smells. When you find something worth fixing, Cosmos creates a branch, applies the fix, runs an adversarial AI review to catch mistakes, and helps you ship a PR — all without leaving the terminal.
@@ -319,7 +317,3 @@ cargo test
 ## License
 
 MIT
-
----
-
-*"A contemplative companion for your codebase"*

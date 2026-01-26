@@ -31,9 +31,8 @@ use suggest::SuggestionEngine;
 #[derive(Parser, Debug)]
 #[command(
     name = "cosmos",
-    about = "A contemplative vibe coding companion",
+    about = "Terminal-based AI code reviewer",
     long_about = "C O S M O S\n\n\
-                  A contemplative companion for your codebase.\n\n\
                   Uses AST-based indexing and AI to suggest improvements,\n\
                   bug fixes, features, and optimizations.",
     version

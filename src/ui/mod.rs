@@ -1,19 +1,7 @@
-//! Cosmos UI - A contemplative dual-panel interface
+//! Cosmos UI module.
 //!
-//! Layout:
-//! ╔══════════════════════════════════════════════════════════════╗
-//! ║                      C O S M O S                             ║
-//! ║          a contemplative companion for your codebase         ║
-//! ╠═══════════════════════════╦══════════════════════════════════╣
-//! ║  PROJECT                  ║  SUGGESTIONS                     ║
-//! ║  ├── src/                 ║  ● Refactor: ai.rs has 715       ║
-//! ║  │   ├── main.rs      ●   ║    lines - split into modules    ║
-//! ║  │   ├── ui/              ║                                  ║
-//! ║  │   └── index/           ║  ◐ Quality: Missing tests for    ║
-//! ║  └── tests/               ║    public functions              ║
-//! ╠═══════════════════════════╩══════════════════════════════════╣
-//! ║  main ● 5 changed │ ? inquiry  ↵ view  a apply  q quit      ║
-//! ╚══════════════════════════════════════════════════════════════╝
+//! Renders a dual-panel terminal interface with header, main content, and footer.
+//! See `render/mod.rs` for the layout implementation.
 
 pub mod helpers;
 pub mod markdown;
