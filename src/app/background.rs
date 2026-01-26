@@ -497,6 +497,19 @@ pub fn drain_messages(app: &mut App, rx: &mpsc::Receiver<BackgroundMessage>, ctx
                     });
                 }
             }
+            BackgroundMessage::UpdateAvailable { latest_version } => {
+                // Store the available version - don't show overlay automatically
+                // Users can press U to see the update panel when ready
+                app.update_available = Some(latest_version);
+            }
+            BackgroundMessage::UpdateProgress { percent } => {
+                app.update_progress = Some(percent);
+                app.set_update_progress(percent);
+            }
+            BackgroundMessage::UpdateError(e) => {
+                app.update_progress = None;
+                app.set_update_error(e);
+            }
         }
     }
 }

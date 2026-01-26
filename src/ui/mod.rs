@@ -131,6 +131,12 @@ pub struct App {
 
     // Flag: generate suggestions once summaries complete (used at init and after reset)
     pub pending_suggestions_on_init: bool,
+
+    // Self-update state
+    /// Available update version (None if up to date or not yet checked)
+    pub update_available: Option<String>,
+    /// Update download progress (0-100), None if not downloading
+    pub update_progress: Option<u8>,
 }
 
 impl App {
@@ -192,6 +198,8 @@ impl App {
             pending_suggestions_on_init: false,
             git_refresh_error: None,
             git_refresh_error_at: None,
+            update_available: None,
+            update_progress: None,
         }
     }
 
@@ -847,6 +855,34 @@ impl App {
         } = &mut self.overlay
         {
             *confirming_discard = confirming;
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    //  UPDATE OVERLAY
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    /// Show the update available overlay
+    pub fn show_update_overlay(&mut self, current_version: String, target_version: String) {
+        self.overlay = Overlay::Update {
+            current_version,
+            target_version,
+            progress: None,
+            error: None,
+        };
+    }
+
+    /// Set update download progress
+    pub fn set_update_progress(&mut self, percent: u8) {
+        if let Overlay::Update { progress, .. } = &mut self.overlay {
+            *progress = Some(percent);
+        }
+    }
+
+    /// Set update error
+    pub fn set_update_error(&mut self, message: String) {
+        if let Overlay::Update { error, .. } = &mut self.overlay {
+            *error = Some(message);
         }
     }
 

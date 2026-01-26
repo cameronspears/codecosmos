@@ -93,6 +93,7 @@ pub(super) fn render_help(frame: &mut Frame, scroll: usize) {
     help_text.extend(section_start("Privacy"));
     help_text.push(section_spacer());
     help_text.push(key_row("R", "Reset Cosmos"));
+    help_text.push(key_row("U", "Check for updates"));
     help_text.push(section_spacer());
     help_text.push(section_end());
 
@@ -662,4 +663,128 @@ pub(super) fn render_startup_check(
     ];
     let footer = Paragraph::new(footer_lines);
     frame.render_widget(footer, footer_area);
+}
+
+pub(super) fn render_update_overlay(
+    frame: &mut Frame,
+    current_version: &str,
+    target_version: &str,
+    progress: Option<u8>,
+    error: Option<&str>,
+) {
+    let area = centered_rect(50, 40, frame.area());
+    frame.render_widget(Clear, area);
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    // Header
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "  A new version of Cosmos is available",
+        Style::default()
+            .fg(Theme::WHITE)
+            .add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(""));
+
+    // Version info
+    lines.push(Line::from(vec![
+        Span::styled(
+            "    Current version:  ",
+            Style::default().fg(Theme::GREY_400),
+        ),
+        Span::styled(
+            format!("v{}", current_version),
+            Style::default().fg(Theme::GREY_300),
+        ),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(
+            "    New version:      ",
+            Style::default().fg(Theme::GREY_400),
+        ),
+        Span::styled(
+            format!("v{}", target_version),
+            Style::default()
+                .fg(Theme::GREEN)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]));
+    lines.push(Line::from(""));
+
+    // Progress or error display
+    if let Some(err) = error {
+        lines.push(Line::from(Span::styled(
+            format!("  Error: {}", err),
+            Style::default().fg(Theme::RED),
+        )));
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "  Press Enter to retry or Esc to cancel.",
+            Style::default().fg(Theme::GREY_400),
+        )));
+    } else if let Some(pct) = progress {
+        // Show progress bar
+        let bar_width = 30;
+        let filled = (pct as usize * bar_width) / 100;
+        let empty = bar_width - filled;
+
+        let progress_bar = format!("  [{}{}] {}%", "█".repeat(filled), "░".repeat(empty), pct);
+
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            progress_bar,
+            Style::default().fg(Theme::ACCENT),
+        )));
+        lines.push(Line::from(""));
+
+        if pct < 100 {
+            lines.push(Line::from(Span::styled(
+                "  Downloading update...",
+                Style::default().fg(Theme::GREY_400),
+            )));
+        } else {
+            lines.push(Line::from(Span::styled(
+                "  Restarting...",
+                Style::default().fg(Theme::GREEN),
+            )));
+        }
+    } else {
+        // Not started - show confirmation prompt
+        lines.push(Line::from(Span::styled(
+            "  Would you like to download and install it?",
+            Style::default().fg(Theme::GREY_300),
+        )));
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "  ─────────────────────────────────────────",
+            Style::default().fg(Theme::GREY_600),
+        )));
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled("   ", Style::default()),
+            Span::styled(" y ", Style::default().fg(Theme::GREY_900).bg(Theme::GREEN)),
+            Span::styled(" Yes, update  ", Style::default().fg(Theme::GREY_300)),
+            Span::styled(
+                " n ",
+                Style::default().fg(Theme::GREY_900).bg(Theme::GREY_500),
+            ),
+            Span::styled(" No, later", Style::default().fg(Theme::GREY_400)),
+        ]));
+    }
+
+    lines.push(Line::from(""));
+
+    let block = Block::default()
+        .title(" Update Available ")
+        .title_style(Style::default().fg(Theme::GREY_100))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Theme::GREEN))
+        .style(Style::default().bg(Theme::GREY_800));
+
+    let paragraph = Paragraph::new(lines)
+        .block(block)
+        .wrap(Wrap { trim: false });
+
+    frame.render_widget(paragraph, area);
 }

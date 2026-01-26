@@ -976,6 +976,17 @@ pub(super) fn handle_normal_mode(app: &mut App, key: KeyEvent, ctx: &RuntimeCont
             // Open reset cosmos overlay
             app.open_reset_overlay();
         }
+        KeyCode::Char('U') => {
+            // Show update overlay if update is available
+            if let Some(target_version) = app.update_available.clone() {
+                app.show_update_overlay(crate::update::CURRENT_VERSION.to_string(), target_version);
+            } else {
+                app.show_toast(&format!(
+                    "Already running latest version (v{})",
+                    crate::update::CURRENT_VERSION
+                ));
+            }
+        }
         _ => {}
     }
 

@@ -120,6 +120,17 @@ pub enum Overlay {
         /// True when showing "are you sure?" confirmation for discard
         confirming_discard: bool,
     },
+    /// Update available panel - shown when a new version is detected
+    Update {
+        /// Currently installed version
+        current_version: String,
+        /// New version available
+        target_version: String,
+        /// Download progress (None = not started, Some(0-100) = downloading)
+        progress: Option<u8>,
+        /// Error message if update failed
+        error: Option<String>,
+    },
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

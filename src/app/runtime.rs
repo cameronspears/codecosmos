@@ -132,6 +132,21 @@ pub async fn run_tui(
     // Create channel for background tasks
     let (tx, rx) = mpsc::channel::<BackgroundMessage>();
 
+    // ═══════════════════════════════════════════════════════════════════════
+    //  BACKGROUND VERSION CHECK
+    // ═══════════════════════════════════════════════════════════════════════
+    {
+        let tx_update = tx.clone();
+        background::spawn_background(tx.clone(), "version_check", async move {
+            // Check for updates (silently fail if network unavailable)
+            if let Ok(Some(update_info)) = crate::update::check_for_update().await {
+                let _ = tx_update.send(BackgroundMessage::UpdateAvailable {
+                    latest_version: update_info.latest_version,
+                });
+            }
+        });
+    }
+
     // AI grouping enhancement: low-confidence files only, capped for safety
     if grouping_ai_enabled && ai_enabled {
         let max_files =

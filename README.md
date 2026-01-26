@@ -174,7 +174,17 @@ Suggestions are sorted by priority and relevance — issues in files you've rece
 
 ## Updating Cosmos
 
-Re-run the install command from the [Installation](#installation) section, or use `cargo install cosmos-tui`.
+Cosmos checks for updates automatically on startup. When a new version is available, you'll see a subtle `U update` indicator in the footer.
+
+**To update:**
+1. Press `U` to open the update panel
+2. Cosmos will ask: "Would you like to download and install it?"
+3. Press `y` to confirm and install, or `n` to decline
+4. If you confirm, Cosmos downloads the update and restarts automatically
+
+Updates are completely optional - you can continue working and update whenever you're ready.
+
+**Alternative:** Re-run the install command from the [Installation](#installation) section, or use `cargo install cosmos-tui`.
 
 ---
 

@@ -89,4 +89,14 @@ pub enum BackgroundMessage {
         description: String,
         usage: Option<suggest::llm::Usage>,
     },
+    /// New version available - show update panel
+    UpdateAvailable {
+        latest_version: String,
+    },
+    /// Update download progress (0-100)
+    UpdateProgress {
+        percent: u8,
+    },
+    /// Update failed
+    UpdateError(String),
 }

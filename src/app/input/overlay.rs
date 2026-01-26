@@ -147,6 +147,81 @@ pub(super) fn handle_overlay_input(
             return Ok(());
         }
 
+        // Handle Update overlay
+        if let Overlay::Update {
+            target_version,
+            progress,
+            error,
+            ..
+        } = &app.overlay
+        {
+            let is_downloading = progress.is_some() && error.is_none();
+            let has_error = error.is_some();
+            let target = target_version.clone();
+
+            match key.code {
+                // Decline update: n, Esc, or q
+                KeyCode::Char('n') | KeyCode::Esc | KeyCode::Char('q') => {
+                    // Can dismiss if not currently downloading
+                    if !is_downloading {
+                        app.close_overlay();
+                    }
+                }
+                // Accept update: y or Enter
+                KeyCode::Char('y') | KeyCode::Enter => {
+                    // Start download if not already downloading and no error
+                    if !is_downloading && !has_error {
+                        // Set initial progress
+                        app.set_update_progress(0);
+                        app.update_progress = Some(0);
+
+                        let tx_update = ctx.tx.clone();
+                        let tx_error = ctx.tx.clone();
+
+                        // Run update in a blocking task since self_update is sync
+                        background::spawn_background(ctx.tx.clone(), "run_update", async move {
+                            // self_update is blocking, so we run it in spawn_blocking
+                            let result = tokio::task::spawn_blocking(move || {
+                                crate::update::run_update(&target, move |percent| {
+                                    let _ = tx_update
+                                        .send(BackgroundMessage::UpdateProgress { percent });
+                                })
+                            })
+                            .await;
+
+                            match result {
+                                Ok(Ok(())) => {
+                                    // This shouldn't happen since run_update execs
+                                    // But if it does (already up to date), we're done
+                                }
+                                Ok(Err(e)) => {
+                                    let _ = tx_error
+                                        .send(BackgroundMessage::UpdateError(e.to_string()));
+                                }
+                                Err(e) => {
+                                    let _ = tx_error.send(BackgroundMessage::UpdateError(format!(
+                                        "Update task failed: {}",
+                                        e
+                                    )));
+                                }
+                            }
+                        });
+                    } else if has_error {
+                        // Retry on error - reset and allow starting again
+                        if let Overlay::Update {
+                            progress, error, ..
+                        } = &mut app.overlay
+                        {
+                            *progress = None;
+                            *error = None;
+                        }
+                    }
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
+
         // Handle other overlays (generic scroll/close)
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => app.close_overlay(),

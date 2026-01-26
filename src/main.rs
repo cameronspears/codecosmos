@@ -15,6 +15,7 @@ mod index;
 mod onboarding;
 mod suggest;
 mod ui;
+mod update;
 mod util;
 
 // Keep these for compatibility during transition

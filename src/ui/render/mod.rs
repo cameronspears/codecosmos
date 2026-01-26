@@ -16,7 +16,10 @@ use ratatui::{
 use footer::render_footer;
 use header::render_header;
 use main::render_main;
-use overlays::{render_file_detail, render_help, render_reset_overlay, render_startup_check};
+use overlays::{
+    render_file_detail, render_help, render_reset_overlay, render_startup_check,
+    render_update_overlay,
+};
 use toast::render_toast;
 
 /// Main render function
@@ -67,6 +70,20 @@ pub fn render(frame: &mut Frame, app: &App) {
                 main_branch,
                 *scroll,
                 *confirming_discard,
+            );
+        }
+        Overlay::Update {
+            current_version,
+            target_version,
+            progress,
+            error,
+        } => {
+            render_update_overlay(
+                frame,
+                current_version,
+                target_version,
+                *progress,
+                error.as_deref(),
             );
         }
         Overlay::None => {}

@@ -258,6 +258,15 @@ pub(super) fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
         spans.push(Span::styled(" undo ", Style::default().fg(Theme::GREY_400)));
     }
 
+    // Update available indicator (subtle, non-intrusive)
+    if app.update_available.is_some() {
+        spans.push(Span::styled(
+            " U ",
+            Style::default().fg(Theme::GREY_900).bg(Theme::GREEN),
+        ));
+        spans.push(Span::styled(" update ", Style::default().fg(Theme::GREEN)));
+    }
+
     // Help and quit (always shown)
     spans.push(Span::styled(
         " ? ",
