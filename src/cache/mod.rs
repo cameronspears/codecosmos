@@ -927,7 +927,9 @@ impl Cache {
         }
         let _lock = self.lock(false).ok()?;
         let content = fs::read_to_string(&path).ok()?;
-        serde_json::from_str(&content).ok()
+        let mut cache: QuestionCache = serde_json::from_str(&content).ok()?;
+        cache.cleanup();
+        Some(cache)
     }
 
     /// Save question answer cache
