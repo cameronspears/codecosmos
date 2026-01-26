@@ -400,6 +400,14 @@ pub fn drain_messages(app: &mut App, rx: &mpsc::Receiver<BackgroundMessage>, ctx
                     app.show_toast(&format!("Reset complete: {}", labels.join(", ")));
                 }
             }
+            BackgroundMessage::StashComplete { message } => {
+                app.loading = LoadingState::None;
+                app.show_toast(&format!("Changes saved: {}", message));
+            }
+            BackgroundMessage::DiscardComplete => {
+                app.loading = LoadingState::None;
+                app.show_toast("Changes discarded - starting fresh");
+            }
             BackgroundMessage::Error(e) => {
                 app.loading = LoadingState::None;
                 app.show_toast(&truncate(&e, 100));

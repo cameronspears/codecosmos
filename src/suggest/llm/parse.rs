@@ -461,19 +461,14 @@ pub(crate) fn parse_summaries_response(
         }
     }
 
-    // Final fallback: provide helpful error
-    let preview = if json_str.len() > 200 {
-        format!("{}...", &json_str[..200])
-    } else {
-        json_str.to_string()
-    };
+    // Final fallback: provide helpful error without dumping raw JSON
     Err(anyhow::anyhow!(
-        "Could not extract summaries from response. Preview: {}",
-        preview
+        "Summary response format unexpected. The AI response may have been truncated or malformed."
     ))
 }
 
 /// Parse response containing both summaries and domain terms
+#[derive(Debug)]
 pub(crate) struct SummariesAndTerms {
     pub summaries: HashMap<PathBuf, String>,
     pub terms: HashMap<String, String>,
@@ -485,7 +480,7 @@ pub(crate) fn parse_summaries_and_terms_response(
     root: &Path,
 ) -> anyhow::Result<SummariesAndTerms> {
     let json_str = extract_json_object(response)
-        .ok_or_else(|| anyhow::anyhow!("No JSON object found in response"))?;
+        .ok_or_else(|| anyhow::anyhow!("Summary response missing JSON structure"))?;
     let json_str = fix_json_issues(json_str);
 
     // Try to parse as the expected format: {summaries: {...}, terms: {...}}
@@ -494,8 +489,9 @@ pub(crate) fn parse_summaries_and_terms_response(
         let mut terms = HashMap::new();
         let mut terms_by_file = HashMap::new();
 
-        // Extract summaries
+        // Extract summaries - handle both string values and other types
         if let Some(summaries_obj) = wrapper.get("summaries") {
+            // First try direct parse as HashMap<String, String>
             if let Ok(parsed) =
                 serde_json::from_value::<HashMap<String, String>>(summaries_obj.clone())
             {
@@ -503,14 +499,36 @@ pub(crate) fn parse_summaries_and_terms_response(
                     .into_iter()
                     .map(|(path, summary)| (normalize_path_str(&path, root), summary))
                     .collect();
+            } else if let Some(obj) = summaries_obj.as_object() {
+                // Fallback: manually extract values, converting non-strings to string repr
+                for (path, value) in obj {
+                    let summary = match value {
+                        serde_json::Value::String(s) => s.clone(),
+                        serde_json::Value::Null => continue, // Skip null values
+                        other => {
+                            // Convert objects/arrays/etc to compact string representation
+                            // This handles cases where LLM returns nested objects
+                            other.to_string()
+                        }
+                    };
+                    if !summary.is_empty() {
+                        summaries.insert(normalize_path_str(path, root), summary);
+                    }
+                }
             }
         }
 
-        // Extract terms
+        // Extract terms - same robust handling
         if let Some(terms_obj) = wrapper.get("terms") {
             if let Ok(parsed) = serde_json::from_value::<HashMap<String, String>>(terms_obj.clone())
             {
                 terms = parsed;
+            } else if let Some(obj) = terms_obj.as_object() {
+                for (term, value) in obj {
+                    if let serde_json::Value::String(def) = value {
+                        terms.insert(term.clone(), def.clone());
+                    }
+                }
             }
         }
 
@@ -576,5 +594,101 @@ mod tests {
         let parsed = parse_codebase_suggestions(json).unwrap();
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].summary, "Issue");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    //  SUMMARY PARSING ROBUSTNESS TESTS
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_parse_summaries_valid_structure() {
+        let json = r#"{"summaries": {"src/main.rs": "Entry point", "src/lib.rs": "Library"}}"#;
+        let root = std::path::Path::new("/project");
+        let result = parse_summaries_and_terms_response(json, root).unwrap();
+        assert_eq!(result.summaries.len(), 2);
+        assert!(result.summaries.values().any(|v| v == "Entry point"));
+    }
+
+    #[test]
+    fn test_parse_summaries_with_terms() {
+        let json = r#"{
+            "summaries": {"src/main.rs": "Entry point"},
+            "terms": {"Widget": "A UI component"}
+        }"#;
+        let root = std::path::Path::new("/project");
+        let result = parse_summaries_and_terms_response(json, root).unwrap();
+        assert_eq!(result.summaries.len(), 1);
+        assert_eq!(
+            result.terms.get("Widget"),
+            Some(&"A UI component".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_summaries_handles_nested_objects() {
+        // LLM sometimes returns objects instead of strings - we should handle gracefully
+        let json =
+            r#"{"summaries": {"src/main.rs": {"description": "Entry point", "role": "main"}}}"#;
+        let root = std::path::Path::new("/project");
+        let result = parse_summaries_and_terms_response(json, root).unwrap();
+        // Should convert the object to a string representation rather than fail
+        assert_eq!(result.summaries.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_summaries_handles_null_values() {
+        // Null values should be skipped, not cause failure
+        let json = r#"{"summaries": {"src/main.rs": "Entry point", "src/empty.rs": null}}"#;
+        let root = std::path::Path::new("/project");
+        let result = parse_summaries_and_terms_response(json, root).unwrap();
+        assert_eq!(result.summaries.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_summaries_handles_markdown_fences() {
+        let json = "```json\n{\"summaries\": {\"src/main.rs\": \"Entry point\"}}\n```";
+        let root = std::path::Path::new("/project");
+        let result = parse_summaries_and_terms_response(json, root).unwrap();
+        assert_eq!(result.summaries.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_summaries_error_is_user_friendly() {
+        // Error messages should not dump raw JSON
+        let bad_json = "this is not json at all";
+        let root = std::path::Path::new("/project");
+        let err = parse_summaries_and_terms_response(bad_json, root).unwrap_err();
+        let err_msg = err.to_string();
+        // Should be a clean message, not contain the raw input
+        assert!(!err_msg.contains("this is not json"));
+        assert!(err_msg.contains("JSON") || err_msg.contains("response"));
+    }
+
+    #[test]
+    fn test_parse_summaries_fallback_to_simple_format() {
+        // If no "summaries" key, try parsing as direct {path: summary} object
+        let json = r#"{"src/main.rs": "Entry point", "src/lib.rs": "Library"}"#;
+        let root = std::path::Path::new("/project");
+        let result = parse_summaries_and_terms_response(json, root).unwrap();
+        assert_eq!(result.summaries.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_summaries_handles_trailing_commas() {
+        // Common LLM mistake - trailing commas
+        let json = r#"{"summaries": {"src/main.rs": "Entry point",}}"#;
+        let root = std::path::Path::new("/project");
+        let result = parse_summaries_and_terms_response(json, root).unwrap();
+        assert_eq!(result.summaries.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_summaries_empty_response_returns_empty() {
+        // Empty object returns empty results rather than failing - graceful handling
+        let json = "{}";
+        let root = std::path::Path::new("/project");
+        let result = parse_summaries_and_terms_response(json, root).unwrap();
+        assert!(result.summaries.is_empty());
+        assert!(result.terms.is_empty());
     }
 }

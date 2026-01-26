@@ -288,18 +288,15 @@ pub async fn generate_summaries_for_files(
                     }
 
                     if !missing_files.is_empty() {
-                        eprintln!(
-                            "Warning: {} summaries missing from batch response",
-                            missing_files.len()
-                        );
+                        // Track missing files for retry; caller handles user notification
                         for missing in missing_files {
                             failed_files.insert(missing);
                         }
                     }
                 }
-                Err(e) => {
-                    // Log error but continue with other batches
-                    eprintln!("Warning: Failed to generate summaries for batch: {}", e);
+                Err(_e) => {
+                    // Batch failed - track files for caller to handle
+                    // Error details are internal; user sees "X files failed" via UI
                     for file in batch_files {
                         failed_files.insert(file);
                     }
@@ -374,6 +371,7 @@ pub fn prioritize_files_for_summary(
 
 /// Generate summaries for a single batch of files
 /// Also extracts domain-specific terminology for the glossary
+/// Includes automatic retry with self-correction on parse failure
 async fn generate_summary_batch(
     index: &CodebaseIndex,
     files: &[PathBuf],
@@ -384,18 +382,46 @@ async fn generate_summary_batch(
     let response =
         call_llm_with_usage(SUMMARY_BATCH_SYSTEM, &user_prompt, Model::Speed, true).await?;
 
-    let SummariesAndTerms {
-        summaries,
-        terms,
-        terms_by_file,
-    } = parse_summaries_and_terms_response(&response.content, &index.root)?;
+    // Try to parse the response
+    match parse_summaries_and_terms_response(&response.content, &index.root) {
+        Ok(SummariesAndTerms {
+            summaries,
+            terms,
+            terms_by_file,
+        }) => Ok(SummaryBatchResult {
+            summaries,
+            terms,
+            terms_by_file,
+            usage: response.usage,
+        }),
+        Err(initial_error) => {
+            // Parse failed - try self-correction
+            let correction_response = super::parse::request_json_correction_generic(
+                &response.content,
+                &initial_error.to_string(),
+                "file summaries",
+            )
+            .await?;
 
-    Ok(SummaryBatchResult {
-        summaries,
-        terms,
-        terms_by_file,
-        usage: response.usage,
-    })
+            // Merge usage from both calls
+            let combined_usage =
+                super::parse::merge_usage(response.usage, correction_response.usage);
+
+            // Try parsing the corrected response
+            let SummariesAndTerms {
+                summaries,
+                terms,
+                terms_by_file,
+            } = parse_summaries_and_terms_response(&correction_response.content, &index.root)?;
+
+            Ok(SummaryBatchResult {
+                summaries,
+                terms,
+                terms_by_file,
+                usage: combined_usage,
+            })
+        }
+    }
 }
 
 /// Build context for a batch of files

@@ -574,6 +574,102 @@ pub fn restore_file(repo_path: &Path, file_path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Stash uncommitted changes with a descriptive message
+/// Returns the stash message used (for display purposes)
+pub fn stash_changes(repo_path: &Path) -> Result<String> {
+    let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M");
+    let message = format!("cosmos: saved work ({})", timestamp);
+
+    let mut cmd = Command::new("git");
+    cmd.current_dir(repo_path)
+        .args(["stash", "push", "-m", &message, "--include-untracked"]);
+
+    let output = run_command_with_timeout(&mut cmd, Duration::from_secs(30))
+        .map_err(|e| anyhow::anyhow!("Failed to execute git stash: {}", e))?;
+
+    if output.timed_out {
+        return Err(anyhow::anyhow!("git stash timed out after 30s"));
+    }
+
+    if output
+        .status
+        .map(|s: std::process::ExitStatus| s.success())
+        .unwrap_or(false)
+    {
+        Ok(message)
+    } else {
+        // Check if "No local changes to save" which is actually fine
+        if output.stdout.contains("No local changes") || output.stderr.contains("No local changes")
+        {
+            Ok("No changes to stash".to_string())
+        } else {
+            Err(anyhow::anyhow!("git stash failed: {}", output.stderr))
+        }
+    }
+}
+
+/// Discard all uncommitted changes (both staged and unstaged)
+/// This resets the working directory to HEAD
+pub fn discard_all_changes(repo_path: &Path) -> Result<()> {
+    // First, reset staged changes
+    let mut reset_cmd = Command::new("git");
+    reset_cmd.current_dir(repo_path).args(["reset", "HEAD"]);
+    let reset_output = run_command_with_timeout(&mut reset_cmd, Duration::from_secs(30))
+        .map_err(|e| anyhow::anyhow!("Failed to execute git reset: {}", e))?;
+
+    if reset_output.timed_out {
+        return Err(anyhow::anyhow!("git reset timed out"));
+    }
+
+    // Then, checkout all tracked files to discard modifications
+    // Use "git checkout HEAD -- ." which handles empty repos better
+    let mut checkout_cmd = Command::new("git");
+    checkout_cmd
+        .current_dir(repo_path)
+        .args(["checkout", "HEAD", "--", "."]);
+    let checkout_output = run_command_with_timeout(&mut checkout_cmd, Duration::from_secs(30))
+        .map_err(|e| anyhow::anyhow!("Failed to execute git checkout: {}", e))?;
+
+    if checkout_output.timed_out {
+        return Err(anyhow::anyhow!("git checkout timed out"));
+    }
+
+    // Checkout can fail with "did not match any file(s)" if there are no tracked files
+    // This is not an error - it just means there's nothing to checkout
+    let checkout_ok = checkout_output
+        .status
+        .map(|s: std::process::ExitStatus| s.success())
+        .unwrap_or(false);
+    let checkout_no_files = checkout_output.stderr.contains("did not match any file");
+
+    if !checkout_ok && !checkout_no_files {
+        return Err(anyhow::anyhow!(
+            "git checkout failed: {}",
+            checkout_output.stderr
+        ));
+    }
+
+    // Finally, clean untracked files
+    let mut clean_cmd = Command::new("git");
+    clean_cmd.current_dir(repo_path).args(["clean", "-fd"]); // -f force, -d directories
+    let clean_output = run_command_with_timeout(&mut clean_cmd, Duration::from_secs(30))
+        .map_err(|e| anyhow::anyhow!("Failed to execute git clean: {}", e))?;
+
+    if clean_output.timed_out {
+        return Err(anyhow::anyhow!("git clean timed out"));
+    }
+
+    if !clean_output
+        .status
+        .map(|s: std::process::ExitStatus| s.success())
+        .unwrap_or(false)
+    {
+        return Err(anyhow::anyhow!("git clean failed: {}", clean_output.stderr));
+    }
+
+    Ok(())
+}
+
 /// Open a URL in the default browser
 pub fn open_url(url: &str) -> Result<()> {
     #[cfg(target_os = "macos")]
@@ -826,5 +922,173 @@ mod tests {
         let result = read_file_from_head(&repo_path, Path::new("definitely-not-a-real-file.xyz"));
         assert!(result.is_ok());
         assert!(result.unwrap().is_none());
+    }
+
+    // ========================================================================
+    // Stash and Discard Tests
+    // ========================================================================
+
+    /// Helper to create a temporary git repo for testing
+    fn create_temp_repo() -> (tempfile::TempDir, std::path::PathBuf) {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let repo_path = temp_dir.path().to_path_buf();
+
+        // Initialize git repo
+        Repository::init(&repo_path).expect("Failed to init repo");
+
+        // Configure git user (required for commits)
+        let repo = Repository::open(&repo_path).unwrap();
+        let mut config = repo.config().unwrap();
+        config.set_str("user.name", "Test User").unwrap();
+        config.set_str("user.email", "test@example.com").unwrap();
+
+        // Create initial commit so HEAD exists
+        let sig = Signature::now("Test User", "test@example.com").unwrap();
+        let tree_id = repo.index().unwrap().write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "Initial commit", &tree, &[])
+            .unwrap();
+
+        (temp_dir, repo_path)
+    }
+
+    #[test]
+    fn test_stash_changes_with_modifications() {
+        let (_temp_dir, repo_path) = create_temp_repo();
+
+        // Create a file and commit it
+        let test_file = repo_path.join("test.txt");
+        std::fs::write(&test_file, "original content").unwrap();
+
+        let repo = Repository::open(&repo_path).unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("test.txt")).unwrap();
+        index.write().unwrap();
+
+        let sig = Signature::now("Test User", "test@example.com").unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let parent = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "Add test file", &tree, &[&parent])
+            .unwrap();
+
+        // Now modify the file
+        std::fs::write(&test_file, "modified content").unwrap();
+
+        // Stash the changes
+        let result = stash_changes(&repo_path);
+        assert!(result.is_ok(), "stash_changes failed: {:?}", result);
+
+        let message = result.unwrap();
+        assert!(
+            message.contains("cosmos: saved work"),
+            "Stash message should contain 'cosmos: saved work', got: {}",
+            message
+        );
+
+        // Verify the file is back to original content
+        let content = std::fs::read_to_string(&test_file).unwrap();
+        assert_eq!(content, "original content");
+    }
+
+    #[test]
+    fn test_stash_changes_no_changes() {
+        let (_temp_dir, repo_path) = create_temp_repo();
+
+        // Stash with no changes
+        let result = stash_changes(&repo_path);
+        assert!(result.is_ok());
+
+        let message = result.unwrap();
+        // Should indicate no changes to stash (or successfully stash nothing)
+        assert!(
+            message.contains("No changes") || message.contains("cosmos: saved work"),
+            "Expected success message, got: {}",
+            message
+        );
+    }
+
+    #[test]
+    fn test_discard_all_changes_modified_file() {
+        let (_temp_dir, repo_path) = create_temp_repo();
+
+        // Create a file and commit it
+        let test_file = repo_path.join("test.txt");
+        std::fs::write(&test_file, "original content").unwrap();
+
+        let repo = Repository::open(&repo_path).unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("test.txt")).unwrap();
+        index.write().unwrap();
+
+        let sig = Signature::now("Test User", "test@example.com").unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let parent = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "Add test file", &tree, &[&parent])
+            .unwrap();
+
+        // Modify the file
+        std::fs::write(&test_file, "modified content").unwrap();
+
+        // Discard changes
+        let result = discard_all_changes(&repo_path);
+        assert!(result.is_ok(), "discard_all_changes failed: {:?}", result);
+
+        // Verify the file is back to original content
+        let content = std::fs::read_to_string(&test_file).unwrap();
+        assert_eq!(content, "original content");
+    }
+
+    #[test]
+    fn test_discard_all_changes_untracked_file() {
+        let (_temp_dir, repo_path) = create_temp_repo();
+
+        // Create an untracked file
+        let untracked_file = repo_path.join("untracked.txt");
+        std::fs::write(&untracked_file, "untracked content").unwrap();
+        assert!(untracked_file.exists());
+
+        // Discard changes (should clean untracked files)
+        let result = discard_all_changes(&repo_path);
+        assert!(result.is_ok(), "discard_all_changes failed: {:?}", result);
+
+        // Verify the untracked file is removed
+        assert!(!untracked_file.exists(), "Untracked file should be removed");
+    }
+
+    #[test]
+    fn test_discard_all_changes_staged_file() {
+        let (_temp_dir, repo_path) = create_temp_repo();
+
+        // Create a file and commit it
+        let test_file = repo_path.join("test.txt");
+        std::fs::write(&test_file, "original content").unwrap();
+
+        let repo = Repository::open(&repo_path).unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("test.txt")).unwrap();
+        index.write().unwrap();
+
+        let sig = Signature::now("Test User", "test@example.com").unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let parent = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "Add test file", &tree, &[&parent])
+            .unwrap();
+
+        // Modify and stage the file
+        std::fs::write(&test_file, "staged content").unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("test.txt")).unwrap();
+        index.write().unwrap();
+
+        // Discard changes (should unstage and revert)
+        let result = discard_all_changes(&repo_path);
+        assert!(result.is_ok(), "discard_all_changes failed: {:?}", result);
+
+        // Verify the file is back to original content
+        let content = std::fs::read_to_string(&test_file).unwrap();
+        assert_eq!(content, "original content");
     }
 }

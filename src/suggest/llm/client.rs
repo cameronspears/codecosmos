@@ -125,16 +125,6 @@ fn is_retryable_network_error(err: &reqwest::Error) -> bool {
     err.is_timeout() || err.is_connect()
 }
 
-fn network_error_label(err: &reqwest::Error) -> &'static str {
-    if err.is_timeout() {
-        "timeout"
-    } else if err.is_connect() {
-        "connection"
-    } else {
-        "network"
-    }
-}
-
 /// Call LLM API with full response including usage stats
 /// Includes automatic retry with exponential backoff for rate limits
 pub(crate) async fn call_llm_with_usage(
@@ -203,13 +193,7 @@ pub(crate) async fn call_llm_with_usage(
                 if is_retryable_network_error(&err) && retry_count < MAX_RETRIES {
                     retry_count += 1;
                     let retry_after = backoff_secs(retry_count);
-                    eprintln!(
-                        "  OpenRouter {} error. Retrying in {}s (attempt {}/{})",
-                        network_error_label(&err),
-                        retry_after,
-                        retry_count,
-                        MAX_RETRIES
-                    );
+                    // Silent retry - final error shown via toast if all retries fail
                     tokio::time::sleep(tokio::time::Duration::from_secs(retry_after)).await;
                     continue;
                 }
@@ -225,13 +209,7 @@ pub(crate) async fn call_llm_with_usage(
                 if is_retryable_network_error(&err) && retry_count < MAX_RETRIES {
                     retry_count += 1;
                     let retry_after = backoff_secs(retry_count);
-                    eprintln!(
-                        "  OpenRouter {} error. Retrying in {}s (attempt {}/{})",
-                        network_error_label(&err),
-                        retry_after,
-                        retry_count,
-                        MAX_RETRIES
-                    );
+                    // Silent retry - final error shown via toast if all retries fail
                     tokio::time::sleep(tokio::time::Duration::from_secs(retry_after)).await;
                     continue;
                 }
@@ -252,10 +230,7 @@ pub(crate) async fn call_llm_with_usage(
                 if is_retryable && retry_count < MAX_RETRIES {
                     retry_count += 1;
                     let retry_after = backoff_secs(retry_count);
-                    eprintln!(
-                        "  OpenRouter upstream error. Retrying in {}s (attempt {}/{})",
-                        retry_after, retry_count, MAX_RETRIES
-                    );
+                    // Silent retry - final error shown via toast if all retries fail
                     tokio::time::sleep(tokio::time::Duration::from_secs(retry_after)).await;
                     continue;
                 }
@@ -291,10 +266,7 @@ pub(crate) async fn call_llm_with_usage(
             // Try to parse retry-after
             let retry_after = parse_retry_after(&text).unwrap_or_else(|| backoff_secs(retry_count));
 
-            eprintln!(
-                "  OpenRouter rate limited. Retrying in {}s (attempt {}/{})",
-                retry_after, retry_count, MAX_RETRIES
-            );
+            // Silent retry - rate limit shown via toast if all retries fail
             tokio::time::sleep(tokio::time::Duration::from_secs(retry_after)).await;
             continue;
         }
@@ -303,10 +275,7 @@ pub(crate) async fn call_llm_with_usage(
         if status.is_server_error() && retry_count < MAX_RETRIES {
             retry_count += 1;
             let retry_after = backoff_secs(retry_count);
-            eprintln!(
-                "  OpenRouter server error ({}). Retrying in {}s (attempt {}/{})",
-                status, retry_after, retry_count, MAX_RETRIES
-            );
+            // Silent retry - final error shown via toast if all retries fail
             tokio::time::sleep(tokio::time::Duration::from_secs(retry_after)).await;
             continue;
         }

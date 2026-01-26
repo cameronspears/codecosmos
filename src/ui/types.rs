@@ -71,6 +71,8 @@ pub enum LoadingState {
     ApplyingReviewFixes, // Applying fixes from review
     Resetting,           // Clearing cache/data
     Answering,           // For question answering
+    Stashing,            // Saving work via git stash
+    Discarding,          // Discarding uncommitted changes
 }
 
 impl LoadingState {

@@ -73,32 +73,74 @@ pub(super) fn handle_overlay_input(
                 KeyCode::Up => {
                     app.overlay_scroll_up();
                 }
+                // === Confirmation mode handlers ===
                 KeyCode::Char('y') if confirming => {
-                    // Discard changes and continue
+                    // Confirm discard - actually discard changes
+                    app.loading = LoadingState::Discarding;
                     app.close_overlay();
-                    app.should_quit = true;
+                    let tx = ctx.tx.clone();
+                    let repo_path = app.repo_path.clone();
+                    background::spawn_background(ctx.tx.clone(), "discard_changes", async move {
+                        match crate::git_ops::discard_all_changes(&repo_path) {
+                            Ok(()) => {
+                                let _ = tx.send(BackgroundMessage::DiscardComplete);
+                            }
+                            Err(e) => {
+                                let _ = tx.send(BackgroundMessage::Error(e.to_string()));
+                            }
+                        }
+                    });
                 }
-                KeyCode::Enter => {
-                    if confirming {
-                        // Discard changes and continue
-                        app.close_overlay();
-                        app.should_quit = true;
-                    } else {
-                        app.startup_check_confirm_discard(true);
-                    }
-                }
-                KeyCode::Char('d') if confirming => {
-                    // Discard changes and continue
+                KeyCode::Enter if confirming => {
+                    // Confirm discard via Enter
+                    app.loading = LoadingState::Discarding;
                     app.close_overlay();
-                    app.should_quit = true;
-                }
-                KeyCode::Char('c') if confirming => {
-                    // Cancel discard confirmation
-                    app.startup_check_confirm_discard(false);
+                    let tx = ctx.tx.clone();
+                    let repo_path = app.repo_path.clone();
+                    background::spawn_background(ctx.tx.clone(), "discard_changes", async move {
+                        match crate::git_ops::discard_all_changes(&repo_path) {
+                            Ok(()) => {
+                                let _ = tx.send(BackgroundMessage::DiscardComplete);
+                            }
+                            Err(e) => {
+                                let _ = tx.send(BackgroundMessage::Error(e.to_string()));
+                            }
+                        }
+                    });
                 }
                 KeyCode::Char('n') if confirming => {
-                    // Cancel confirmation
+                    // Cancel confirmation - go back to main menu
                     app.startup_check_confirm_discard(false);
+                }
+                KeyCode::Char('c') if confirming => {
+                    // Cancel confirmation - go back to main menu
+                    app.startup_check_confirm_discard(false);
+                }
+                // === Initial menu handlers ===
+                KeyCode::Char('s') if !confirming => {
+                    // Save my work and start fresh (git stash)
+                    app.loading = LoadingState::Stashing;
+                    app.close_overlay();
+                    let tx = ctx.tx.clone();
+                    let repo_path = app.repo_path.clone();
+                    background::spawn_background(ctx.tx.clone(), "stash_changes", async move {
+                        match crate::git_ops::stash_changes(&repo_path) {
+                            Ok(message) => {
+                                let _ = tx.send(BackgroundMessage::StashComplete { message });
+                            }
+                            Err(e) => {
+                                let _ = tx.send(BackgroundMessage::Error(e.to_string()));
+                            }
+                        }
+                    });
+                }
+                KeyCode::Char('d') if !confirming => {
+                    // Discard and start fresh - show confirmation
+                    app.startup_check_confirm_discard(true);
+                }
+                KeyCode::Char('c') if !confirming => {
+                    // Continue as-is - just close the overlay
+                    app.close_overlay();
                 }
                 _ => {}
             }

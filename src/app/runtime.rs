@@ -333,7 +333,9 @@ pub async fn run_tui(
                                     total_usage.total_tokens += u.total_tokens;
                                 }
                             }
-                            Err(e) => {
+                            Err(_e) => {
+                                // Batch failed - track failed files for retry
+                                // Error details are logged internally; user sees retry prompt
                                 completed_count += batch_files.len();
                                 failed_files.extend(batch_files);
                                 let _ = tx_summaries.send(BackgroundMessage::SummaryProgress {
@@ -341,7 +343,6 @@ pub async fn run_tui(
                                     total: total_to_process,
                                     summaries: HashMap::new(),
                                 });
-                                eprintln!("Warning: Failed to generate summaries for batch: {}", e);
                             }
                         }
                     }

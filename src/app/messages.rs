@@ -64,6 +64,12 @@ pub enum BackgroundMessage {
     ResetComplete {
         options: Vec<crate::cache::ResetOption>,
     },
+    /// Git stash completed (save my work)
+    StashComplete {
+        message: String,
+    },
+    /// Discard changes completed
+    DiscardComplete,
     /// Generic error (used for push/etc)
     Error(String),
     /// Response to a user question
