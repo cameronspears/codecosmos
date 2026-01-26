@@ -8,283 +8,263 @@ use ratatui::{
     Frame,
 };
 
-pub(super) fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
-    // Status and action buttons
-    let mut spans = vec![Span::styled("  ", Style::default())];
+/// A footer button with its key and label
+struct FooterButton {
+    key: &'static str,
+    label: &'static str,
+    key_fg: ratatui::style::Color,
+    key_bg: ratatui::style::Color,
+    label_fg: ratatui::style::Color,
+}
 
-    // Project name and branch with icon (truncate long branch names)
+impl FooterButton {
+    fn new(
+        key: &'static str,
+        label: &'static str,
+        key_fg: ratatui::style::Color,
+        key_bg: ratatui::style::Color,
+        label_fg: ratatui::style::Color,
+    ) -> Self {
+        Self {
+            key,
+            label,
+            key_fg,
+            key_bg,
+            label_fg,
+        }
+    }
+
+    fn width(&self) -> usize {
+        // " key " + " label " + "  " (spacing between buttons)
+        self.key.chars().count() + 2 + self.label.chars().count() + 3
+    }
+
+    fn to_spans(&self) -> Vec<Span<'static>> {
+        vec![
+            Span::styled(
+                format!(" {} ", self.key),
+                Style::default().fg(self.key_fg).bg(self.key_bg),
+            ),
+            Span::styled(
+                format!(" {}  ", self.label),
+                Style::default().fg(self.label_fg),
+            ),
+        ]
+    }
+}
+
+/// Helper for building a primary action button (green background)
+fn primary_button(key: &'static str, label: &'static str) -> FooterButton {
+    FooterButton::new(key, label, Theme::GREY_900, Theme::GREEN, Theme::GREY_300)
+}
+
+/// Helper for building a secondary action button
+fn secondary_button(key: &'static str, label: &'static str) -> FooterButton {
+    FooterButton::new(
+        key,
+        label,
+        Theme::GREY_900,
+        Theme::GREY_600,
+        Theme::GREY_600,
+    )
+}
+
+/// Helper for building a normal hint button
+fn hint_button(key: &'static str, label: &'static str) -> FooterButton {
+    FooterButton::new(
+        key,
+        label,
+        Theme::GREY_900,
+        Theme::GREY_500,
+        Theme::GREY_500,
+    )
+}
+
+pub(super) fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
+    let available_width = area.width as usize;
+
+    // Build status section (left side): project name, branch, cost
     let project_name = app
         .context
         .repo_root
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("unknown");
-    spans.push(Span::styled(
-        project_name,
-        Style::default().fg(Theme::GREY_400),
-    ));
-    spans.push(Span::styled(" ⎇ ", Style::default().fg(Theme::GREY_500)));
+
+    let is_on_main = app.is_on_main_branch();
+    let branch_color = if is_on_main {
+        Theme::GREY_100
+    } else {
+        Theme::GREEN
+    };
+
+    // Calculate status width
     let branch_display = if app.context.branch.len() > 20 {
         format!("{}…", &app.context.branch[..19])
     } else {
         app.context.branch.clone()
     };
-    let is_on_main = app.is_on_main_branch();
-    spans.push(Span::styled(
-        branch_display,
-        Style::default().fg(if is_on_main {
-            Theme::GREY_100
-        } else {
-            Theme::GREEN
-        }),
-    ));
 
-    if app.git_refresh_error.is_some() {
-        spans.push(Span::styled(
-            "  status stale",
-            Style::default().fg(Theme::YELLOW),
-        ));
+    let stale_text = if app.git_refresh_error.is_some() {
+        "  status stale"
+    } else {
+        ""
+    };
+
+    let cost_text = if app.session_cost > 0.0 {
+        format!("  ${:.4}", app.session_cost)
+    } else {
+        String::new()
+    };
+
+    // Base status: "  project ⎇ branch"
+    let base_status_width = 2 + project_name.chars().count() + 3 + branch_display.chars().count();
+
+    // Build button lists by priority
+    // Priority 1: Essential (always shown if possible)
+    let quit_btn = FooterButton::new(
+        "q",
+        "quit",
+        Theme::GREY_900,
+        Theme::GREY_600,
+        Theme::GREY_600,
+    );
+    let help_btn = hint_button("?", "help");
+
+    // Priority 2: Primary action (very important)
+    let primary_buttons = get_primary_buttons(app);
+
+    // Priority 3: Secondary actions
+    let secondary_buttons = get_secondary_buttons(app);
+
+    // Priority 4: Contextual hints
+    let hint_buttons = get_hint_buttons(app);
+
+    // Priority 5: Optional indicators (undo, update)
+    let optional_buttons = get_optional_buttons(app);
+
+    // Calculate total button widths
+    let essential_width = quit_btn.width() + help_btn.width() + 1; // +1 for trailing space
+    let primary_width: usize = primary_buttons.iter().map(|b| b.width()).sum();
+    let secondary_width: usize = secondary_buttons.iter().map(|b| b.width()).sum();
+    let hint_width: usize = hint_buttons.iter().map(|b| b.width()).sum();
+    let optional_width: usize = optional_buttons.iter().map(|b| b.width()).sum();
+
+    // Determine what fits
+    // Minimum: essential buttons only
+    // Then progressively add: primary -> secondary -> hints -> optional -> status
+
+    let mut buttons_to_show: Vec<&FooterButton> = Vec::new();
+    let mut used_width = essential_width;
+
+    // Always reserve space for essential buttons
+    let remaining_for_content = available_width.saturating_sub(essential_width);
+
+    // Try to fit primary buttons
+    if primary_width <= remaining_for_content.saturating_sub(used_width - essential_width) {
+        buttons_to_show.extend(primary_buttons.iter());
+        used_width += primary_width;
     }
 
-    // Session cost indicator
-    if app.session_cost > 0.0 {
-        spans.push(Span::styled("  ", Style::default()));
+    // Try to fit secondary buttons
+    if secondary_width > 0
+        && used_width + secondary_width
+            <= available_width.saturating_sub(essential_width) + essential_width
+    {
+        buttons_to_show.extend(secondary_buttons.iter());
+        used_width += secondary_width;
+    }
+
+    // Try to fit hint buttons
+    if hint_width > 0 && used_width + hint_width <= available_width {
+        buttons_to_show.extend(hint_buttons.iter());
+        used_width += hint_width;
+    }
+
+    // Try to fit optional buttons
+    if optional_width > 0 && used_width + optional_width <= available_width {
+        buttons_to_show.extend(optional_buttons.iter());
+        used_width += optional_width;
+    }
+
+    // Calculate remaining space for status
+    let space_for_status = available_width.saturating_sub(used_width + 2); // +2 for minimum spacing
+
+    // Build the footer spans
+    let mut spans: Vec<Span> = vec![Span::styled("  ", Style::default())];
+
+    // Add status if it fits (progressively truncate)
+    if space_for_status >= base_status_width {
         spans.push(Span::styled(
-            format!("${:.4}", app.session_cost),
+            project_name.to_string(),
             Style::default().fg(Theme::GREY_400),
         ));
+        spans.push(Span::styled(" ⎇ ", Style::default().fg(Theme::GREY_500)));
+
+        // Truncate branch name to fit
+        let remaining_for_branch =
+            space_for_status.saturating_sub(2 + project_name.chars().count() + 3);
+        let truncated_branch = if branch_display.chars().count() > remaining_for_branch {
+            if remaining_for_branch > 1 {
+                format!(
+                    "{}…",
+                    branch_display
+                        .chars()
+                        .take(remaining_for_branch.saturating_sub(1))
+                        .collect::<String>()
+                )
+            } else {
+                String::new()
+            }
+        } else {
+            branch_display.clone()
+        };
+
+        if !truncated_branch.is_empty() {
+            spans.push(Span::styled(
+                truncated_branch.clone(),
+                Style::default().fg(branch_color),
+            ));
+        }
+
+        // Add stale indicator if it fits
+        let current_status_len: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+        if !stale_text.is_empty()
+            && current_status_len + stale_text.chars().count() <= space_for_status
+        {
+            spans.push(Span::styled(
+                stale_text.to_string(),
+                Style::default().fg(Theme::YELLOW),
+            ));
+        }
+
+        // Add cost if it fits
+        let current_status_len: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+        if !cost_text.is_empty()
+            && current_status_len + cost_text.chars().count() <= space_for_status
+        {
+            spans.push(Span::styled(
+                cost_text.clone(),
+                Style::default().fg(Theme::GREY_400),
+            ));
+        }
     }
 
-    // Spacer before buttons
-    let status_len: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-    let available = area.width as usize;
-    // Panel-specific hints + help/quit buttons
-    let button_area_approx = match app.active_panel {
-        ActivePanel::Project => 55, // / search  g group  ␣ expand  ? help  q quit
-        ActivePanel::Suggestions => match app.workflow_step {
-            WorkflowStep::Suggestions => 48, // i ask  ↵ verify  ? help  q quit
-            WorkflowStep::Verify => {
-                if app.verify_state.loading || app.loading == LoadingState::GeneratingFix {
-                    30 // Esc cancel  ? help  q quit
-                } else if app.verify_state.preview.is_some() {
-                    55 // ↵ apply  d details  Esc back  ? help  q quit
-                } else {
-                    30 // Esc back  ? help  q quit
-                }
-            }
-            WorkflowStep::Review => {
-                // Review passed (no findings) has shorter footer
-                if app.review_state.findings.is_empty() && !app.review_state.summary.is_empty() {
-                    38 // ↵ ship  Esc back  ? help  q quit
-                } else {
-                    50 // ␣ select  ↵ fix  Esc back  ? help  q quit
-                }
-            }
-            WorkflowStep::Ship => match app.ship_state.step {
-                ShipStep::Confirm => 45, // ↵ ship  Esc back  ? help  q quit
-                ShipStep::Done => 50,    // ↵ open  Esc done  ? help  q quit
-                _ => 25,                 // ? help  q quit (processing)
-            },
-        },
-    };
-    let spacer_len = available.saturating_sub(status_len + button_area_approx);
+    // Add spacer
+    let current_len: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    let spacer_len = available_width.saturating_sub(current_len + used_width);
     if spacer_len > 0 {
         spans.push(Span::styled(" ".repeat(spacer_len), Style::default()));
     }
 
-    // Panel-specific contextual hints
-    match app.active_panel {
-        ActivePanel::Project => {
-            spans.push(Span::styled(
-                " / ",
-                Style::default().fg(Theme::GREY_900).bg(Theme::GREY_500),
-            ));
-            spans.push(Span::styled(
-                " search ",
-                Style::default().fg(Theme::GREY_500),
-            ));
-            spans.push(Span::styled(
-                " g ",
-                Style::default().fg(Theme::GREY_900).bg(Theme::GREY_500),
-            ));
-            spans.push(Span::styled(
-                " group ",
-                Style::default().fg(Theme::GREY_500),
-            ));
-            spans.push(Span::styled(
-                " ↵ ",
-                Style::default().fg(Theme::GREY_900).bg(Theme::GREY_500),
-            ));
-            spans.push(Span::styled(
-                " expand ",
-                Style::default().fg(Theme::GREY_500),
-            ));
-        }
-        ActivePanel::Suggestions => match app.workflow_step {
-            WorkflowStep::Suggestions => {
-                spans.push(Span::styled(
-                    " i ",
-                    Style::default().fg(Theme::GREY_900).bg(Theme::GREY_500),
-                ));
-                spans.push(Span::styled(" ask ", Style::default().fg(Theme::GREY_500)));
-                spans.push(Span::styled(
-                    " ↵ ",
-                    Style::default().fg(Theme::GREY_900).bg(Theme::GREEN),
-                ));
-                spans.push(Span::styled(
-                    " verify ",
-                    Style::default().fg(Theme::GREY_300),
-                ));
-            }
-            WorkflowStep::Verify => {
-                if app.verify_state.loading || app.loading == LoadingState::GeneratingFix {
-                    spans.push(Span::styled(
-                        " Esc ",
-                        Style::default().fg(Theme::GREY_900).bg(Theme::GREY_500),
-                    ));
-                    spans.push(Span::styled(
-                        " cancel ",
-                        Style::default().fg(Theme::GREY_500),
-                    ));
-                } else if app.verify_state.preview.is_some() {
-                    spans.push(Span::styled(
-                        " ↵ ",
-                        Style::default().fg(Theme::GREY_900).bg(Theme::GREEN),
-                    ));
-                    spans.push(Span::styled(
-                        " apply ",
-                        Style::default().fg(Theme::GREY_300),
-                    ));
-                    spans.push(Span::styled(
-                        " d ",
-                        Style::default().fg(Theme::GREY_900).bg(Theme::GREY_600),
-                    ));
-                    spans.push(Span::styled(
-                        if app.verify_state.show_technical_details {
-                            " hide details "
-                        } else {
-                            " details "
-                        },
-                        Style::default().fg(Theme::GREY_500),
-                    ));
-                    spans.push(Span::styled(
-                        " Esc ",
-                        Style::default().fg(Theme::GREY_900).bg(Theme::GREY_600),
-                    ));
-                    spans.push(Span::styled(" back ", Style::default().fg(Theme::GREY_600)));
-                } else {
-                    spans.push(Span::styled(
-                        " Esc ",
-                        Style::default().fg(Theme::GREY_900).bg(Theme::GREY_500),
-                    ));
-                    spans.push(Span::styled(" back ", Style::default().fg(Theme::GREY_500)));
-                }
-            }
-            WorkflowStep::Review => {
-                // Check if review passed (no findings) - in this case, show "ship" instead of "fix"
-                let review_passed =
-                    app.review_state.findings.is_empty() && !app.review_state.summary.is_empty();
-
-                if review_passed {
-                    // Review passed - only action is to continue to ship
-                    spans.push(Span::styled(
-                        " ↵ ",
-                        Style::default().fg(Theme::GREY_900).bg(Theme::GREEN),
-                    ));
-                    spans.push(Span::styled(" ship ", Style::default().fg(Theme::GREY_300)));
-                    spans.push(Span::styled(
-                        " Esc ",
-                        Style::default().fg(Theme::GREY_900).bg(Theme::GREY_600),
-                    ));
-                    spans.push(Span::styled(" back ", Style::default().fg(Theme::GREY_600)));
-                } else {
-                    // Review has findings - show selection and fix options
-                    spans.push(Span::styled(
-                        " ␣ ",
-                        Style::default().fg(Theme::GREY_900).bg(Theme::GREY_500),
-                    ));
-                    spans.push(Span::styled(
-                        " select ",
-                        Style::default().fg(Theme::GREY_500),
-                    ));
-                    spans.push(Span::styled(
-                        " ↵ ",
-                        Style::default().fg(Theme::GREY_900).bg(Theme::GREEN),
-                    ));
-                    spans.push(Span::styled(" fix ", Style::default().fg(Theme::GREY_300)));
-                    spans.push(Span::styled(
-                        " Esc ",
-                        Style::default().fg(Theme::GREY_900).bg(Theme::GREY_600),
-                    ));
-                    spans.push(Span::styled(" back ", Style::default().fg(Theme::GREY_600)));
-                }
-            }
-            WorkflowStep::Ship => match app.ship_state.step {
-                ShipStep::Confirm => {
-                    spans.push(Span::styled(
-                        " ↵ ",
-                        Style::default().fg(Theme::GREY_900).bg(Theme::GREEN),
-                    ));
-                    spans.push(Span::styled(" ship ", Style::default().fg(Theme::GREY_300)));
-                    spans.push(Span::styled(
-                        " Esc ",
-                        Style::default().fg(Theme::GREY_900).bg(Theme::GREY_600),
-                    ));
-                    spans.push(Span::styled(" back ", Style::default().fg(Theme::GREY_600)));
-                }
-                ShipStep::Done => {
-                    spans.push(Span::styled(
-                        " ↵ ",
-                        Style::default().fg(Theme::GREY_900).bg(Theme::GREEN),
-                    ));
-                    spans.push(Span::styled(
-                        " open PR ",
-                        Style::default().fg(Theme::GREY_300),
-                    ));
-                    spans.push(Span::styled(
-                        " Esc ",
-                        Style::default().fg(Theme::GREY_900).bg(Theme::GREY_600),
-                    ));
-                    spans.push(Span::styled(" done ", Style::default().fg(Theme::GREY_600)));
-                }
-                _ => {
-                    // Processing states - no action buttons
-                }
-            },
-        },
+    // Add buttons in order
+    for btn in buttons_to_show {
+        spans.extend(btn.to_spans());
     }
 
-    // Undo hint (shown when there are pending changes)
-    if !app.pending_changes.is_empty() {
-        spans.push(Span::styled(
-            " u ",
-            Style::default().fg(Theme::GREY_900).bg(Theme::YELLOW),
-        ));
-        spans.push(Span::styled(" undo ", Style::default().fg(Theme::GREY_400)));
-    }
-
-    // Update available indicator (subtle, non-intrusive)
-    if app.update_available.is_some() {
-        spans.push(Span::styled(
-            " U ",
-            Style::default().fg(Theme::GREY_900).bg(Theme::GREEN),
-        ));
-        spans.push(Span::styled(" update ", Style::default().fg(Theme::GREEN)));
-    }
-
-    // Help and quit (always shown)
-    spans.push(Span::styled(
-        " ? ",
-        Style::default().fg(Theme::GREY_900).bg(Theme::GREY_500),
-    ));
-    spans.push(Span::styled(" help ", Style::default().fg(Theme::GREY_500)));
-
-    spans.push(Span::styled(
-        " q ",
-        Style::default().fg(Theme::GREY_900).bg(Theme::GREY_600),
-    ));
-    spans.push(Span::styled(" quit ", Style::default().fg(Theme::GREY_600)));
-
+    // Add essential buttons (help, quit)
+    spans.extend(help_btn.to_spans());
+    spans.extend(quit_btn.to_spans());
     spans.push(Span::styled(" ", Style::default()));
 
     let footer_line = Line::from(spans);
@@ -292,4 +272,126 @@ pub(super) fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
     let footer = Paragraph::new(vec![Line::from(""), footer_line])
         .style(Style::default().bg(Theme::GREY_900));
     frame.render_widget(footer, area);
+}
+
+/// Get primary action buttons based on current state
+fn get_primary_buttons(app: &App) -> Vec<FooterButton> {
+    match app.active_panel {
+        ActivePanel::Project => {
+            vec![hint_button("↵", "expand")]
+        }
+        ActivePanel::Suggestions => match app.workflow_step {
+            WorkflowStep::Suggestions => {
+                vec![primary_button("↵", "verify")]
+            }
+            WorkflowStep::Verify => {
+                if app.verify_state.loading || app.loading == LoadingState::GeneratingFix {
+                    vec![]
+                } else if app.verify_state.preview.is_some() {
+                    vec![primary_button("↵", "apply")]
+                } else {
+                    vec![]
+                }
+            }
+            WorkflowStep::Review => {
+                let review_passed =
+                    app.review_state.findings.is_empty() && !app.review_state.summary.is_empty();
+                if review_passed {
+                    vec![primary_button("↵", "ship")]
+                } else {
+                    vec![primary_button("↵", "fix")]
+                }
+            }
+            WorkflowStep::Ship => match app.ship_state.step {
+                ShipStep::Confirm => vec![primary_button("↵", "ship")],
+                ShipStep::Done => vec![primary_button("↵", "open PR")],
+                _ => vec![],
+            },
+        },
+    }
+}
+
+/// Get secondary action buttons based on current state
+fn get_secondary_buttons(app: &App) -> Vec<FooterButton> {
+    match app.active_panel {
+        ActivePanel::Project => vec![],
+        ActivePanel::Suggestions => match app.workflow_step {
+            WorkflowStep::Suggestions => vec![],
+            WorkflowStep::Verify => {
+                if app.verify_state.loading || app.loading == LoadingState::GeneratingFix {
+                    vec![hint_button("Esc", "cancel")]
+                } else if app.verify_state.preview.is_some() {
+                    vec![
+                        hint_button(
+                            "d",
+                            if app.verify_state.show_technical_details {
+                                "hide"
+                            } else {
+                                "details"
+                            },
+                        ),
+                        secondary_button("Esc", "back"),
+                    ]
+                } else {
+                    vec![secondary_button("Esc", "back")]
+                }
+            }
+            WorkflowStep::Review => {
+                let review_passed =
+                    app.review_state.findings.is_empty() && !app.review_state.summary.is_empty();
+                if review_passed {
+                    vec![secondary_button("Esc", "back")]
+                } else {
+                    vec![hint_button("␣", "select"), secondary_button("Esc", "back")]
+                }
+            }
+            WorkflowStep::Ship => match app.ship_state.step {
+                ShipStep::Confirm => vec![secondary_button("Esc", "back")],
+                ShipStep::Done => vec![secondary_button("Esc", "done")],
+                _ => vec![],
+            },
+        },
+    }
+}
+
+/// Get hint buttons based on current state (lowest priority contextual hints)
+fn get_hint_buttons(app: &App) -> Vec<FooterButton> {
+    match app.active_panel {
+        ActivePanel::Project => {
+            vec![hint_button("/", "search"), hint_button("g", "group")]
+        }
+        ActivePanel::Suggestions => match app.workflow_step {
+            WorkflowStep::Suggestions => {
+                vec![hint_button("i", "ask")]
+            }
+            _ => vec![],
+        },
+    }
+}
+
+/// Get optional indicator buttons (undo, update)
+fn get_optional_buttons(app: &App) -> Vec<FooterButton> {
+    let mut buttons = Vec::new();
+
+    if !app.pending_changes.is_empty() {
+        buttons.push(FooterButton::new(
+            "u",
+            "undo",
+            Theme::GREY_900,
+            Theme::YELLOW,
+            Theme::GREY_400,
+        ));
+    }
+
+    if app.update_available.is_some() {
+        buttons.push(FooterButton::new(
+            "U",
+            "update",
+            Theme::GREY_900,
+            Theme::GREEN,
+            Theme::GREEN,
+        ));
+    }
+
+    buttons
 }
