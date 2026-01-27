@@ -48,15 +48,19 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         tool_type: "function",
         function: FunctionDefinition {
             name: "shell",
-            description: r#"Execute a shell command in the repository. Use this to explore code and find issues.
+            description: r#"Execute a shell command. Output truncated at 4KB.
 
-IMPORTANT: Output is truncated at 16KB. Use targeted commands:
-- Search: rg "pattern" (preferred) or grep -r "pattern" .
-- Read files: head -150 file (preferred) or sed -n '100,200p' file for specific lines
-- AVOID: cat on large files - use head/tail/sed instead
-- List files: ls -la or find . -name "*.rs" | head -30
+SURGICAL WORKFLOW (saves tokens):
+1. grep -n 'pattern' <file> → find line numbers
+2. sed -n '50,80p' <file> → read 30 lines around match
 
-The command runs in the repository root."#,
+COMMANDS:
+• grep -n 'fn foo' file.rs → find function
+• sed -n '45,75p' file.rs → read around line 60
+• head -50 file.rs → file start
+• rg 'pattern' → search codebase
+
+AVOID: cat (too many tokens)"#,
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -163,12 +167,14 @@ fn execute_shell(root: &Path, args_json: &str) -> String {
                 result.push_str(&format!("\n[exit code: {}]", exit_code));
             }
 
-            // Aggressively truncate to keep context lean
+            // Truncate at line boundary to keep output clean
             // 4KB ≈ 1k tokens - forces surgical, targeted reads
             if result.len() > 4000 {
+                // Find last newline before limit to avoid cutting mid-line
+                let truncate_at = result[..4000].rfind('\n').unwrap_or(4000);
                 format!(
-                    "{}\n\n... (truncated - use head -50 or grep for specific sections)",
-                    &result[..4000]
+                    "{}\n\n... (truncated - use grep/sed for specific sections)",
+                    &result[..truncate_at]
                 )
             } else {
                 result

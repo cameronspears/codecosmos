@@ -730,11 +730,15 @@ impl FixScope {
     }
 }
 
-/// Generate a preview using agentic verification.
+/// Generate a preview using lean hybrid verification.
 ///
-/// Instead of spoon-feeding truncated code, this lets the model use tools
-/// (grep, read, ls) to explore the codebase and find the evidence it needs.
-/// This produces more accurate verification because the model finds context itself.
+/// Strategy:
+/// 1. Pre-read the relevant section of the file (we know exactly where to look)
+/// 2. Include that code directly in the prompt
+/// 3. Model verifies with the code in front of it
+/// 4. Allow 1-2 surgical tool calls if model needs more context
+///
+/// This is faster than full agentic because we already know the file and location.
 pub async fn generate_fix_preview_agentic(
     repo_root: &Path,
     suggestion: &Suggestion,
@@ -748,31 +752,65 @@ pub async fn generate_fix_preview_agentic(
     let memory_section =
         format_repo_memory_section(repo_memory.as_deref(), "Repo conventions / decisions");
 
-    // Build a focused prompt - the model will use tools to find the code
+    // Pre-read the relevant file content (we know exactly where to look)
+    let file_path = repo_root.join(&suggestion.file);
+    let file_content = std::fs::read_to_string(&file_path).unwrap_or_default();
+
+    // Extract ~80 lines around the suggestion line for better context
+    let target_line = suggestion.line.unwrap_or(1) as usize;
+    let lines: Vec<&str> = file_content.lines().collect();
+    let start = target_line.saturating_sub(30).max(0);
+    let end = (target_line + 50).min(lines.len());
+
+    let code_section: String = lines
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(end - start)
+        .map(|(i, line)| format!("{:4}| {}", i + 1, line))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // Build a focused prompt with the code already included
     let user = format!(
         r#"ISSUE TO VERIFY:
 File: {}
+Line: ~{}
 Summary: {}
 {}
 {}{}
 
-Use the available tools to:
-1. Find and examine the relevant code in this file
-2. Verify whether this issue actually exists
-3. Return your findings as JSON"#,
+CODE (lines {}-{}):
+{}
+
+VERIFY:
+1. Does this issue exist in the code above?
+2. If you need more context:
+   • grep -n 'pattern' {} → find related code
+   • sed -n 'X,Yp' {} → read specific lines
+3. Return JSON immediately (minimize tool calls)"#,
         suggestion.file.display(),
+        target_line,
         suggestion.summary,
         suggestion.detail.as_deref().unwrap_or(""),
         memory_section,
         modifier_text,
+        start + 1,
+        end,
+        code_section,
+        suggestion.file.display(),
+        suggestion.file.display(),
     );
 
+    // Use Speed model with surgical tool access
+    // 3 iterations - code already provided, minimal exploration needed
     let response = call_llm_agentic(
         FIX_PREVIEW_AGENTIC_SYSTEM,
         &user,
-        Model::Balanced,
+        Model::Speed,
         repo_root,
         false,
+        3, // max iterations - verification has code upfront
     )
     .await?;
 

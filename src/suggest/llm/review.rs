@@ -1,7 +1,8 @@
+use super::agentic::call_llm_agentic;
 use super::client::call_llm_with_usage;
 use super::fix::{apply_edits_with_context, normalize_generated_content, AppliedFix, FixResponse};
 use super::models::{Model, Usage};
-use super::parse::{merge_usage, parse_json_with_retry, truncate_content};
+use super::parse::{merge_usage, parse_json_with_retry};
 use super::prompt_utils::format_repo_memory_section;
 use super::prompts::{review_fix_system_prompt, review_system_prompt};
 use serde::{Deserialize, Serialize};
@@ -53,82 +54,182 @@ pub struct VerificationReview {
     pub usage: Option<Usage>,
 }
 
-/// Perform deep adversarial review of code changes using the Reviewer model
+/// Perform lean adversarial review of code changes
 ///
-/// This uses a different model (cognitive diversity) with adversarial prompting
-/// to find issues that the implementing model might have missed.
-///
-/// On re-reviews (iteration > 1), the prompt is adjusted to focus on verifying fixes
-/// rather than finding entirely new issues.
+/// Uses the lean hybrid approach:
+/// 1. Start with compact diff summary (not full files)
+/// 2. Model can surgically read specific sections if needed
+/// 3. Fast response with high accuracy
 ///
 /// The `fix_context` parameter (when provided) tells the reviewer what the fix was
-/// supposed to accomplish, allowing it to evaluate whether the fix was done correctly
-/// rather than just finding any bugs in the code.
+/// supposed to accomplish, allowing it to evaluate whether the fix was done correctly.
 pub async fn verify_changes(
     files_with_content: &[(PathBuf, String, String)], // (path, old_content, new_content)
     iteration: u32,
     fixed_titles: &[String],
     fix_context: Option<&FixContext>,
 ) -> anyhow::Result<VerificationReview> {
+    // Get repo root from first file path
+    let repo_root = files_with_content
+        .first()
+        .and_then(|(p, _, _)| {
+            // Walk up to find .git directory
+            let mut path = p.as_path();
+            while let Some(parent) = path.parent() {
+                if parent.join(".git").exists() {
+                    return Some(parent.to_path_buf());
+                }
+                path = parent;
+            }
+            None
+        })
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+
     let system = review_system_prompt(iteration, fixed_titles, fix_context);
 
-    // Build the diff context
-    let mut changes_text = String::new();
-    const MAX_REVIEW_CHARS_PER_FILE: usize = 40000;
+    // Build compact diff summary (not full content)
+    let user = build_lean_review_prompt(files_with_content, fix_context);
 
-    for (path, old_content, new_content) in files_with_content {
-        let file_name = path.display().to_string();
-
-        // Create a simple diff view
-        changes_text.push_str(&format!("\n=== {} ===\n", file_name));
-
-        let old_truncated = old_content.chars().count() > MAX_REVIEW_CHARS_PER_FILE;
-        let new_truncated = new_content.chars().count() > MAX_REVIEW_CHARS_PER_FILE;
-        let old_view = truncate_content(old_content, MAX_REVIEW_CHARS_PER_FILE);
-        let new_view = truncate_content(new_content, MAX_REVIEW_CHARS_PER_FILE);
-
-        if old_content.is_empty() {
-            // New file
-            changes_text.push_str("(NEW FILE)\n");
-            if new_truncated {
-                changes_text.push_str("(CONTENT TRUNCATED)\n");
-            }
-            changes_text.push_str(&add_line_numbers(&new_view));
-        } else {
-            // Show old and new with line numbers
-            changes_text.push_str("--- BEFORE ---\n");
-            if old_truncated {
-                changes_text.push_str("(CONTENT TRUNCATED)\n");
-            }
-            changes_text.push_str(&add_line_numbers(&old_view));
-            changes_text.push_str("\n--- AFTER ---\n");
-            if new_truncated {
-                changes_text.push_str("(CONTENT TRUNCATED)\n");
-            }
-            changes_text.push_str(&add_line_numbers(&new_view));
-        }
-        changes_text.push('\n');
-    }
-
-    let user = format!(
-        "Review these code changes for bugs and issues:\n{}",
-        changes_text
-    );
-
-    let response = call_llm_with_usage(&system, &user, Model::Reviewer, true).await?;
+    // Use Speed model with surgical tool access for fast, accurate review
+    // 4 iterations - diff already provided, occasional context needed
+    let response = call_llm_agentic(&system, &user, Model::Speed, &repo_root, false, 4).await?;
 
     // Parse the response with self-correction on failure
     let (parsed, correction_usage): (ReviewResponseJson, _) =
         parse_json_with_retry(&response.content, "code review").await?;
 
-    // Merge usage from correction call if any
-    let total_usage = merge_usage(response.usage, correction_usage);
-
     Ok(VerificationReview {
         findings: parsed.findings,
         summary: parsed.summary,
-        usage: total_usage,
+        usage: correction_usage, // Agentic doesn't track usage, but correction might
     })
+}
+
+/// Build a lean review prompt with diff summary instead of full content
+fn build_lean_review_prompt(
+    files_with_content: &[(PathBuf, String, String)],
+    fix_context: Option<&FixContext>,
+) -> String {
+    let mut sections = Vec::new();
+
+    // Fix context if available
+    if let Some(ctx) = fix_context {
+        sections.push(format!(
+            "REVIEWING FIX FOR:\nProblem: {}\nIntended outcome: {}\nChanges made: {}",
+            ctx.problem_summary, ctx.outcome, ctx.description
+        ));
+    }
+
+    // For each file, show a compact diff (changed lines only with context)
+    sections.push(String::from("\nCHANGED FILES:"));
+
+    for (path, old_content, new_content) in files_with_content {
+        let file_name = path.display().to_string();
+        let diff = compute_compact_diff(old_content, new_content);
+
+        if old_content.is_empty() {
+            // New file - show first 50 lines
+            let preview: String = new_content.lines().take(50).collect::<Vec<_>>().join("\n");
+            sections.push(format!(
+                "\n=== {} (NEW FILE, {} lines) ===\n{}{}",
+                file_name,
+                new_content.lines().count(),
+                add_line_numbers(&preview),
+                if new_content.lines().count() > 50 {
+                    "\n... (use head/tail to see more)"
+                } else {
+                    ""
+                }
+            ));
+        } else if diff.is_empty() {
+            sections.push(format!("\n=== {} (no changes) ===", file_name));
+        } else {
+            sections.push(format!(
+                "\n=== {} ({} lines changed) ===\n{}",
+                file_name,
+                diff.lines()
+                    .filter(|l| l.starts_with('+') || l.starts_with('-'))
+                    .count(),
+                diff
+            ));
+        }
+    }
+
+    // Instructions
+    sections.push(String::from(
+        "\n\nREVIEW TASK:
+Find bugs, logic errors, and issues in the diff above.
+
+SURGICAL COMMANDS (if needed):
+• grep -n 'pattern' <file> → find related code
+• sed -n '50,80p' <file> → read around specific line
+
+MINIMIZE tool calls - most issues should be visible in the diff.
+Return findings as JSON.",
+    ));
+
+    sections.join("\n")
+}
+
+/// Compute a unified diff using git's algorithm for better accuracy
+fn compute_compact_diff(old: &str, new: &str) -> String {
+    use std::io::Write;
+    use std::process::Command;
+
+    // Create temp files for git diff
+    let temp_dir = std::env::temp_dir();
+    let old_path = temp_dir.join("cosmos_diff_old.tmp");
+    let new_path = temp_dir.join("cosmos_diff_new.tmp");
+
+    // Write content to temp files
+    if let (Ok(mut old_file), Ok(mut new_file)) = (
+        std::fs::File::create(&old_path),
+        std::fs::File::create(&new_path),
+    ) {
+        let _ = old_file.write_all(old.as_bytes());
+        let _ = new_file.write_all(new.as_bytes());
+
+        // Run git diff with unified format, 3 lines context
+        if let Ok(output) = Command::new("git")
+            .args([
+                "diff",
+                "--no-index",
+                "--no-color",
+                "-U3", // 3 lines of context
+                old_path.to_str().unwrap_or(""),
+                new_path.to_str().unwrap_or(""),
+            ])
+            .output()
+        {
+            // Clean up temp files
+            let _ = std::fs::remove_file(&old_path);
+            let _ = std::fs::remove_file(&new_path);
+
+            let diff_output = String::from_utf8_lossy(&output.stdout);
+
+            // Skip the header lines (--- a/... and +++ b/...)
+            let lines: Vec<&str> = diff_output
+                .lines()
+                .skip_while(|l| !l.starts_with("@@"))
+                .take(150) // Limit to 150 lines
+                .collect();
+
+            if !lines.is_empty() {
+                return lines.join("\n");
+            }
+        }
+
+        // Clean up on error path too
+        let _ = std::fs::remove_file(&old_path);
+        let _ = std::fs::remove_file(&new_path);
+    }
+
+    // Fallback: simple line count comparison
+    format!(
+        "(diff unavailable - {} lines before, {} lines after)",
+        old.lines().count(),
+        new.lines().count()
+    )
 }
 
 /// Add line numbers to code for review context

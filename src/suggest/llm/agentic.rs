@@ -11,7 +11,7 @@ use std::path::Path;
 use std::time::Duration;
 
 const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
-const REQUEST_TIMEOUT_SECS: u64 = 90; // Longer timeout for agentic loops
+const REQUEST_TIMEOUT_SECS: u64 = 45; // Reasonable timeout - fail fast if API is slow
 
 /// Response from an agentic LLM call
 #[derive(Debug)]
@@ -104,12 +104,18 @@ fn api_key() -> Option<String> {
 ///
 /// The model can call tools (grep, read, ls) to explore the codebase.
 /// The function loops until the model returns a final text response.
+///
+/// `max_iterations`: Maximum tool-calling rounds before forcing a response.
+/// - Suggestions: 8 (needs exploration)
+/// - Verification: 3 (code already provided)
+/// - Review: 4 (diff already provided)
 pub async fn call_llm_agentic(
     system: &str,
     user: &str,
     model: Model,
     repo_root: &Path,
     json_mode: bool,
+    max_iterations: usize,
 ) -> anyhow::Result<AgenticResponse> {
     let api_key = api_key().ok_or_else(|| {
         anyhow::anyhow!("No API key configured. Run 'cosmos --setup' to get started.")
@@ -135,16 +141,13 @@ pub async fn call_llm_agentic(
         },
     ];
 
-    // Lean hybrid: allow only 1-3 surgical tool calls, then must respond
-    const MAX_ITERATIONS: usize = 5;
     let mut iteration = 0;
 
     loop {
         iteration += 1;
 
-        if iteration > MAX_ITERATIONS {
-            // Don't error - just force the model to respond with what it has
-            // by making one final call without tools
+        if iteration > max_iterations {
+            // Force the model to respond with what it has
             break;
         }
         // Note: json_mode is accepted for API compatibility but not currently used

@@ -143,23 +143,19 @@ EXAMPLE - Renaming a function across files:
 }"#;
 
 /// Agentic verification prompt - model uses shell to find and verify issues
-pub const FIX_PREVIEW_AGENTIC_SYSTEM: &str = r#"You are a code verification assistant. You have full shell access to explore the codebase.
+pub const FIX_PREVIEW_AGENTIC_SYSTEM: &str = r#"You are a code verification assistant.
 
 YOUR TASK:
-1. Use shell commands to find and verify whether the reported issue actually exists
-2. Once you've gathered enough evidence, return your findings in JSON format
+Verify whether the reported issue exists in the code PROVIDED BELOW.
 
-YOU HAVE SHELL ACCESS:
-Run any command you need: grep, rg, cat, find, ls, head, tail, wc, cargo check, npm test, etc.
-Git is the safety net - be bold. Explore until you understand.
+IMPORTANT: The relevant code is ALREADY INCLUDED in the prompt.
+- Look at the code section provided - it contains the target lines
+- You should NOT need any tool calls in most cases
+- Only use tools if you need to check a DIFFERENT file (rare)
 
-WORKFLOW:
-1. Search for relevant code (rg "pattern" or grep -r "pattern" .)
-2. Read the actual code (cat file or head -n 100 file)
-3. Verify the issue exists in the code
-4. When confident, return your JSON response
+RESPOND IMMEDIATELY with JSON after reviewing the provided code.
 
-OUTPUT FORMAT (JSON - return this when done investigating):
+OUTPUT FORMAT (JSON):
 {
   "verified": true,
   "friendly_title": "Batch Processing",
@@ -179,11 +175,11 @@ RULES:
 - problem_summary: Describe BEHAVIOR for non-technical readers. 1-2 sentences.
 - outcome: What will be DIFFERENT after the fix. 1 sentence.
 - verification_note: Technical explanation of what you found
-- evidence_snippet: 1-3 lines of ACTUAL code proving your claim
+- evidence_snippet: 1-3 lines of ACTUAL code proving your claim (copy from the code above)
 - evidence_line: Line number where evidence starts
 - scope: "small", "medium", or "large"
 
-IMPORTANT: Use shell commands to actually verify - don't guess or assume. If you can't find evidence, set verified=false."#;
+RESPOND NOW with your JSON assessment."#;
 
 /// Agentic codebase analysis prompt - model explores with shell before suggesting
 pub const ANALYZE_CODEBASE_AGENTIC_SYSTEM: &str = r#"You are a senior code reviewer with full shell access. Your job is to explore the codebase and find genuine improvements - things that will make the app better for users, not just cleaner code.

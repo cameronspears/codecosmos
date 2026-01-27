@@ -104,12 +104,14 @@ pub async fn analyze_codebase_agentic(
     let user_prompt = build_lean_analysis_prompt(index, context, repo_memory.as_deref(), glossary);
 
     // Use Speed model (gpt-oss-120b) with surgical tool access
+    // 8 iterations allows for good exploration
     let response = call_llm_agentic(
         ANALYZE_CODEBASE_AGENTIC_SYSTEM,
         &user_prompt,
         Model::Speed,
         repo_root,
         false,
+        8, // max iterations - suggestions need exploration
     )
     .await?;
 
@@ -122,10 +124,12 @@ pub async fn analyze_codebase_agentic(
 /// The model gets:
 /// - Project context and purpose
 /// - Compact file summaries (what each file does)
-/// - List of changed files with their purposes
-/// - Permission to read specific files IF needed for verification
-///
-/// This keeps the initial prompt small (~2-4K tokens) for fast first response.
+/// Tiers (from high-level to detailed):
+/// 0. The Gist - what the project IS
+/// 1. Key Areas - main directories/modules
+/// 2. Priority Files - changed/complex with summaries
+/// 3. All Files - just paths for scanning
+/// 4. Code - model uses `head` to read
 fn build_lean_analysis_prompt(
     index: &CodebaseIndex,
     context: &WorkContext,
@@ -139,45 +143,68 @@ fn build_lean_analysis_prompt(
         .and_then(|n| n.to_str())
         .unwrap_or("project");
 
-    // Get project context from README/package files
-    let project_context = discover_project_context(index);
-
     let mut sections = Vec::new();
 
-    // Header
+    // ═══ TIER 0: THE GIST ═══
+    let project_context = discover_project_context(index);
     sections.push(format!(
-        "CODEBASE: {} ({} files, {} LOC) on branch '{}'",
-        project_name, stats.file_count, stats.total_loc, context.branch,
+        "═══ THE GIST ═══\n{} ({} files, {} LOC)\n{}",
+        project_name,
+        stats.file_count,
+        stats.total_loc,
+        if !project_context.trim().is_empty() {
+            truncate_str(&project_context, 300).to_string()
+        } else {
+            "A software project.".to_string()
+        }
     ));
 
-    // Project context
-    if !project_context.trim().is_empty() {
-        sections.push(format!(
-            "\n\nWHAT THIS PROJECT DOES:\n{}",
-            truncate_str(&project_context, 600)
-        ));
+    // ═══ TIER 1: KEY AREAS ═══
+    let mut dirs: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for path in index.files.keys() {
+        if let Some(parent) = path.parent() {
+            let dir = parent.to_string_lossy().to_string();
+            if !dir.is_empty() {
+                *dirs.entry(dir).or_insert(0) += 1;
+            }
+        }
+    }
+    let mut dir_list: Vec<_> = dirs.into_iter().collect();
+    dir_list.sort_by(|a, b| b.1.cmp(&a.1));
+
+    if !dir_list.is_empty() {
+        let areas: Vec<_> = dir_list
+            .iter()
+            .take(6)
+            .map(|(d, c)| format!("{}/ ({} files)", d, c))
+            .collect();
+        sections.push(format!("\n\n═══ KEY AREAS ═══\n{}", areas.join("\n")));
     }
 
-    // Changed files with summaries (highest priority)
+    // ═══ TIER 2: PRIORITY FILES ═══
     let changed: HashSet<PathBuf> = context.all_changed_files().into_iter().cloned().collect();
+
+    // Collect top priority files for code preview
+    let mut priority_files: Vec<PathBuf> = changed.iter().take(2).cloned().collect();
+
     if !changed.is_empty() {
-        let mut changed_section = String::from("\n\nCHANGED FILES (focus here):");
-        for path in changed.iter().take(10) {
+        let mut s = String::from("\n\n═══ PRIORITY FILES ═══\n[CHANGED] Read these first:");
+        for path in changed.iter().take(6) {
             let summary = index
                 .files
                 .get(path)
                 .map(|f| f.summary.purpose.as_str())
-                .unwrap_or("(new file)");
-            changed_section.push_str(&format!(
+                .unwrap_or("(new)");
+            s.push_str(&format!(
                 "\n• {} - {}",
                 path.display(),
-                truncate_str(summary, 80)
+                truncate_str(summary, 60)
             ));
         }
-        sections.push(changed_section);
+        sections.push(s);
     }
 
-    // Hotspots with summaries
+    // Complex files
     let mut hotspots = index.files.values().collect::<Vec<_>>();
     hotspots.sort_by(|a, b| {
         b.complexity
@@ -188,43 +215,27 @@ fn build_lean_analysis_prompt(
         .iter()
         .filter(|f| f.complexity > HIGH_COMPLEXITY_THRESHOLD || f.loc > GOD_MODULE_LOC_THRESHOLD)
         .filter(|f| !changed.contains(&f.path))
-        .take(5)
+        .take(4)
         .collect();
 
-    if !hot.is_empty() {
-        let mut hot_section = String::from("\n\nCOMPLEX FILES (potential issues):");
-        for file in hot {
-            hot_section.push_str(&format!(
-                "\n• {} ({} LOC) - {}",
-                file.path.display(),
-                file.loc,
-                truncate_str(&file.summary.purpose, 60)
-            ));
+    // Add top complex file to priority list
+    if let Some(h) = hot.first() {
+        if priority_files.len() < 3 {
+            priority_files.push(h.path.clone());
         }
-        sections.push(hot_section);
     }
 
-    // Key file summaries for broader context
-    let other_summaries: Vec<_> = index
-        .files
-        .values()
-        .filter(|f| !changed.contains(&f.path))
-        .filter(|f| !f.summary.purpose.is_empty())
-        .take(15)
-        .map(|f| {
-            format!(
-                "• {}: {}",
+    if !hot.is_empty() {
+        let mut s = String::from("\n[COMPLEX] Likely bugs:");
+        for f in hot {
+            s.push_str(&format!(
+                "\n• {} ({} LOC) - {}",
                 f.path.display(),
+                f.loc,
                 truncate_str(&f.summary.purpose, 50)
-            )
-        })
-        .collect();
-
-    if !other_summaries.is_empty() {
-        sections.push(format!(
-            "\n\nOTHER KEY FILES:\n{}",
-            other_summaries.join("\n")
-        ));
+            ));
+        }
+        sections.push(s);
     }
 
     // TODOs
@@ -232,46 +243,91 @@ fn build_lean_analysis_prompt(
         .patterns
         .iter()
         .filter(|p| matches!(p.kind, PatternKind::TodoMarker))
-        .take(5)
+        .take(4)
         .collect();
-
     if !todos.is_empty() {
-        let mut todos_section = String::from("\n\nTODO/FIXME:");
-        for todo in &todos {
-            todos_section.push_str(&format!(
+        let mut s = String::from("\n[TODO] Known issues:");
+        for t in &todos {
+            s.push_str(&format!(
                 "\n• {}:{} - {}",
-                todo.file.display(),
-                todo.line,
-                truncate_str(&todo.description, 50)
+                t.file.display(),
+                t.line,
+                truncate_str(&t.description, 40)
             ));
         }
-        sections.push(todos_section);
+        sections.push(s);
     }
 
-    // Repo memory
+    // ═══ CODE PREVIEW (first 35 lines of top priority files) ═══
+    if !priority_files.is_empty() {
+        let mut preview_section = String::from("\n\n═══ CODE PREVIEW ═══");
+        for path in priority_files.iter().take(3) {
+            let full_path = index.root.join(path);
+            if let Ok(content) = std::fs::read_to_string(&full_path) {
+                let lines: String = content
+                    .lines()
+                    .take(35)
+                    .enumerate()
+                    .map(|(i, l)| format!("{:3}| {}", i + 1, l))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                preview_section.push_str(&format!("\n\n── {} ──\n{}", path.display(), lines));
+            }
+        }
+        sections.push(preview_section);
+    }
+
+    // ═══ TIER 3: ALL FILES ═══
+    let all_paths: Vec<_> = index
+        .files
+        .keys()
+        .take(35)
+        .map(|p| p.display().to_string())
+        .collect();
+    if !all_paths.is_empty() {
+        sections.push(format!("\n\n═══ ALL FILES ═══\n{}", all_paths.join("\n")));
+    }
+
+    // ═══ CONTEXT ═══
     let memory_section = format_repo_memory_section(repo_memory, "CONVENTIONS");
     if !memory_section.is_empty() {
         sections.push(memory_section);
     }
 
-    // Glossary
-    if let Some(glossary) = glossary {
-        if !glossary.is_empty() {
-            let terms = glossary.to_prompt_context(10);
+    if let Some(g) = glossary {
+        if !g.is_empty() {
+            let terms = g.to_prompt_context(6);
             if !terms.trim().is_empty() {
                 sections.push(format!("\n\nTERMINOLOGY:\n{}", terms));
             }
         }
     }
 
-    // Instructions - encourage minimal tool use
+    // ═══ INSTRUCTIONS ═══
     sections.push(String::from(
-        "\n\nINSTRUCTIONS:
-Based on the summaries above, identify 10-15 improvement opportunities.
-You may use `head -100 <file>` to verify specific issues, but MINIMIZE tool calls.
-Most suggestions should be derivable from the summaries + your expertise.
-Only read files when you need to confirm a specific detail.
-After gathering evidence, return your suggestions as JSON.",
+        "\n\n═══ YOUR TASK ═══
+Generate AT LEAST 10 suggestions (target 12-15).
+
+TIERED DISCOVERY:
+1. THE GIST → understand project purpose
+2. KEY AREAS → identify interesting modules
+3. PRIORITY FILES → pick files to investigate
+4. Use grep/head to find and read code
+
+SURGICAL COMMANDS (save tokens!):
+• grep -n 'fn foo' <file> → find line number
+• sed -n '45,75p' <file> → read 30 lines around match
+• head -50 <file> → read file start
+• rg 'pattern' → search entire codebase
+
+EXAMPLE WORKFLOW:
+1. See 'handles API calls' in summary
+2. grep -n 'async fn' src/api.rs → find functions
+3. sed -n '120,160p' src/api.rs → read around interesting function
+4. Find issue → record with evidence
+
+RULE: Only suggest issues you've verified by reading actual code.
+Return as JSON array.",
     ));
 
     sections.join("")
