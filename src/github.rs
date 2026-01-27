@@ -3,13 +3,11 @@
 //! Provides OAuth device flow authentication and PR creation without requiring
 //! the `gh` CLI. Tokens are stored securely in the system keychain via keyring.
 
+use crate::keyring;
 use anyhow::{Context, Result};
 use git2::Repository;
-use keyring::Entry;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 // ============================================================================
@@ -33,79 +31,6 @@ use std::time::Duration;
 const CLIENT_ID: &str = "Ov23liBvoDPv3W7Dpjoz";
 
 // ============================================================================
-// Keyring Storage
-// ============================================================================
-
-const KEYRING_SERVICE: &str = "cosmos-github";
-const KEYRING_USERNAME: &str = "github_token";
-
-type KeyringResult = Result<Option<String>, String>;
-
-#[derive(Debug, Default)]
-struct TokenCache {
-    cached: Option<KeyringResult>,
-}
-
-static TOKEN_CACHE: OnceLock<Mutex<TokenCache>> = OnceLock::new();
-static KEYRING_ERROR_WARNED: AtomicBool = AtomicBool::new(false);
-
-fn keyring_entry() -> Result<Entry, keyring::Error> {
-    Entry::new(KEYRING_SERVICE, KEYRING_USERNAME)
-}
-
-fn token_cache() -> &'static Mutex<TokenCache> {
-    TOKEN_CACHE.get_or_init(|| Mutex::new(TokenCache::default()))
-}
-
-fn warn_keychain_error_once(err: &str) {
-    if KEYRING_ERROR_WARNED.swap(true, Ordering::Relaxed) {
-        return;
-    }
-    eprintln!("  Warning: Could not access system keychain for GitHub token: {err}");
-}
-
-fn read_token_cached() -> KeyringResult {
-    let cache = token_cache();
-    let mut guard = match cache.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-
-    if let Some(ref result) = guard.cached {
-        return result.clone();
-    }
-
-    let result = read_token_uncached();
-    guard.cached = Some(result.clone());
-    result
-}
-
-fn read_token_uncached() -> KeyringResult {
-    let entry = keyring_entry().map_err(|err| err.to_string())?;
-    match entry.get_password() {
-        Ok(key) => Ok(Some(key)),
-        Err(keyring::Error::NoEntry) => Ok(None),
-        Err(err) => Err(err.to_string()),
-    }
-}
-
-fn update_token_cache(token: &str) {
-    let cache = token_cache();
-    let mut guard = match cache.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    guard.cached = Some(Ok(Some(token.to_string())));
-}
-
-fn write_token(token: &str) -> Result<(), keyring::Error> {
-    let entry = keyring_entry()?;
-    entry.set_password(token)?;
-    update_token_cache(token);
-    Ok(())
-}
-
-// ============================================================================
 // Token Management
 // ============================================================================
 
@@ -118,12 +43,12 @@ pub fn get_stored_token() -> Option<String> {
         }
     }
 
-    // Try keychain
-    match read_token_cached() {
+    // Try keychain (migration from legacy entries happens automatically)
+    match keyring::get_github_token() {
         Ok(Some(token)) => Some(token),
         Ok(None) => None,
         Err(err) => {
-            warn_keychain_error_once(&err);
+            keyring::warn_keychain_error_once("GitHub token", &err);
             None
         }
     }
@@ -272,7 +197,7 @@ pub async fn run_device_flow<C: DeviceFlowCallbacks>(callbacks: &mut C) -> Resul
 
         if let Some(token) = token_data.access_token {
             // Step 4: Store token and get username
-            if let Err(e) = write_token(&token) {
+            if let Err(e) = keyring::set_github_token(&token) {
                 let err = format!("Failed to store token in keychain: {}", e);
                 callbacks.on_error(&err);
                 return Err(anyhow::anyhow!("{}", err));

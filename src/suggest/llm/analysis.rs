@@ -91,7 +91,7 @@ QUESTION:
 /// Strategy:
 /// 1. Start with synthesized context (summaries, not full files)
 /// 2. Model can make 1-3 targeted tool calls to verify specific issues
-/// 3. Uses gpt-oss-120b for cost efficiency (~$0.02-0.05 total)
+/// 3. Uses gpt-oss-120b for cost efficiency
 ///
 /// This balances accuracy (model can verify) with speed/cost (minimal calls).
 pub async fn analyze_codebase_agentic(
@@ -306,7 +306,7 @@ fn build_lean_analysis_prompt(
     // ═══ INSTRUCTIONS ═══
     sections.push(String::from(
         "\n\n═══ YOUR TASK ═══
-Generate AT LEAST 10 suggestions (target 12-15).
+Generate exactly 10 suggestions.
 
 TIERED DISCOVERY:
 1. THE GIST → understand project purpose

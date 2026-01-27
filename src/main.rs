@@ -12,6 +12,7 @@ mod context;
 mod github;
 mod grouping;
 mod index;
+mod keyring;
 mod onboarding;
 mod suggest;
 mod ui;

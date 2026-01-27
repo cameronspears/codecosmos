@@ -6,7 +6,7 @@
 pub mod llm;
 
 /// Maximum suggestions to display to avoid overwhelming users
-const MAX_SUGGESTIONS: usize = 15;
+const MAX_SUGGESTIONS: usize = 10;
 
 use crate::index::CodebaseIndex;
 use chrono::{DateTime, Utc};
@@ -196,7 +196,7 @@ impl SuggestionEngine {
         self.suggestions.sort_by(|a, b| b.priority.cmp(&a.priority));
     }
 
-    /// Sort suggestions with git context: changed files first, then blast radius, then priority.
+    /// Sort suggestions by priority first, then git context (changed files, blast radius).
     pub fn sort_with_context(&mut self, context: &crate::context::WorkContext) {
         let changed: std::collections::HashSet<PathBuf> =
             context.all_changed_files().into_iter().cloned().collect();
@@ -231,22 +231,24 @@ impl SuggestionEngine {
         };
 
         self.suggestions.sort_by(|a, b| {
+            // Priority is the primary sort criterion
+            let pri = b.priority.cmp(&a.priority);
+            if pri != std::cmp::Ordering::Equal {
+                return pri;
+            }
+
+            // Within the same priority, prefer changed files
             let a_changed = changed.contains(&a.file);
             let b_changed = changed.contains(&b.file);
             if a_changed != b_changed {
                 return b_changed.cmp(&a_changed);
             }
 
+            // Then blast radius files
             let a_blast = blast.contains(&a.file);
             let b_blast = blast.contains(&b.file);
             if a_blast != b_blast {
                 return b_blast.cmp(&a_blast);
-            }
-
-            // Higher priority first
-            let pri = b.priority.cmp(&a.priority);
-            if pri != std::cmp::Ordering::Equal {
-                return pri;
             }
 
             // Then kind weight

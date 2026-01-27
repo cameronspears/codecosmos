@@ -2,94 +2,16 @@
 //!
 //! Stores settings in ~/.config/cosmos/config.json
 
-use keyring::Entry;
+use crate::keyring;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, OnceLock};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
     /// Legacy field for migration - API key is now stored in system keychain
     pub openrouter_api_key: Option<String>,
-}
-
-const KEYRING_SERVICE: &str = "cosmos";
-const KEYRING_USERNAME: &str = "openrouter_api_key";
-
-type KeyringReadResult = Result<Option<String>, String>;
-
-#[derive(Debug, Default)]
-struct KeyringCache {
-    cached: Option<KeyringReadResult>,
-}
-
-static KEYRING_CACHE: OnceLock<Mutex<KeyringCache>> = OnceLock::new();
-static KEYRING_ERROR_WARNED: AtomicBool = AtomicBool::new(false);
-
-fn keyring_entry() -> Result<Entry, keyring::Error> {
-    Entry::new(KEYRING_SERVICE, KEYRING_USERNAME)
-}
-
-fn keyring_cache() -> &'static Mutex<KeyringCache> {
-    KEYRING_CACHE.get_or_init(|| Mutex::new(KeyringCache::default()))
-}
-
-fn warn_keychain_error_once(err: &str) {
-    if KEYRING_ERROR_WARNED.swap(true, Ordering::Relaxed) {
-        return;
-    }
-    eprintln!("  Warning: Couldn't access your system keychain: {}", err);
-    eprintln!("  Tip: When macOS prompts, choose \"Always Allow\" for the \"cosmos\" app.");
-    eprintln!("  Tip: You can also set OPENROUTER_API_KEY to bypass keychain access.");
-}
-
-fn read_keyring_key_with<F>(read_fn: F) -> KeyringReadResult
-where
-    F: FnOnce() -> KeyringReadResult,
-{
-    let cache = keyring_cache();
-    let mut guard = match cache.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    if let Some(cached) = guard.cached.clone() {
-        return cached;
-    }
-    let result = read_fn();
-    guard.cached = Some(result.clone());
-    result
-}
-
-fn read_keyring_key_uncached() -> KeyringReadResult {
-    let entry = keyring_entry().map_err(|err| err.to_string())?;
-    match entry.get_password() {
-        Ok(key) => Ok(Some(key)),
-        Err(keyring::Error::NoEntry) => Ok(None),
-        Err(err) => Err(err.to_string()),
-    }
-}
-
-fn read_keyring_key() -> KeyringReadResult {
-    read_keyring_key_with(read_keyring_key_uncached)
-}
-
-fn update_keyring_cache_after_write(key: &str) {
-    let cache = keyring_cache();
-    let mut guard = match cache.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    guard.cached = Some(Ok(Some(key.to_string())));
-}
-
-fn write_keyring_key(key: &str) -> Result<(), keyring::Error> {
-    let entry = keyring_entry()?;
-    entry.set_password(key)?;
-    update_keyring_cache_after_write(key);
-    Ok(())
 }
 
 impl Config {
@@ -166,25 +88,25 @@ impl Config {
             return Some(key);
         }
 
-        // Try keychain
-        match read_keyring_key() {
+        // Try keychain (migration from legacy entries happens automatically)
+        match keyring::get_api_key() {
             Ok(Some(key)) => return Some(key),
             Ok(None) => {} // No key stored, continue
             Err(err) => {
-                warn_keychain_error_once(&err);
+                keyring::warn_keychain_error_once("API key", &err);
             }
         }
 
-        // DEPRECATED: Legacy migration of plaintext API keys to system keychain.
+        // DEPRECATED: Legacy migration of plaintext API keys from config file.
         // This code path exists to migrate users who stored keys in config before
         // keychain support was added. Once migrated, the plaintext key is removed.
         // TODO: Remove this migration code after 2026-06-01 (6 months from keychain release)
         if let Some(key) = self.openrouter_api_key.clone() {
             eprintln!("  Migrating API key from config file to system keychain...");
-            match write_keyring_key(&key) {
+            match keyring::set_api_key(&key) {
                 Ok(()) => {
                     // Verify migration succeeded
-                    if let Ok(Some(stored)) = read_keyring_key() {
+                    if let Ok(Some(stored)) = keyring::get_api_key() {
                         if stored == key {
                             self.openrouter_api_key = None;
                             let _ = self.save();
@@ -205,16 +127,16 @@ impl Config {
     /// Set and save the API key
     pub fn set_api_key(&mut self, key: &str) -> Result<(), String> {
         // Try to write to keychain
-        if let Err(write_err) = write_keyring_key(key) {
-            return Err(format!(
+        keyring::set_api_key(key).map_err(|e| {
+            format!(
                 "Failed to store API key in system keychain: {}. \
                  You can set the OPENROUTER_API_KEY environment variable instead.",
-                write_err
-            ));
-        }
+                e
+            )
+        })?;
 
         // Verify the write succeeded by reading it back
-        match read_keyring_key() {
+        match keyring::get_api_key() {
             Ok(Some(stored_key)) if stored_key == key => {
                 // Successfully verified - clear any legacy plaintext key from config
                 self.openrouter_api_key = None;
@@ -241,11 +163,11 @@ impl Config {
         if std::env::var("OPENROUTER_API_KEY").is_ok() {
             return true;
         }
-        match read_keyring_key() {
+        match keyring::get_api_key() {
             Ok(Some(_)) => return true,
             Ok(None) => {} // No key stored
             Err(err) => {
-                warn_keychain_error_once(&err);
+                keyring::warn_keychain_error_once("API key", &err);
             }
         }
         // Legacy: check for plaintext key in config (will be migrated on get_api_key)
@@ -355,51 +277,10 @@ fn write_config_atomic(path: &std::path::Path, content: &str) -> Result<(), Stri
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::Cell;
 
     #[test]
     fn test_config_default() {
         let config = Config::default();
         assert!(config.openrouter_api_key.is_none());
-    }
-
-    fn reset_keyring_cache_for_test() {
-        let cache = super::keyring_cache();
-        let mut guard = match cache.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        guard.cached = None;
-    }
-
-    #[test]
-    fn test_keyring_cache_read_once_and_updates_after_write() {
-        reset_keyring_cache_for_test();
-
-        let call_count = Cell::new(0);
-        let first = super::read_keyring_key_with(|| {
-            call_count.set(call_count.get() + 1);
-            Ok(Some("first-key".to_string()))
-        });
-
-        assert_eq!(call_count.get(), 1);
-        assert_eq!(first, Ok(Some("first-key".to_string())));
-
-        let second = super::read_keyring_key_with(|| {
-            call_count.set(call_count.get() + 1);
-            Ok(Some("second-key".to_string()))
-        });
-
-        assert_eq!(call_count.get(), 1);
-        assert_eq!(second, Ok(Some("first-key".to_string())));
-
-        super::update_keyring_cache_after_write("updated-key");
-        let third = super::read_keyring_key_with(|| {
-            call_count.set(call_count.get() + 1);
-            Ok(Some("third-key".to_string()))
-        });
-
-        assert_eq!(call_count.get(), 1);
-        assert_eq!(third, Ok(Some("updated-key".to_string())));
     }
 }

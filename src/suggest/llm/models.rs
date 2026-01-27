@@ -1,40 +1,14 @@
 use serde::Deserialize;
 
-// Model pricing per million tokens (estimated, check OpenRouter for current rates)
-// Speed: openai/gpt-oss-120b - fast, cheap model for summaries
-const SPEED_INPUT_COST: f64 = 0.10; // $0.10 per 1M input tokens
-const SPEED_OUTPUT_COST: f64 = 0.30; // $0.30 per 1M output tokens
-                                     // Fast: anthropic/claude-haiku-4.5 - fast Anthropic model with good instruction following
-const FAST_INPUT_COST: f64 = 0.80; // $0.80 per 1M input tokens
-const FAST_OUTPUT_COST: f64 = 4.0; // $4.00 per 1M output tokens
-                                   // Balanced: anthropic/claude-sonnet-4.5 - good reasoning at medium cost
-const BALANCED_INPUT_COST: f64 = 3.0; // $3 per 1M input tokens
-const BALANCED_OUTPUT_COST: f64 = 15.0; // $15 per 1M output tokens
-                                        // Smart: anthropic/claude-opus-4.5 - best reasoning for code generation
-const SMART_INPUT_COST: f64 = 15.0; // $15 per 1M input tokens
-const SMART_OUTPUT_COST: f64 = 75.0; // $75 per 1M output tokens
-                                     // Coder: openai/gpt-5.2-codex - code-focused model with medium reasoning
-const CODER_INPUT_COST: f64 = 2.5; // $2.50 per 1M input tokens (estimated)
-const CODER_OUTPUT_COST: f64 = 10.0; // $10 per 1M output tokens (estimated)
-                                     // Reviewer: openai/gpt-5.2 - different model family for adversarial bug-finding
-const REVIEWER_INPUT_COST: f64 = 5.0; // $5 per 1M input tokens (estimated)
-const REVIEWER_OUTPUT_COST: f64 = 15.0; // $15 per 1M output tokens (estimated)
-
 /// Models available for suggestions
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Model {
     /// Speed tier - fast, cheap model for summaries and classification (gpt-oss-120b)
     Speed,
-    /// Fast tier - fast Anthropic model with better instruction following (claude-haiku-4.5)
-    Fast,
-    /// Coder tier - code-focused model with medium reasoning (gpt-5.2-codex)
-    Coder,
     /// Balanced tier - good reasoning at medium cost for questions/previews (claude-sonnet-4.5)
     Balanced,
     /// Smart tier - best reasoning for code generation (claude-opus-4.5)
     Smart,
-    /// Reviewer tier - different model family for adversarial bug-finding (gpt-5.2)
-    Reviewer,
 }
 
 /// Maximum tokens for all model tiers
@@ -44,58 +18,37 @@ impl Model {
     pub fn id(&self) -> &'static str {
         match self {
             Model::Speed => "openai/gpt-oss-120b:nitro",
-            Model::Fast => "anthropic/claude-haiku-4.5:nitro",
-            Model::Coder => "openai/gpt-5.2-codex:nitro",
             Model::Balanced => "anthropic/claude-sonnet-4.5:nitro",
             Model::Smart => "anthropic/claude-opus-4.5:nitro",
-            Model::Reviewer => "openai/gpt-5.2:nitro",
         }
     }
 
     pub fn max_tokens(&self) -> u32 {
         MODEL_MAX_TOKENS
     }
-
-    /// Calculate cost in USD based on token usage
-    pub fn calculate_cost(&self, prompt_tokens: u32, completion_tokens: u32) -> f64 {
-        let (input_rate, output_rate) = match self {
-            Model::Speed => (SPEED_INPUT_COST, SPEED_OUTPUT_COST),
-            Model::Fast => (FAST_INPUT_COST, FAST_OUTPUT_COST),
-            Model::Coder => (CODER_INPUT_COST, CODER_OUTPUT_COST),
-            Model::Balanced => (BALANCED_INPUT_COST, BALANCED_OUTPUT_COST),
-            Model::Smart => (SMART_INPUT_COST, SMART_OUTPUT_COST),
-            Model::Reviewer => (REVIEWER_INPUT_COST, REVIEWER_OUTPUT_COST),
-        };
-
-        let input_cost = (prompt_tokens as f64 / 1_000_000.0) * input_rate;
-        let output_cost = (completion_tokens as f64 / 1_000_000.0) * output_rate;
-
-        input_cost + output_cost
-    }
 }
 
 /// API usage information from OpenRouter
 #[derive(Deserialize, Clone, Debug, Default)]
 pub struct Usage {
-    pub prompt_tokens: u32,
-    pub completion_tokens: u32,
-    pub total_tokens: u32,
-    /// Actual cost in USD as reported by OpenRouter (when available)
     #[serde(default)]
+    pub prompt_tokens: u32,
+    #[serde(default)]
+    pub completion_tokens: u32,
+    #[serde(default)]
+    pub total_tokens: u32,
+    /// Actual cost in USD as reported by OpenRouter.
+    /// OpenRouter returns this as `total_cost` in the usage object.
+    #[serde(default, alias = "total_cost")]
     pub cost: Option<f64>,
 }
 
 impl Usage {
-    /// Get the cost for this usage.
-    /// Prefers the actual cost from OpenRouter when available,
-    /// falls back to estimated cost based on hardcoded rates.
-    pub fn calculate_cost(&self, model: Model) -> f64 {
-        // Prefer actual cost from OpenRouter if available
-        if let Some(actual_cost) = self.cost {
-            return actual_cost;
-        }
-        // Fall back to estimate using hardcoded rates
-        model.calculate_cost(self.prompt_tokens, self.completion_tokens)
+    /// Get the actual cost for this usage from OpenRouter.
+    /// Returns the cost reported by OpenRouter, or 0.0 if not available.
+    /// We don't estimate costs - hardcoded rates are always wrong.
+    pub fn cost(&self) -> f64 {
+        self.cost.unwrap_or(0.0)
     }
 }
 
@@ -106,11 +59,8 @@ mod tests {
     #[test]
     fn test_model_ids() {
         assert!(Model::Speed.id().contains("gpt"));
-        assert!(Model::Fast.id().contains("haiku"));
-        assert!(Model::Coder.id().contains("codex"));
         assert!(Model::Balanced.id().contains("claude"));
         assert!(Model::Smart.id().contains("claude"));
-        assert!(Model::Reviewer.id().contains("gpt"));
     }
 
     #[test]
@@ -120,40 +70,36 @@ mod tests {
     }
 
     #[test]
-    fn test_cost_calculation() {
-        // 1000 tokens at Speed tier should cost very little
-        let cost = Model::Speed.calculate_cost(1000, 1000);
-        assert!(cost > 0.0);
-        assert!(cost < 0.01);
-
-        // Smart tier should cost more than Speed
-        let smart_cost = Model::Smart.calculate_cost(1000, 1000);
-        let speed_cost = Model::Speed.calculate_cost(1000, 1000);
-        assert!(smart_cost > speed_cost);
-    }
-
-    #[test]
-    fn test_usage_prefers_actual_cost() {
+    fn test_usage_returns_actual_cost() {
         let usage = Usage {
             prompt_tokens: 1000,
             completion_tokens: 1000,
             total_tokens: 2000,
             cost: Some(0.05),
         };
-        // Should return the actual cost, not calculated
-        assert_eq!(usage.calculate_cost(Model::Speed), 0.05);
+        assert_eq!(usage.cost(), 0.05);
     }
 
     #[test]
-    fn test_usage_falls_back_to_calculated() {
+    fn test_usage_returns_zero_when_no_cost() {
         let usage = Usage {
             prompt_tokens: 1000,
             completion_tokens: 1000,
             total_tokens: 2000,
             cost: None,
         };
-        // Should calculate cost since no actual cost provided
-        let cost = usage.calculate_cost(Model::Speed);
-        assert!(cost > 0.0);
+        // Returns 0.0 when no cost is available (we don't estimate)
+        assert_eq!(usage.cost(), 0.0);
+    }
+
+    #[test]
+    fn test_usage_deserialize_with_total_cost() {
+        // OpenRouter returns "total_cost" in the usage object
+        let json = r#"{"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150, "total_cost": 0.0025}"#;
+        let usage: Usage = serde_json::from_str(json).unwrap();
+        assert_eq!(usage.prompt_tokens, 100);
+        assert_eq!(usage.completion_tokens, 50);
+        assert_eq!(usage.total_tokens, 150);
+        assert_eq!(usage.cost(), 0.0025);
     }
 }

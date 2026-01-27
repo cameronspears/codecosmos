@@ -964,7 +964,6 @@ impl CodebaseIndex {
             file_count: self.files.len(),
             total_loc: self.files.values().map(|f| f.loc).sum(),
             symbol_count: self.symbols.len(),
-            pattern_count: self.patterns.len(),
             skipped_files: self.index_errors.len(),
         }
     }
@@ -992,7 +991,6 @@ pub struct IndexStats {
     pub file_count: usize,
     pub total_loc: usize,
     pub symbol_count: usize,
-    pub pattern_count: usize,
     pub skipped_files: usize,
 }
 

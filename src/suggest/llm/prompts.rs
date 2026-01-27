@@ -118,7 +118,7 @@ WORKFLOW:
 2. Explore structure: ls, find . -name "*.rs" | head -20
 3. Read [CHANGED] files and dependencies first
 4. ONLY suggest issues verified by reading actual code
-5. Return 10-15 findings as JSON
+5. Return exactly 10 findings as JSON
 
 OUTPUT (JSON array):
 [{
@@ -151,7 +151,7 @@ MULTI-FILE: Use "additional_files" for renames, extractions, or interface change
 RULES:
 - Evidence required: include actual code snippet
 - No guessing from file names
-- 10-15 suggestions minimum
+- Return exactly 10 suggestions
 - Return JSON array only, no extra text"#;
 
 pub const GROUPING_CLASSIFY_SYSTEM: &str = r#"Classify files into architectural layers.

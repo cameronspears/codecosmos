@@ -43,7 +43,7 @@ pub fn drain_messages(app: &mut App, rx: &mpsc::Receiver<BackgroundMessage>, ctx
 
                 // Track session cost for display
                 if let Some(u) = usage {
-                    let cost = u.calculate_cost(suggest::llm::Model::Smart);
+                    let cost = u.cost();
                     app.session_cost += cost;
                     app.session_tokens += u.total_tokens;
                     // Refresh wallet balance after spending
@@ -82,7 +82,7 @@ pub fn drain_messages(app: &mut App, rx: &mpsc::Receiver<BackgroundMessage>, ctx
                 app.summary_failed_files = failed_files;
                 // Track session cost for display
                 if let Some(u) = usage {
-                    let cost = u.calculate_cost(suggest::llm::Model::Speed);
+                    let cost = u.cost();
                     app.session_cost += cost;
                     app.session_tokens += u.total_tokens;
                     // Refresh wallet balance after spending
@@ -219,7 +219,7 @@ pub fn drain_messages(app: &mut App, rx: &mpsc::Receiver<BackgroundMessage>, ctx
                 }
 
                 if let Some(u) = usage {
-                    let cost = u.calculate_cost(suggest::llm::Model::Balanced);
+                    let cost = u.cost();
                     app.session_cost += cost;
                     app.session_tokens += u.total_tokens;
                     // Refresh wallet balance after spending
@@ -266,7 +266,7 @@ pub fn drain_messages(app: &mut App, rx: &mpsc::Receiver<BackgroundMessage>, ctx
             } => {
                 // Track session cost for display
                 if let Some(u) = usage {
-                    let cost = u.calculate_cost(suggest::llm::Model::Smart);
+                    let cost = u.cost();
                     app.session_cost += cost;
                     app.session_tokens += u.total_tokens;
                     // Refresh wallet balance after spending
@@ -424,7 +424,7 @@ pub fn drain_messages(app: &mut App, rx: &mpsc::Receiver<BackgroundMessage>, ctx
             BackgroundMessage::QuestionResponse { answer, usage, .. } => {
                 // Track session cost for display
                 if let Some(u) = usage {
-                    let cost = u.calculate_cost(suggest::llm::Model::Balanced);
+                    let cost = u.cost();
                     app.session_cost += cost;
                     app.session_tokens += u.total_tokens;
                     // Refresh wallet balance after spending
@@ -443,7 +443,7 @@ pub fn drain_messages(app: &mut App, rx: &mpsc::Receiver<BackgroundMessage>, ctx
             } => {
                 // Track session cost for display
                 if let Some(u) = &usage {
-                    let cost = u.calculate_cost(suggest::llm::Model::Balanced);
+                    let cost = u.cost();
                     app.session_cost += cost;
                     app.session_tokens += u.total_tokens;
                     // Refresh wallet balance after spending
@@ -468,7 +468,7 @@ pub fn drain_messages(app: &mut App, rx: &mpsc::Receiver<BackgroundMessage>, ctx
             } => {
                 // Track session cost for display
                 if let Some(u) = usage {
-                    let cost = u.calculate_cost(suggest::llm::Model::Reviewer);
+                    let cost = u.cost();
                     app.session_cost += cost;
                     app.session_tokens += u.total_tokens;
                     // Refresh wallet balance after spending
@@ -484,7 +484,7 @@ pub fn drain_messages(app: &mut App, rx: &mpsc::Receiver<BackgroundMessage>, ctx
             } => {
                 // Track session cost for display
                 if let Some(u) = usage {
-                    let cost = u.calculate_cost(suggest::llm::Model::Smart);
+                    let cost = u.cost();
                     app.session_cost += cost;
                     app.session_tokens += u.total_tokens;
                     // Refresh wallet balance after spending
