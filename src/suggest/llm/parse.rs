@@ -36,17 +36,30 @@ fn extract_json_fragment(text: &str, open: char, close: char) -> Option<&str> {
 
 /// Parse suggestions from codebase-wide analysis
 pub(crate) fn parse_codebase_suggestions(response: &str) -> anyhow::Result<Vec<Suggestion>> {
-    let clean = strip_markdown_fences(response);
+    // Handle empty responses gracefully
+    let trimmed = response.trim();
+    if trimmed.is_empty() {
+        return Err(anyhow::anyhow!(
+            "No suggestions received. The AI may have been rate limited or timed out. Try again."
+        ));
+    }
+
+    let clean = strip_markdown_fences(trimmed);
     let sanitized = fix_json_issues(clean);
 
-    // Handle both array format and object-with-suggestions format
-    // Speed preset often returns {"suggestions": [...]} instead of just [...]
+    // Handle multiple LLM response formats:
+    // 1. Array: [...] (expected format)
+    // 2. Object with suggestions key: {"suggestions": [...]}
+    // 3. Single suggestion as object: {file: ..., summary: ...}
     let json_str = if let Some(obj_str) = extract_json_fragment(&sanitized, '{', '}') {
-        // Try to extract "suggestions" array from object
+        // Try to parse as JSON object
         if let Ok(obj) = serde_json::from_str::<serde_json::Value>(obj_str) {
             if let Some(suggestions) = obj.get("suggestions") {
-                // Convert suggestions array back to string for parsing
+                // Format: {"suggestions": [...]}
                 serde_json::to_string(suggestions).unwrap_or_else(|_| obj_str.to_string())
+            } else if obj.get("file").is_some() || obj.get("summary").is_some() {
+                // Format: Single suggestion as object - wrap in array
+                format!("[{}]", obj_str)
             } else {
                 obj_str.to_string()
             }
@@ -56,7 +69,12 @@ pub(crate) fn parse_codebase_suggestions(response: &str) -> anyhow::Result<Vec<S
     } else if let Some(array_str) = extract_json_fragment(&sanitized, '[', ']') {
         array_str.to_string()
     } else {
-        sanitized
+        // No JSON structure found - return a clear error
+        let preview = truncate_str(&sanitized, 100);
+        return Err(anyhow::anyhow!(
+            "No valid JSON found in response. The AI may have returned text instead of suggestions. Preview: {}",
+            if preview.is_empty() { "(empty)" } else { preview }
+        ));
     };
 
     // Try to parse as array first
@@ -594,6 +612,15 @@ mod tests {
         let parsed = parse_codebase_suggestions(json).unwrap();
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].summary, "Issue");
+    }
+
+    #[test]
+    fn test_parse_codebase_suggestions_single_object() {
+        // LLM sometimes returns a single suggestion as an object instead of an array
+        let json = r#"{"file":"src/lib.rs","kind":"bugfix","priority":"high","summary":"Fix bug"}"#;
+        let parsed = parse_codebase_suggestions(json).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].summary, "Fix bug");
     }
 
     // ═══════════════════════════════════════════════════════════════════════════

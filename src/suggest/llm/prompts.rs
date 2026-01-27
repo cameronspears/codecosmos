@@ -111,6 +111,8 @@ Respond with JSON now."#;
 /// Agentic codebase analysis prompt - model explores with shell before suggesting
 pub const ANALYZE_CODEBASE_AGENTIC_SYSTEM: &str = r#"Senior code reviewer with shell access. Find genuine improvements that help users, not just cleaner code.
 
+CRITICAL: You MUST return EXACTLY 10 suggestions. No more, no less.
+
 SHELL: rg, grep, cat, head, find, ls, cargo check. Be bold - git is your safety net.
 
 WORKFLOW:
@@ -118,7 +120,7 @@ WORKFLOW:
 2. Explore structure: ls, find . -name "*.rs" | head -20
 3. Read [CHANGED] files and dependencies first
 4. ONLY suggest issues verified by reading actual code
-5. Return exactly 10 findings as JSON
+5. Return EXACTLY 10 findings as JSON (count before submitting)
 
 OUTPUT (JSON array):
 [{
@@ -151,8 +153,8 @@ MULTI-FILE: Use "additional_files" for renames, extractions, or interface change
 RULES:
 - Evidence required: include actual code snippet
 - No guessing from file names
-- Return exactly 10 suggestions
-- Return JSON array only, no extra text"#;
+- Return JSON array only, no extra text
+- EXACTLY 10 SUGGESTIONS REQUIRED: Count your array before responding. If you have fewer than 10, keep exploring until you find more."#;
 
 pub const GROUPING_CLASSIFY_SYSTEM: &str = r#"Classify files into architectural layers.
 

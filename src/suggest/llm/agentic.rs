@@ -197,6 +197,13 @@ pub async fn call_llm_agentic(
         // Model returned final response (no tool calls)
         let content = choice.message.content.clone().unwrap_or_default();
 
+        // Validate we got actual content
+        if content.trim().is_empty() {
+            return Err(anyhow::anyhow!(
+                "Model returned empty response. This may be due to rate limiting or an API issue. Try again."
+            ));
+        }
+
         return Ok(AgenticResponse { content });
     }
 
@@ -232,6 +239,13 @@ pub async fn call_llm_agentic(
         .first()
         .and_then(|c| c.message.content.clone())
         .unwrap_or_default();
+
+    // Validate we got actual content
+    if content.trim().is_empty() {
+        return Err(anyhow::anyhow!(
+            "Model returned empty response after exploration. This may be due to rate limiting or an API issue. Try again."
+        ));
+    }
 
     Ok(AgenticResponse { content })
 }

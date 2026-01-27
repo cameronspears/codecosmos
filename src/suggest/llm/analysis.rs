@@ -306,7 +306,7 @@ fn build_lean_analysis_prompt(
     // ═══ INSTRUCTIONS ═══
     sections.push(String::from(
         "\n\n═══ YOUR TASK ═══
-Generate exactly 10 suggestions.
+You MUST return EXACTLY 10 suggestions. Not 5, not 8, not 12. Exactly 10.
 
 TIERED DISCOVERY:
 1. THE GIST → understand project purpose
@@ -326,8 +326,10 @@ EXAMPLE WORKFLOW:
 3. sed -n '120,160p' src/api.rs → read around interesting function
 4. Find issue → record with evidence
 
-RULE: Only suggest issues you've verified by reading actual code.
-Return as JSON array.",
+RULES:
+- Only suggest issues you've verified by reading actual code
+- Return as JSON array
+- COUNT YOUR SUGGESTIONS BEFORE RESPONDING: You must have exactly 10 items in the array",
     ));
 
     sections.join("")
