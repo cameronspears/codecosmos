@@ -4,6 +4,10 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 
 /// Create a centered rect using up certain percentage of the available rect
 pub fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+    // Clamp percentages to 0-100 range to prevent underflow
+    let percent_x = percent_x.min(100);
+    let percent_y = percent_y.min(100);
+
     let popup_layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -153,5 +157,16 @@ mod tests {
         assert!(centered.y > 0);
         assert!(centered.width < 100);
         assert!(centered.height < 100);
+    }
+
+    #[test]
+    fn test_centered_rect_clamped_percentages() {
+        use ratatui::layout::Rect;
+        let parent = Rect::new(0, 0, 100, 100);
+        // Should not panic with percentages > 100
+        let centered = centered_rect(150, 200, parent);
+        // When clamped to 100%, the rect should fill the parent
+        assert_eq!(centered.x, 0);
+        assert_eq!(centered.y, 0);
     }
 }

@@ -201,6 +201,7 @@ Use shell tools to explore and verify. Return ONLY the new suggestions as a JSON
 /// The model gets:
 /// - Project context and purpose
 /// - Compact file summaries (what each file does)
+///
 /// Tiers (from high-level to detailed):
 /// 0. The Gist - what the project IS
 /// 1. Key Areas - main directories/modules

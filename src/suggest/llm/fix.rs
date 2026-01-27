@@ -848,7 +848,7 @@ pub async fn generate_fix_preview_agentic(
     let file_content = std::fs::read_to_string(&file_path).unwrap_or_default();
 
     // Extract ~80 lines around the suggestion line for better context
-    let target_line = suggestion.line.unwrap_or(1) as usize;
+    let target_line = suggestion.line.unwrap_or(1);
     let lines: Vec<&str> = file_content.lines().collect();
     let start = target_line.saturating_sub(30).max(0);
     let end = (target_line + 50).min(lines.len());
