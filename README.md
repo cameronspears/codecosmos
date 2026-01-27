@@ -119,6 +119,7 @@ When cosmos starts, you'll see a list of suggestions for your project.
 | Key | What it does |
 |-----|--------------|
 | `↑` `↓` | Move up and down the list |
+| `PageUp` `PageDown` | Jump by page |
 | `Enter` | View details or apply a suggestion |
 | `Tab` | Switch between panels |
 | `?` | Show help |
@@ -128,8 +129,18 @@ When cosmos starts, you'll see a list of suggestions for your project.
 
 1. **Browse suggestions** — Use arrow keys to look through the list
 2. **View details** — Press Enter on any suggestion to see more
-3. **Apply a fix** — When viewing a suggestion, press Enter to preview and apply
-4. **Undo** — Press `u` to undo the last change
+3. **Preview the fix** — Press Enter to see what will change and verify the issue
+4. **Toggle details** — Press `d` during preview to show/hide technical details
+5. **Apply the fix** — Press Enter again to apply
+6. **Undo** — Press `u` to undo the last change
+
+### During Review (after applying a fix)
+
+| Key | What it does |
+|-----|--------------|
+| `Space` | Toggle selection of a finding |
+| `a` | Select all findings |
+| `f` | Fix selected findings |
 
 ### Other features
 
@@ -138,6 +149,7 @@ When cosmos starts, you'll see a list of suggestions for your project.
 | `/` | Search through suggestions |
 | `i` | Ask cosmos a question about your code |
 | `g` | Toggle between grouped and flat view |
+| `R` | Re-scan the codebase |
 | `Esc` | Go back or cancel |
 
 ---
@@ -242,23 +254,35 @@ cosmos --version
 
 ## How Cosmos Works Under the Hood
 
+### Model Tiers
+
+Cosmos uses three model tiers via OpenRouter, optimized for cost and quality:
+
+| Tier | Model | Purpose |
+|------|-------|---------|
+| **Speed** | GPT-OSS-120B | Fast exploration, summaries, verification |
+| **Balanced** | Claude Sonnet 4.5 | Questions, classification |
+| **Smart** | Claude Opus 4.5 | Code generation, applying fixes |
+
 ### Indexing
 
-Cosmos indexes your codebase using AST parsing for structural understanding — functions, classes, imports, dependencies. The index is cached in `.cosmos/` so subsequent runs are faster.
+Cosmos indexes your codebase using AST parsing for structural understanding — functions, classes, imports, dependencies. The index is cached in `.cosmos/` so subsequent runs are faster. File summaries and a domain glossary are generated to help the AI understand your project's context.
 
 ### Analysis
 
-Code context is sent to AI models via OpenRouter. Payload size is limited — large files use excerpts, and results are batched for efficiency.
+The Speed model explores your codebase with tool access (grep, head, sed) to find issues. It uses compact context — file summaries rather than full content — then surgically reads specific sections to verify findings. Results are batched for efficiency.
 
 ### Fix Generation
 
 Fixes use a two-phase approach:
-1. **Preview:** A balanced model verifies the issue and plans the fix
-2. **Apply:** A more capable model implements the changes as surgical search-and-replace edits
+1. **Preview (Speed):** Verifies the issue exists and generates a human-readable plan
+2. **Apply (Smart):** Implements changes as surgical search-and-replace edits with structured JSON output
+
+Prompt caching reduces costs by ~90% on repeated operations.
 
 ### Adversarial Review
 
-After applying a fix, a *different* AI model reviews the changes. This cognitive diversity helps catch issues the implementing model might miss.
+After applying a fix, the Speed model reviews the diff with tool access to explore context. If issues are found, the Smart model applies corrections. This separation of concerns helps catch issues the implementing model might miss.
 
 ---
 
@@ -287,7 +311,7 @@ Ignore it. Cosmos won't apply changes without your approval.
 Yes. See the [Privacy & Security](#privacy--security) section for data handling details.
 
 **Can I use my own OpenAI/Anthropic API key?**
-Currently, Cosmos works through OpenRouter, which provides access to models from multiple providers through a single API.
+Cosmos works through OpenRouter, which routes to multiple providers (OpenAI, Anthropic) through a single API. Your OpenRouter key gives you access to all the models Cosmos uses.
 
 ---
 
