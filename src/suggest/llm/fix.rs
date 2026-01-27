@@ -1,13 +1,12 @@
 use super::agentic::call_llm_agentic;
-use super::client::{call_llm_with_usage, LlmResponse};
+use super::client::{call_llm_structured, StructuredResponse};
 use super::models::{Model, Usage};
-use super::parse::{
-    merge_usage, parse_json_with_retry, truncate_content, truncate_content_around_line,
-};
+use super::parse::{parse_json_with_retry, truncate_content, truncate_content_around_line};
 use super::prompt_utils::format_repo_memory_section;
 use super::prompts::{fix_content_system, multi_file_fix_system, FIX_PREVIEW_AGENTIC_SYSTEM};
 use crate::suggest::Suggestion;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -210,29 +209,8 @@ fn is_context_limit_error(message: &str) -> bool {
     has_context && has_limit
 }
 
-async fn call_llm_with_fallback(
-    system: &str,
-    user_full: &str,
-    user_excerpt: &str,
-    model: Model,
-    json_mode: bool,
-) -> anyhow::Result<LlmResponse> {
-    match call_llm_with_usage(system, user_full, model, json_mode).await {
-        Ok(response) => Ok(response),
-        Err(err) => {
-            let message = err.to_string();
-            // Handle context limit by trying with smaller excerpt
-            if is_context_limit_error(&message) && user_full != user_excerpt {
-                call_llm_with_usage(system, user_excerpt, model, json_mode).await
-            } else {
-                Err(err)
-            }
-        }
-    }
-}
-
 /// A single search/replace edit operation
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct EditOp {
     /// The exact text to find (must match exactly once in the file)
     pub(crate) old_string: String,
@@ -240,14 +218,79 @@ pub(crate) struct EditOp {
     pub(crate) new_string: String,
 }
 
-/// Response structure for fix generation (used for JSON parsing with retry)
-#[derive(Debug, Clone, Deserialize)]
+/// Response structure for fix generation
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct FixResponse {
     #[serde(default)]
     pub(crate) description: Option<String>,
     #[serde(default)]
     pub(crate) modified_areas: Vec<String>,
     pub(crate) edits: Vec<EditOp>,
+}
+
+/// JSON Schema for FixResponse - used for structured output
+pub(crate) fn fix_response_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "description": {
+                "type": "string",
+                "description": "Brief description of what was changed"
+            },
+            "modified_areas": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "List of functions/areas that were modified"
+            },
+            "edits": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "old_string": {
+                            "type": "string",
+                            "description": "Exact text to find (must match exactly once)"
+                        },
+                        "new_string": {
+                            "type": "string",
+                            "description": "Replacement text"
+                        }
+                    },
+                    "required": ["old_string", "new_string"],
+                    "additionalProperties": false
+                },
+                "description": "Search/replace edit operations"
+            }
+        },
+        "required": ["edits"],
+        "additionalProperties": false
+    })
+}
+
+/// Call LLM with structured output and fallback for context limits
+async fn call_llm_structured_with_fallback<T>(
+    system: &str,
+    user_full: &str,
+    user_excerpt: &str,
+    model: Model,
+    schema_name: &str,
+    schema: serde_json::Value,
+) -> anyhow::Result<StructuredResponse<T>>
+where
+    T: serde::de::DeserializeOwned,
+{
+    match call_llm_structured::<T>(system, user_full, model, schema_name, schema.clone()).await {
+        Ok(response) => Ok(response),
+        Err(err) => {
+            let message = err.to_string();
+            // Handle context limit by trying with smaller excerpt
+            if is_context_limit_error(&message) && user_full != user_excerpt {
+                call_llm_structured::<T>(system, user_excerpt, model, schema_name, schema).await
+            } else {
+                Err(err)
+            }
+        }
+    }
 }
 
 /// Generate the actual fixed code content based on a human-language plan.
@@ -309,27 +352,23 @@ pub async fn generate_fix_content(
         &prompt_content.content,
     );
 
-    let response = call_llm_with_fallback(
+    // Use structured output to guarantee valid JSON - eliminates parse failures
+    let response: StructuredResponse<FixResponse> = call_llm_structured_with_fallback(
         &fix_content_system(),
         &user_full,
         &user_excerpt,
         Model::Smart,
-        true,
+        "fix_response",
+        fix_response_schema(),
     )
     .await?;
 
-    // Parse the JSON response with self-correction on failure
-    let (parsed, correction_usage): (FixResponse, _) =
-        parse_json_with_retry(&response.content, "fix generation").await?;
-
-    // Merge usage from correction call if any
-    let total_usage = merge_usage(response.usage, correction_usage);
-
-    let description = parsed
+    let description = response
+        .data
         .description
         .unwrap_or_else(|| "Applied the requested fix".to_string());
-    let modified_areas = parsed.modified_areas;
-    let edits = parsed.edits;
+    let modified_areas = response.data.modified_areas;
+    let edits = response.data.edits;
 
     if edits.is_empty() {
         return Err(anyhow::anyhow!("No edits provided in response"));
@@ -350,7 +389,7 @@ pub async fn generate_fix_content(
         description,
         new_content,
         modified_areas,
-        usage: total_usage,
+        usage: response.usage,
     })
 }
 
@@ -479,18 +518,67 @@ pub struct FileInput {
 }
 
 /// Edits for a single file in the JSON response
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct FileEditsJson {
     file: String,
     edits: Vec<EditOp>,
 }
 
 /// Response structure for multi-file fix generation
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct MultiFileFixResponse {
     #[serde(default)]
     description: Option<String>,
     file_edits: Vec<FileEditsJson>,
+}
+
+/// JSON Schema for MultiFileFixResponse - used for structured output
+fn multi_file_fix_response_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "description": {
+                "type": "string",
+                "description": "Brief description of what was changed across files"
+            },
+            "file_edits": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "file": {
+                            "type": "string",
+                            "description": "Path to the file being edited"
+                        },
+                        "edits": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "old_string": {
+                                        "type": "string",
+                                        "description": "Exact text to find (must match exactly once)"
+                                    },
+                                    "new_string": {
+                                        "type": "string",
+                                        "description": "Replacement text"
+                                    }
+                                },
+                                "required": ["old_string", "new_string"],
+                                "additionalProperties": false
+                            },
+                            "description": "Search/replace edit operations for this file"
+                        }
+                    },
+                    "required": ["file", "edits"],
+                    "additionalProperties": false
+                },
+                "description": "Edits grouped by file"
+            }
+        },
+        "required": ["file_edits"],
+        "additionalProperties": false
+    })
 }
 
 /// Generate coordinated fixes across multiple files
@@ -588,26 +676,22 @@ pub async fn generate_multi_file_fix(
         &files_section_excerpt,
     );
 
-    let response = call_llm_with_fallback(
+    // Use structured output to guarantee valid JSON - eliminates parse failures
+    let response: StructuredResponse<MultiFileFixResponse> = call_llm_structured_with_fallback(
         &multi_file_fix_system(),
         &user_full,
         &user_excerpt,
         Model::Smart,
-        true,
+        "multi_file_fix_response",
+        multi_file_fix_response_schema(),
     )
     .await?;
 
-    // Parse the JSON response with self-correction on failure
-    let (parsed, correction_usage): (MultiFileFixResponse, _) =
-        parse_json_with_retry(&response.content, "multi-file fix").await?;
-
-    // Merge usage from correction call if any
-    let total_usage = merge_usage(response.usage, correction_usage);
-
-    let description = parsed
+    let description = response
+        .data
         .description
         .unwrap_or_else(|| "Applied the requested multi-file fix".to_string());
-    let file_edits_json = parsed.file_edits;
+    let file_edits_json = response.data.file_edits;
 
     if file_edits_json.is_empty() {
         return Err(anyhow::anyhow!("No file edits provided in response"));
@@ -650,7 +734,7 @@ pub async fn generate_multi_file_fix(
     Ok(MultiFileAppliedFix {
         description,
         file_edits,
-        usage: total_usage,
+        usage: response.usage,
     })
 }
 

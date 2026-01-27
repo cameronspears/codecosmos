@@ -1,8 +1,11 @@
 use super::agentic::call_llm_agentic;
-use super::client::call_llm_with_usage;
-use super::fix::{apply_edits_with_context, normalize_generated_content, AppliedFix, FixResponse};
+use super::client::{call_llm_structured, StructuredResponse};
+use super::fix::{
+    apply_edits_with_context, fix_response_schema, normalize_generated_content, AppliedFix,
+    FixResponse,
+};
 use super::models::{Model, Usage};
-use super::parse::{merge_usage, parse_json_with_retry};
+use super::parse::parse_json_with_retry;
 use super::prompt_utils::format_repo_memory_section;
 use super::prompts::{review_fix_system_prompt, review_system_prompt};
 use serde::{Deserialize, Serialize};
@@ -300,21 +303,22 @@ pub async fn fix_review_findings(
         content
     );
 
-    // Always use Smart model for fixes - getting it right the first time saves iterations
-    let response = call_llm_with_usage(&system, &user, Model::Smart, true).await?;
+    // Use structured output - guarantees valid JSON matching FixResponse schema
+    let response: StructuredResponse<FixResponse> = call_llm_structured(
+        &system,
+        &user,
+        Model::Smart,
+        "fix_response",
+        fix_response_schema(),
+    )
+    .await?;
 
-    // Parse the JSON response with self-correction on failure
-    let (parsed, correction_usage): (FixResponse, _) =
-        parse_json_with_retry(&response.content, "review fix").await?;
-
-    // Merge usage from correction call if any
-    let total_usage = merge_usage(response.usage, correction_usage);
-
-    let description = parsed
+    let description = response
+        .data
         .description
         .unwrap_or_else(|| "Fixed review findings".to_string());
-    let modified_areas = parsed.modified_areas;
-    let edits = parsed.edits;
+    let modified_areas = response.data.modified_areas;
+    let edits = response.data.edits;
 
     if edits.is_empty() {
         return Err(anyhow::anyhow!("No edits provided in response"));
@@ -334,6 +338,6 @@ pub async fn fix_review_findings(
         description,
         new_content,
         modified_areas,
-        usage: total_usage,
+        usage: response.usage,
     })
 }

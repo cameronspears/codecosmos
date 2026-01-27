@@ -4,10 +4,10 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 /// OpenRouter direct API URL (BYOK mode)
-const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
+pub(crate) const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
 
 /// Get the configured OpenRouter API key, if any.
-fn api_key() -> Option<String> {
+pub(crate) fn api_key() -> Option<String> {
     let mut config = Config::load();
     config.get_api_key()
 }
@@ -39,10 +39,26 @@ struct ProviderConfig {
     allow_fallbacks: bool,
 }
 
+/// Response format configuration for OpenRouter
+/// Supports both simple JSON mode and structured output with schema
 #[derive(Serialize)]
 struct ResponseFormat {
     #[serde(rename = "type")]
     format_type: String,
+    /// JSON Schema for structured output (optional)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    json_schema: Option<JsonSchemaWrapper>,
+}
+
+/// Wrapper for JSON Schema in structured output mode
+#[derive(Serialize)]
+struct JsonSchemaWrapper {
+    /// Name of the schema (used for reference)
+    name: String,
+    /// Whether to strictly enforce the schema
+    strict: bool,
+    /// The JSON schema definition
+    schema: serde_json::Value,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -55,19 +71,6 @@ struct Message {
 struct ChatResponse {
     choices: Vec<Choice>,
     usage: Option<Usage>,
-}
-
-/// OpenRouter error response (can come with 200 status for upstream errors)
-#[derive(Deserialize)]
-struct ErrorResponse {
-    error: ApiError,
-}
-
-#[derive(Deserialize)]
-struct ApiError {
-    message: String,
-    #[serde(default)]
-    code: Option<i32>,
 }
 
 #[derive(Deserialize)]
@@ -86,10 +89,10 @@ pub fn is_available() -> bool {
 }
 
 /// Rate limit retry configuration
-const MAX_RETRIES: u32 = 3;
-const INITIAL_BACKOFF_MS: u64 = 2000; // 2 seconds
-const BACKOFF_MULTIPLIER: u64 = 2; // Exponential backoff
-const REQUEST_TIMEOUT_SECS: u64 = 60;
+pub(crate) const MAX_RETRIES: u32 = 3;
+pub(crate) const INITIAL_BACKOFF_MS: u64 = 2000; // 2 seconds
+pub(crate) const BACKOFF_MULTIPLIER: u64 = 2; // Exponential backoff
+pub(crate) const REQUEST_TIMEOUT_SECS: u64 = 60;
 
 /// Extract retry-after hint from OpenRouter response (if present)
 fn parse_retry_after(text: &str) -> Option<u64> {
@@ -110,7 +113,7 @@ fn parse_retry_after(text: &str) -> Option<u64> {
     None
 }
 
-fn backoff_secs(retry_count: u32) -> u64 {
+pub(crate) fn backoff_secs(retry_count: u32) -> u64 {
     let factor = BACKOFF_MULTIPLIER.pow(retry_count.saturating_sub(1));
     let ms = INITIAL_BACKOFF_MS.saturating_mul(factor);
     let secs = ms / 1000;
@@ -121,69 +124,49 @@ fn backoff_secs(retry_count: u32) -> u64 {
     }
 }
 
-fn is_retryable_network_error(err: &reqwest::Error) -> bool {
+pub(crate) fn is_retryable_network_error(err: &reqwest::Error) -> bool {
     err.is_timeout() || err.is_connect()
 }
 
-/// Call LLM API with full response including usage stats
-/// Includes automatic retry with exponential backoff for rate limits
-pub(crate) async fn call_llm_with_usage(
-    system: &str,
-    user: &str,
-    model: Model,
-    json_mode: bool,
-) -> anyhow::Result<LlmResponse> {
-    let api_key = api_key().ok_or_else(|| {
-        anyhow::anyhow!("No API key configured. Run 'cosmos --setup' to get started.")
-    })?;
+/// OpenRouter error response (can come with 200 status for upstream errors)
+#[derive(Deserialize)]
+pub(crate) struct OpenRouterError {
+    pub error: OpenRouterApiError,
+}
 
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
-        .build()
-        .map_err(map_timeout_error)?;
-    let url = OPENROUTER_URL;
+#[derive(Deserialize)]
+pub(crate) struct OpenRouterApiError {
+    pub message: String,
+    #[serde(default)]
+    pub code: Option<i32>,
+}
 
-    let response_format = if json_mode {
-        Some(ResponseFormat {
-            format_type: "json_object".to_string(),
-        })
-    } else {
-        None
-    };
-
-    let request = ChatRequest {
-        model: model.id().to_string(),
-        messages: vec![
-            Message {
-                role: "system".to_string(),
-                content: system.to_string(),
-            },
-            Message {
-                role: "user".to_string(),
-                content: user.to_string(),
-            },
-        ],
-        max_tokens: model.max_tokens(),
-        stream: false,
-        response_format,
-        // Enable OpenRouter's automatic provider fallback
-        provider: Some(ProviderConfig {
-            allow_fallbacks: true,
-        }),
-    };
-
+/// Send a request to OpenRouter with automatic retry on transient failures.
+///
+/// Handles:
+/// - Network errors (timeout, connection failures)
+/// - Rate limits (429)
+/// - Server errors (5xx)
+/// - OpenRouter's 200-with-error responses
+///
+/// Returns the response text on success, or an error after all retries exhausted.
+pub(crate) async fn send_with_retry<T: Serialize>(
+    client: &reqwest::Client,
+    api_key: &str,
+    request_body: &T,
+) -> anyhow::Result<String> {
     let mut last_error = String::new();
     let mut retry_count = 0;
 
     while retry_count <= MAX_RETRIES {
         // Build request with OpenRouter headers
         let response = match client
-            .post(url)
+            .post(OPENROUTER_URL)
             .header("Content-Type", "application/json")
             .header("HTTP-Referer", "https://cosmos.dev")
             .header("X-Title", "Cosmos")
             .header("Authorization", format!("Bearer {}", api_key))
-            .json(&request)
+            .json(request_body)
             .send()
             .await
         {
@@ -193,7 +176,6 @@ pub(crate) async fn call_llm_with_usage(
                 if is_retryable_network_error(&err) && retry_count < MAX_RETRIES {
                     retry_count += 1;
                     let retry_after = backoff_secs(retry_count);
-                    // Silent retry - final error shown via toast if all retries fail
                     tokio::time::sleep(tokio::time::Duration::from_secs(retry_after)).await;
                     continue;
                 }
@@ -209,7 +191,6 @@ pub(crate) async fn call_llm_with_usage(
                 if is_retryable_network_error(&err) && retry_count < MAX_RETRIES {
                     retry_count += 1;
                     let retry_after = backoff_secs(retry_count);
-                    // Silent retry - final error shown via toast if all retries fail
                     tokio::time::sleep(tokio::time::Duration::from_secs(retry_after)).await;
                     continue;
                 }
@@ -219,18 +200,16 @@ pub(crate) async fn call_llm_with_usage(
 
         if status.is_success() {
             // OpenRouter sometimes returns errors with 200 status (upstream provider issues)
-            // Check for error response first
-            if let Ok(err_resp) = serde_json::from_str::<ErrorResponse>(&text) {
+            if let Ok(err_resp) = serde_json::from_str::<OpenRouterError>(&text) {
                 let is_retryable = err_resp
                     .error
                     .code
                     .map(|c| c >= 500 || c == 429)
-                    .unwrap_or(true); // Assume retryable if no code
+                    .unwrap_or(true);
 
                 if is_retryable && retry_count < MAX_RETRIES {
                     retry_count += 1;
                     let retry_after = backoff_secs(retry_count);
-                    // Silent retry - final error shown via toast if all retries fail
                     tokio::time::sleep(tokio::time::Duration::from_secs(retry_after)).await;
                     continue;
                 }
@@ -241,41 +220,23 @@ pub(crate) async fn call_llm_with_usage(
                 ));
             }
 
-            let parsed: ChatResponse = serde_json::from_str(&text).map_err(|e| {
-                anyhow::anyhow!("Failed to parse OpenRouter response: {}\n{}", e, text)
-            })?;
-
-            let content = parsed
-                .choices
-                .first()
-                .map(|c| c.message.content.clone())
-                .unwrap_or_default();
-
-            return Ok(LlmResponse {
-                content,
-                usage: parsed.usage,
-            });
+            return Ok(text);
         }
 
         last_error = text.clone();
 
-        // Check if we should retry (rate limits)
+        // Rate limit - retry with backoff
         if status.as_u16() == 429 && retry_count < MAX_RETRIES {
             retry_count += 1;
-
-            // Try to parse retry-after
             let retry_after = parse_retry_after(&text).unwrap_or_else(|| backoff_secs(retry_count));
-
-            // Silent retry - rate limit shown via toast if all retries fail
             tokio::time::sleep(tokio::time::Duration::from_secs(retry_after)).await;
             continue;
         }
 
-        // Retry transient server errors
+        // Server errors - retry with backoff
         if status.is_server_error() && retry_count < MAX_RETRIES {
             retry_count += 1;
             let retry_after = backoff_secs(retry_count);
-            // Silent retry - final error shown via toast if all retries fail
             tokio::time::sleep(tokio::time::Duration::from_secs(retry_after)).await;
             continue;
         }
@@ -296,8 +257,168 @@ pub(crate) async fn call_llm_with_usage(
         return Err(anyhow::anyhow!("{}", error_msg));
     }
 
-    // Should not reach here, but handle it gracefully
+    // Should not reach here, but handle gracefully
     Err(anyhow::anyhow!("{}", last_error))
+}
+
+/// Create a configured HTTP client for OpenRouter requests
+pub(crate) fn create_http_client(timeout_secs: u64) -> anyhow::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(timeout_secs))
+        .build()
+        .map_err(|e| anyhow::anyhow!("Failed to create HTTP client: {}", e))
+}
+
+/// Call LLM API with full response including usage stats
+/// Includes automatic retry with exponential backoff for rate limits
+pub(crate) async fn call_llm_with_usage(
+    system: &str,
+    user: &str,
+    model: Model,
+    json_mode: bool,
+) -> anyhow::Result<LlmResponse> {
+    let api_key = api_key().ok_or_else(|| {
+        anyhow::anyhow!("No API key configured. Run 'cosmos --setup' to get started.")
+    })?;
+
+    let client = create_http_client(REQUEST_TIMEOUT_SECS)?;
+
+    let response_format = if json_mode {
+        Some(ResponseFormat {
+            format_type: "json_object".to_string(),
+            json_schema: None,
+        })
+    } else {
+        None
+    };
+
+    let request = ChatRequest {
+        model: model.id().to_string(),
+        messages: vec![
+            Message {
+                role: "system".to_string(),
+                content: system.to_string(),
+            },
+            Message {
+                role: "user".to_string(),
+                content: user.to_string(),
+            },
+        ],
+        max_tokens: model.max_tokens(),
+        stream: false,
+        response_format,
+        provider: Some(ProviderConfig {
+            allow_fallbacks: true,
+        }),
+    };
+
+    let text = send_with_retry(&client, &api_key, &request).await?;
+
+    let parsed: ChatResponse = serde_json::from_str(&text)
+        .map_err(|e| anyhow::anyhow!("Failed to parse OpenRouter response: {}\n{}", e, text))?;
+
+    let content = parsed
+        .choices
+        .first()
+        .map(|c| c.message.content.clone())
+        .unwrap_or_default();
+
+    Ok(LlmResponse {
+        content,
+        usage: parsed.usage,
+    })
+}
+
+/// Response from structured output call - parsed JSON and usage stats
+#[derive(Debug)]
+pub struct StructuredResponse<T> {
+    pub data: T,
+    pub usage: Option<Usage>,
+}
+
+/// Call LLM API with structured output - guarantees valid JSON matching the schema.
+///
+/// Uses OpenRouter's structured output feature to eliminate JSON parsing failures.
+/// The response is guaranteed to be valid JSON that matches the provided schema.
+///
+/// # Arguments
+/// * `system` - System prompt
+/// * `user` - User message
+/// * `model` - Model to use
+/// * `schema_name` - Name for the schema (e.g., "fix_content")
+/// * `schema` - JSON Schema definition (must be a valid JSON Schema object)
+///
+/// # Returns
+/// Parsed response matching type T and usage stats
+pub(crate) async fn call_llm_structured<T>(
+    system: &str,
+    user: &str,
+    model: Model,
+    schema_name: &str,
+    schema: serde_json::Value,
+) -> anyhow::Result<StructuredResponse<T>>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let api_key = api_key().ok_or_else(|| {
+        anyhow::anyhow!("No API key configured. Run 'cosmos --setup' to get started.")
+    })?;
+
+    let client = create_http_client(REQUEST_TIMEOUT_SECS)?;
+
+    let response_format = ResponseFormat {
+        format_type: "json_schema".to_string(),
+        json_schema: Some(JsonSchemaWrapper {
+            name: schema_name.to_string(),
+            strict: true,
+            schema,
+        }),
+    };
+
+    let request = ChatRequest {
+        model: model.id().to_string(),
+        messages: vec![
+            Message {
+                role: "system".to_string(),
+                content: system.to_string(),
+            },
+            Message {
+                role: "user".to_string(),
+                content: user.to_string(),
+            },
+        ],
+        max_tokens: model.max_tokens(),
+        stream: false,
+        response_format: Some(response_format),
+        provider: Some(ProviderConfig {
+            allow_fallbacks: true,
+        }),
+    };
+
+    let text = send_with_retry(&client, &api_key, &request).await?;
+
+    let parsed: ChatResponse = serde_json::from_str(&text)
+        .map_err(|e| anyhow::anyhow!("Failed to parse OpenRouter response: {}\n{}", e, text))?;
+
+    let content = parsed
+        .choices
+        .first()
+        .map(|c| c.message.content.clone())
+        .unwrap_or_default();
+
+    // The structured output guarantees valid JSON - parse directly
+    let data: T = serde_json::from_str(&content).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to parse structured response (this should not happen): {}\nContent: {}",
+            e,
+            truncate_str(&content, 200)
+        )
+    })?;
+
+    Ok(StructuredResponse {
+        data,
+        usage: parsed.usage,
+    })
 }
 
 fn map_timeout_error(err: reqwest::Error) -> anyhow::Error {

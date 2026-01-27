@@ -3,15 +3,11 @@
 //! Enables models to explore codebases by calling tools (grep, read, ls)
 //! in a loop until they have enough context to complete their task.
 
+use super::client::{api_key, create_http_client, send_with_retry, REQUEST_TIMEOUT_SECS};
 use super::models::Model;
 use super::tools::{execute_tool, get_tool_definitions, ToolCall, ToolDefinition};
-use crate::config::Config;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use std::time::Duration;
-
-const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
-const REQUEST_TIMEOUT_SECS: u64 = 45; // Reasonable timeout - fail fast if API is slow
 
 /// Response from an agentic LLM call
 #[derive(Debug)]
@@ -85,25 +81,11 @@ struct ResponseMessage {
     tool_calls: Option<Vec<ToolCallMessage>>,
 }
 
-#[derive(Deserialize)]
-struct ErrorResponse {
-    error: ApiError,
-}
-
-#[derive(Deserialize)]
-struct ApiError {
-    message: String,
-}
-
-fn api_key() -> Option<String> {
-    let mut config = Config::load();
-    config.get_api_key()
-}
-
 /// Call LLM with tool-calling capability.
 ///
 /// The model can call tools (grep, read, ls) to explore the codebase.
 /// The function loops until the model returns a final text response.
+/// Now includes automatic retry with exponential backoff for transient failures.
 ///
 /// `max_iterations`: Maximum tool-calling rounds before forcing a response.
 /// - Suggestions: 8 (needs exploration)
@@ -121,9 +103,7 @@ pub async fn call_llm_agentic(
         anyhow::anyhow!("No API key configured. Run 'cosmos --setup' to get started.")
     })?;
 
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
-        .build()?;
+    let client = create_http_client(REQUEST_TIMEOUT_SECS)?;
 
     let tools = get_tool_definitions();
     let mut messages = vec![
@@ -167,26 +147,8 @@ pub async fn call_llm_agentic(
             }),
         };
 
-        let response = client
-            .post(OPENROUTER_URL)
-            .header("Content-Type", "application/json")
-            .header("HTTP-Referer", "https://cosmos.dev")
-            .header("X-Title", "Cosmos")
-            .header("Authorization", format!("Bearer {}", api_key))
-            .json(&request)
-            .send()
-            .await?;
-
-        let status = response.status();
-        let text = response.text().await?;
-
-        if !status.is_success() {
-            // Check for error response
-            if let Ok(err_resp) = serde_json::from_str::<ErrorResponse>(&text) {
-                return Err(anyhow::anyhow!("API error: {}", err_resp.error.message));
-            }
-            return Err(anyhow::anyhow!("API error {}: {}", status, text));
-        }
+        // Use shared retry helper - handles timeouts, rate limits, server errors
+        let text = send_with_retry(&client, &api_key, &request).await?;
 
         let parsed: ChatResponse = serde_json::from_str(&text)
             .map_err(|e| anyhow::anyhow!("Failed to parse response: {}\n{}", e, text))?;
@@ -259,17 +221,9 @@ pub async fn call_llm_agentic(
         }),
     };
 
-    let response = client
-        .post(OPENROUTER_URL)
-        .header("Content-Type", "application/json")
-        .header("HTTP-Referer", "https://cosmos.dev")
-        .header("X-Title", "Cosmos")
-        .header("Authorization", format!("Bearer {}", api_key))
-        .json(&final_request)
-        .send()
-        .await?;
+    // Use shared retry helper for final request too
+    let text = send_with_retry(&client, &api_key, &final_request).await?;
 
-    let text = response.text().await?;
     let parsed: ChatResponse = serde_json::from_str(&text)
         .map_err(|e| anyhow::anyhow!("Failed to parse final response: {}\n{}", e, text))?;
 
